@@ -15,6 +15,10 @@ enough to do better, and these are defaults, not derived facts:
 - Party.party_type: clients/proveedores don't distinguish person vs
   organization at all. clients defaults to PERSON, proveedores defaults
   to ORGANIZATION.
+- CatalogItem.item_type: `productos.tipo` (libracore >= v0.17.0) maps
+  'servicio' -> SERVICE and 'producto' -> PRODUCT. Instances still on an
+  older libracore (no `tipo` column yet — checked via PRAGMA table_info,
+  not assumed) default to PRODUCT, matching the column's own default.
 - CatalogItem.unit: `productos.unidad` is free text ("u", "kg", "l"...)
   with no fraction/decimal-scale metadata, so allows_fraction/
   decimal_scale always default to False/0.
@@ -112,21 +116,24 @@ def _resolve_category_id(conn: sqlite3.Connection, categoria_nombre: str | None)
 
 
 def read_catalog_items(conn: sqlite3.Connection) -> list[CatalogItem]:
-    rows = conn.execute(
-        """
-        SELECT id, nombre, descripcion, categoria, unidad, activo, vendible,
-               precio_venta, precio_costo, estacion
-        FROM productos
-        """
-    ).fetchall()
+    has_tipo = any(row[1] == "tipo" for row in conn.execute("PRAGMA table_info(productos)"))
+    columns = (
+        "id, nombre, descripcion, categoria, unidad, activo, vendible, "
+        "precio_venta, precio_costo, estacion"
+    )
+    if has_tipo:
+        columns += ", tipo"
+    rows = conn.execute(f"SELECT {columns} FROM productos").fetchall()
     items = []
     for row in rows:
         unit_code = row[4] or "u"
         metadata = {"estacion": row[9]} if row[9] else {}
+        tipo = row[10] if has_tipo else "producto"
+        item_type = CatalogItemType.SERVICE if tipo == "servicio" else CatalogItemType.PRODUCT
         items.append(
             CatalogItem(
                 id=row[0],
-                item_type=CatalogItemType.PRODUCT,
+                item_type=item_type,
                 name=row[1],
                 unit=Unit(code=unit_code, name=unit_code, allows_fraction=False, decimal_scale=0),
                 category_id=_resolve_category_id(conn, row[3]),

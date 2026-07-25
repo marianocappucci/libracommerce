@@ -61,7 +61,8 @@ def contalibra_conn() -> sqlite3.Connection:
             categoria TEXT DEFAULT '',
             activo INTEGER NOT NULL DEFAULT 1,
             estacion TEXT DEFAULT '',
-            vendible INTEGER NOT NULL DEFAULT 1
+            vendible INTEGER NOT NULL DEFAULT 1,
+            tipo TEXT NOT NULL DEFAULT 'producto'
         );
 
         CREATE TABLE depositos (
@@ -141,6 +142,41 @@ def test_read_catalog_items_resolves_category_by_name(contalibra_conn):
     assert items[0].default_sale_price == Decimal("1500")
     assert items[0].unit.code == "kg"
     assert items[0].unit.allows_fraction is False  # dato no disponible en Contalibra
+
+
+def test_read_catalog_items_maps_tipo_servicio(contalibra_conn):
+    contalibra_conn.execute(
+        "INSERT INTO productos (nombre, unidad, tipo) VALUES ('Consulta', 'u', 'servicio')"
+    )
+    items = read_catalog_items(contalibra_conn)
+    assert items[0].item_type == CatalogItemType.SERVICE
+
+
+def test_read_catalog_items_defaults_to_product_when_tipo_column_missing(contalibra_conn):
+    # Simula una instancia todavía en un libracore anterior a v0.17.0, sin la
+    # columna `tipo` — el adaptador no debe asumir que existe, tiene que
+    # verificarlo (PRAGMA table_info) y caer al default documentado.
+    contalibra_conn.execute("ALTER TABLE productos RENAME TO productos_con_tipo")
+    contalibra_conn.execute(
+        """
+        CREATE TABLE productos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            codigo TEXT UNIQUE,
+            nombre TEXT NOT NULL,
+            descripcion TEXT DEFAULT '',
+            precio_venta REAL NOT NULL DEFAULT 0,
+            precio_costo REAL NOT NULL DEFAULT 0,
+            unidad TEXT NOT NULL DEFAULT 'u',
+            categoria TEXT DEFAULT '',
+            activo INTEGER NOT NULL DEFAULT 1,
+            estacion TEXT DEFAULT '',
+            vendible INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    contalibra_conn.execute("INSERT INTO productos (nombre, unidad) VALUES ('Yerba', 'kg')")
+    items = read_catalog_items(contalibra_conn)
+    assert items[0].item_type == CatalogItemType.PRODUCT
 
 
 def test_read_catalog_items_category_none_when_unmatched(contalibra_conn):
