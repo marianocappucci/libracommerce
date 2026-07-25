@@ -644,3 +644,67 @@ class SqliteCommerceRepository:
             document_reference=row[5],
             created_by=row[6],
         )
+
+
+    # offline synchronization
+
+    def enqueue_operation(self, operation):
+        """Persist an outbox operation exactly once by operation_id."""
+        from libracommerce.domain.sync import SyncOperationStatus
+
+        self._conn.execute(
+            """
+            INSERT INTO sync_outbox
+                (operation_id, node_id, sequence, operation_type, aggregate_type,
+                 aggregate_id, occurred_at, schema_version, payload_json, status,
+                 attempts, next_attempt_at, last_error, sent_at, acknowledged_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(operation_id) DO NOTHING
+            """,
+            (operation.operation_id, operation.node_id, operation.sequence,
+             operation.operation_type, operation.aggregate_type, operation.aggregate_id,
+             operation.occurred_at, operation.schema_version, operation.payload_json(),
+             operation.status, operation.attempts, operation.next_attempt_at,
+             operation.last_error, operation.sent_at, operation.acknowledged_at),
+        )
+        self._conn.commit()
+        return self.get_operation(operation.operation_id)
+
+    def get_operation(self, operation_id):
+        row = self._conn.execute(
+            """SELECT operation_id, node_id, sequence, operation_type, aggregate_type,
+                    aggregate_id, occurred_at, schema_version, payload_json, status,
+                    attempts, next_attempt_at, last_error, created_at, sent_at,
+                    acknowledged_at
+             FROM sync_outbox WHERE operation_id = ?""", (operation_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        from libracommerce.domain.sync import OutboxOperation, SyncOperationStatus
+        return OutboxOperation(
+            operation_id=row[0], node_id=row[1], sequence=row[2],
+            operation_type=row[3], aggregate_type=row[4], aggregate_id=row[5],
+            occurred_at=row[6], schema_version=row[7], payload=json.loads(row[8]),
+            status=SyncOperationStatus(row[9]), attempts=row[10],
+            next_attempt_at=row[11], last_error=row[12], created_at=row[13],
+            sent_at=row[14], acknowledged_at=row[15],
+        )
+
+    def list_pending_operations(self, limit=100):
+        from libracommerce.domain.sync import SyncOperationStatus
+        rows = self._conn.execute(
+            """SELECT operation_id FROM sync_outbox
+             WHERE status IN (?, ?)
+             ORDER BY node_id, sequence LIMIT ?""",
+            (SyncOperationStatus.PENDING, SyncOperationStatus.RETRYABLE_ERROR, limit),
+        ).fetchall()
+        return tuple(self.get_operation(row[0]) for row in rows)
+
+    def acknowledge_operation(self, operation_id, acknowledged_at):
+        from libracommerce.domain.sync import SyncOperationStatus
+        self._conn.execute(
+            "UPDATE sync_outbox SET status = ?, acknowledged_at = ? WHERE operation_id = ?",
+            (SyncOperationStatus.ACKNOWLEDGED, acknowledged_at, operation_id),
+        )
+        self._conn.commit()
+        return self.get_operation(operation_id)
