@@ -163,3 +163,26 @@ def test_fastapi_adapter_contract_when_dependency_is_available():
     })
     assert response.status_code == 200
     assert response.json()["result"] == "accepted"
+
+
+def test_receiver_applies_offline_sale_to_central_tables():
+    from decimal import Decimal
+    from libracommerce.domain.catalog import CatalogItemType
+    from libracommerce.domain.sales import Sale, SaleItem, SaleStatus
+    from libracommerce.sync.receiver import SyncReceiver
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    local = SqliteCommerceRepository(conn)
+    sale = Sale(None, "OFF-APPLY", (SaleItem(CatalogItemType.SERVICE, "Consulta", Decimal("1"), Decimal("250")),), status=SaleStatus.CONFIRMED, total=Decimal("250"))
+    _, event = local.save_offline_sale(sale, "node-apply", "2026-07-25T18:30:00Z")
+    # Remove the local sale to simulate a separate central database.
+    conn.execute("DELETE FROM sale_items"); conn.execute("DELETE FROM sales"); conn.commit()
+    receiver = SyncReceiver(conn)
+    assert receiver.accept(event).result == "accepted"
+    central_id = conn.execute("SELECT id FROM sales WHERE number = 'OFF-APPLY'").fetchone()[0]
+    central = local.get_sale(central_id)
+    assert central.number == "OFF-APPLY"
+    assert central.source_type == "offline:node-apply"
+    assert central.items[0].description_snapshot == "Consulta"
+    assert receiver.accept(event).result == "duplicate"
+    assert conn.execute("SELECT COUNT(*) FROM sales").fetchone()[0] == 1

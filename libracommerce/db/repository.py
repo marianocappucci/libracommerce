@@ -682,6 +682,23 @@ class SqliteCommerceRepository:
                 schema_version=1, payload={
                     "sale_id": saved.id, "number": saved.number,
                     "total": str(saved.total), "status": str(saved.status),
+                    "branch_id": saved.branch_id, "register_id": saved.register_id,
+                    "items": [
+                        {
+                            "kind": str(line.kind), "item_id": line.item_id,
+                            "description_snapshot": line.description_snapshot,
+                            "quantity": str(line.quantity),
+                            "unit_price": str(line.unit_price),
+                            "discount_amount": str(line.discount_amount),
+                            "tax_rate": str(line.tax_rate),
+                            "tax_amount": str(line.tax_amount),
+                            "unit_cost_snapshot": (
+                                str(line.unit_cost_snapshot)
+                                if line.unit_cost_snapshot is not None else None
+                            ),
+                        }
+                        for line in saved.items
+                    ],
                 },
             )
             self._conn.execute(
