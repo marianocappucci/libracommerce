@@ -189,10 +189,8 @@ def test_receiver_applies_offline_sale_to_central_tables():
 
 
 def test_libraedge_adapter_translates_confirmed_sale():
-    import sys
+    __import__("pytest").importorskip("libraedge")
     from decimal import Decimal
-    from pathlib import Path
-    sys.path.insert(0, str(Path("/home/usuario/proyectos/libraedge")))
     from libracommerce.domain.catalog import CatalogItemType
     from libracommerce.domain.sales import Sale, SaleItem, SaleStatus
     from libracommerce.integrations.libraedge import sale_to_edge_operation
