@@ -307,7 +307,7 @@ class SqliteCommerceRepository:
 
     # sales
 
-    def save_sale(self, sale: Sale) -> Sale:
+    def save_sale(self, sale: Sale, *, commit: bool = True) -> Sale:
         cur = self._conn.cursor()
         if sale.id is None:
             cur.execute(
@@ -382,7 +382,8 @@ class SqliteCommerceRepository:
                     str(line.unit_cost_snapshot) if line.unit_cost_snapshot is not None else None,
                 ),
             )
-        self._conn.commit()
+        if commit:
+            self._conn.commit()
         return replace(sale, id=sale_id)
 
     def get_sale(self, sale_id: int) -> Sale | None:
@@ -645,6 +646,58 @@ class SqliteCommerceRepository:
             created_by=row[6],
         )
 
+
+    def _next_sequence(self, name="operations") -> int:
+        row = self._conn.execute(
+            "SELECT next_value FROM local_sequences WHERE name = ?", (name,)
+        ).fetchone()
+        if row is None:
+            sequence = 1
+            self._conn.execute(
+                "INSERT INTO local_sequences (name, next_value) VALUES (?, ?)",
+                (name, 2),
+            )
+        else:
+            sequence = row[0]
+            self._conn.execute(
+                "UPDATE local_sequences SET next_value = ? WHERE name = ?",
+                (sequence + 1, name),
+            )
+        return sequence
+
+    def save_offline_sale(self, sale: Sale, node_id: str, occurred_at: str):
+        """Save a confirmed sale and its outbox event atomically."""
+        from libracommerce.domain.sync import OutboxOperation
+
+        if sale.status != SaleStatus.CONFIRMED:
+            raise ValueError("Una venta offline debe estar confirmada")
+        try:
+            saved = self.save_sale(sale, commit=False)
+            sequence = self._next_sequence()
+            operation_id = f"{node_id}:{sequence}"
+            operation = OutboxOperation(
+                operation_id=operation_id, node_id=node_id, sequence=sequence,
+                operation_type="sale.confirmed", aggregate_type="sale",
+                aggregate_id=f"{node_id}:sale:{saved.id}", occurred_at=occurred_at,
+                schema_version=1, payload={
+                    "sale_id": saved.id, "number": saved.number,
+                    "total": str(saved.total), "status": str(saved.status),
+                },
+            )
+            self._conn.execute(
+                """INSERT INTO sync_outbox
+                   (operation_id, node_id, sequence, operation_type, aggregate_type,
+                    aggregate_id, occurred_at, schema_version, payload_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (operation.operation_id, operation.node_id, operation.sequence,
+                 operation.operation_type, operation.aggregate_type, operation.aggregate_id,
+                 operation.occurred_at, operation.schema_version, operation.payload_json()),
+            )
+            self._conn.commit()
+            return saved, operation
+        except Exception:
+            self._conn.rollback()
+            raise
 
     # offline synchronization
 

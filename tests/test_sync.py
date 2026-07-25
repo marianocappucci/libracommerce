@@ -46,3 +46,43 @@ def test_outbox_rejects_same_sequence_for_different_operation():
         pass
     else:
         raise AssertionError("duplicate node sequence must be rejected")
+
+
+def test_offline_sale_and_outbox_are_atomic(repo=None):
+    import sqlite3
+    from decimal import Decimal
+    from libracommerce.domain.sales import Sale, SaleItem, SaleStatus
+    from libracommerce.domain.catalog import CatalogItemType
+
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    repository = SqliteCommerceRepository(conn)
+    sale = Sale(
+        None, "OFF-0001",
+        (SaleItem(CatalogItemType.SERVICE, "Servicio", Decimal("1"), Decimal("100")),),
+        status=SaleStatus.CONFIRMED, total=Decimal("100"),
+    )
+    saved, event = repository.save_offline_sale(sale, "node-1", "2026-07-25T18:30:00Z")
+    assert saved.id is not None
+    assert event.operation_id == "node-1:1"
+    assert repository.get_operation(event.operation_id).payload["sale_id"] == saved.id
+
+    second, event2 = repository.save_offline_sale(sale.__class__(None, "OFF-0002", sale.items, status=SaleStatus.CONFIRMED, total=Decimal("100")), "node-1", "2026-07-25T18:31:00Z")
+    assert second.id != saved.id
+    assert event2.sequence == 2
+
+
+def test_offline_sale_rolls_back_when_outbox_insert_fails():
+    from decimal import Decimal
+    from libracommerce.domain.sales import Sale, SaleItem, SaleStatus
+    from libracommerce.domain.catalog import CatalogItemType
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    repository = SqliteCommerceRepository(conn)
+    sale = Sale(None, "OFF-FAIL", (SaleItem(CatalogItemType.SERVICE, "Servicio", Decimal("1"), Decimal("100")),), status=SaleStatus.CONFIRMED, total=Decimal("100"))
+    conn.execute("CREATE TRIGGER fail_outbox BEFORE INSERT ON sync_outbox BEGIN SELECT RAISE(ABORT, 'boom'); END")
+    try:
+        repository.save_offline_sale(sale, "node-1", "2026-07-25T18:30:00Z")
+    except sqlite3.IntegrityError:
+        pass
+    assert conn.execute("SELECT COUNT(*) FROM sales").fetchone()[0] == 0
