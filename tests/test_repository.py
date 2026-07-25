@@ -10,6 +10,14 @@ from libracommerce.db.schema import init_schema
 from libracommerce.domain.catalog import CatalogItem, CatalogItemType, Unit
 from libracommerce.domain.entities import Party, PartyType
 from libracommerce.domain.inventory import Location, StockMovement, StockMovementType
+from libracommerce.domain.purchasing import (
+    PurchaseOrder,
+    PurchaseOrderItem,
+    PurchaseOrderStatus,
+    PurchaseReceipt,
+    PurchaseReceiptItem,
+    PurchaseReceiptStatus,
+)
 from libracommerce.domain.sales import Sale, SaleItem, SaleStatus
 
 
@@ -118,3 +126,63 @@ def test_save_sale_persists_items_and_can_be_confirmed(repo: SqliteCommerceRepos
     assert len(fetched.items) == 1
     assert fetched.items[0].line_total == Decimal("3315")
     assert fetched.total == Decimal("3315")
+
+
+def test_save_purchase_order_persists_items_and_tracks_partial_receiving(repo: SqliteCommerceRepository):
+    item = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Yerba", _kg()))
+    supplier = repo.save_party(Party(None, PartyType.ORGANIZATION, "Distribuidora SA"))
+
+    line = PurchaseOrderItem(item.id, quantity_ordered=Decimal("20"), unit_cost=Decimal("900"))
+    order = PurchaseOrder(
+        None, "OC-0001", supplier_party_id=supplier.id, items=(line,), ordered_at=datetime(2026, 7, 20)
+    )
+
+    saved = repo.save_purchase_order(order)
+    assert saved.id is not None
+    assert repo.get_purchase_order(saved.id).status == PurchaseOrderStatus.DRAFT
+
+    partially_received_line = PurchaseOrderItem(
+        item.id, quantity_ordered=Decimal("20"), unit_cost=Decimal("900"), quantity_received=Decimal("12")
+    )
+    updated = repo.save_purchase_order(
+        replace(saved, status=PurchaseOrderStatus.PARTIAL, items=(partially_received_line,))
+    )
+    fetched = repo.get_purchase_order(updated.id)
+
+    assert fetched.status == PurchaseOrderStatus.PARTIAL
+    assert len(fetched.items) == 1
+    assert fetched.items[0].pending_quantity == Decimal("8")
+    assert not fetched.is_fully_received()
+
+
+def test_save_purchase_receipt_persists_lot_and_expiry(repo: SqliteCommerceRepository):
+    item = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Yerba", _kg()))
+    supplier = repo.save_party(Party(None, PartyType.ORGANIZATION, "Distribuidora SA"))
+    order = repo.save_purchase_order(
+        PurchaseOrder(
+            None,
+            "OC-0002",
+            supplier_party_id=supplier.id,
+            items=(PurchaseOrderItem(item.id, Decimal("10"), Decimal("900")),),
+        )
+    )
+
+    line = PurchaseReceiptItem(
+        item.id, quantity=Decimal("10"), unit_cost=Decimal("910"), lot_code="L-2026-07", expires_at=datetime(2027, 1, 1)
+    )
+    receipt = PurchaseReceipt(
+        None,
+        supplier_party_id=supplier.id,
+        items=(line,),
+        purchase_order_id=order.id,
+        received_at=datetime(2026, 7, 25),
+    )
+
+    saved = repo.save_purchase_receipt(receipt)
+    confirmed = repo.save_purchase_receipt(replace(saved, status=PurchaseReceiptStatus.CONFIRMED))
+    fetched = repo.get_purchase_receipt(confirmed.id)
+
+    assert fetched.status == PurchaseReceiptStatus.CONFIRMED
+    assert fetched.purchase_order_id == order.id
+    assert fetched.items[0].lot_code == "L-2026-07"
+    assert fetched.items[0].expires_at == datetime(2027, 1, 1)

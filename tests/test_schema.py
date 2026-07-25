@@ -19,6 +19,10 @@ def test_schema_enables_foreign_keys_and_creates_core_tables():
         "stock_movements",
         "sales",
         "sale_items",
+        "purchase_orders",
+        "purchase_order_items",
+        "purchase_receipts",
+        "purchase_receipt_items",
     } <= tables
 
 

@@ -8,6 +8,14 @@ from typing import Sequence
 from libracommerce.domain.catalog import CatalogItem, CatalogItemType, Unit
 from libracommerce.domain.entities import Party, PartyType
 from libracommerce.domain.inventory import Location, StockMovement, StockMovementType
+from libracommerce.domain.purchasing import (
+    PurchaseOrder,
+    PurchaseOrderItem,
+    PurchaseOrderStatus,
+    PurchaseReceipt,
+    PurchaseReceiptItem,
+    PurchaseReceiptStatus,
+)
 from libracommerce.domain.sales import Sale, SaleItem, SaleStatus
 
 
@@ -424,4 +432,213 @@ class SqliteCommerceRepository:
             tax_total=_to_decimal(row[10]),
             total=_to_decimal(row[11]),
             confirmed_at=datetime.fromisoformat(row[12]) if row[12] else None,
+        )
+
+    # purchasing
+
+    def save_purchase_order(self, order: PurchaseOrder) -> PurchaseOrder:
+        cur = self._conn.cursor()
+        if order.id is None:
+            cur.execute(
+                """
+                INSERT INTO purchase_orders
+                    (number, supplier_party_id, branch_id, status, ordered_at, expected_at,
+                     notes, created_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    order.number,
+                    order.supplier_party_id,
+                    order.branch_id,
+                    order.status,
+                    order.ordered_at.isoformat() if order.ordered_at else None,
+                    order.expected_at.isoformat() if order.expected_at else None,
+                    order.notes,
+                    order.created_by,
+                ),
+            )
+            order_id = cur.lastrowid
+        else:
+            order_id = order.id
+            cur.execute(
+                """
+                UPDATE purchase_orders
+                SET number = ?, supplier_party_id = ?, branch_id = ?, status = ?, ordered_at = ?,
+                    expected_at = ?, notes = ?, created_by = ?
+                WHERE id = ?
+                """,
+                (
+                    order.number,
+                    order.supplier_party_id,
+                    order.branch_id,
+                    order.status,
+                    order.ordered_at.isoformat() if order.ordered_at else None,
+                    order.expected_at.isoformat() if order.expected_at else None,
+                    order.notes,
+                    order.created_by,
+                    order_id,
+                ),
+            )
+            cur.execute("DELETE FROM purchase_order_items WHERE purchase_order_id = ?", (order_id,))
+
+        for line in order.items:
+            cur.execute(
+                """
+                INSERT INTO purchase_order_items
+                    (purchase_order_id, item_id, quantity_ordered, quantity_received,
+                     unit_cost, tax_rate)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    order_id,
+                    line.item_id,
+                    str(line.quantity_ordered),
+                    str(line.quantity_received),
+                    str(line.unit_cost),
+                    str(line.tax_rate),
+                ),
+            )
+        self._conn.commit()
+        return replace(order, id=order_id)
+
+    def get_purchase_order(self, order_id: int) -> PurchaseOrder | None:
+        row = self._conn.execute(
+            """
+            SELECT id, number, supplier_party_id, branch_id, status, ordered_at, expected_at,
+                   notes, created_by
+            FROM purchase_orders WHERE id = ?
+            """,
+            (order_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        item_rows = self._conn.execute(
+            """
+            SELECT item_id, quantity_ordered, quantity_received, unit_cost, tax_rate
+            FROM purchase_order_items WHERE purchase_order_id = ?
+            ORDER BY id
+            """,
+            (order_id,),
+        ).fetchall()
+        items = tuple(
+            PurchaseOrderItem(
+                item_id=item_row[0],
+                quantity_ordered=_to_decimal(item_row[1]),
+                quantity_received=_to_decimal(item_row[2]),
+                unit_cost=_to_decimal(item_row[3]),
+                tax_rate=_to_decimal(item_row[4]),
+            )
+            for item_row in item_rows
+        )
+        return PurchaseOrder(
+            id=row[0],
+            number=row[1],
+            supplier_party_id=row[2],
+            items=items,
+            status=PurchaseOrderStatus(row[4]),
+            branch_id=row[3],
+            ordered_at=datetime.fromisoformat(row[5]) if row[5] else None,
+            expected_at=datetime.fromisoformat(row[6]) if row[6] else None,
+            notes=row[7],
+            created_by=row[8],
+        )
+
+    def save_purchase_receipt(self, receipt: PurchaseReceipt) -> PurchaseReceipt:
+        cur = self._conn.cursor()
+        if receipt.id is None:
+            cur.execute(
+                """
+                INSERT INTO purchase_receipts
+                    (purchase_order_id, supplier_party_id, status, received_at,
+                     document_reference, created_by)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    receipt.purchase_order_id,
+                    receipt.supplier_party_id,
+                    receipt.status,
+                    receipt.received_at.isoformat() if receipt.received_at else None,
+                    receipt.document_reference,
+                    receipt.created_by,
+                ),
+            )
+            receipt_id = cur.lastrowid
+        else:
+            receipt_id = receipt.id
+            cur.execute(
+                """
+                UPDATE purchase_receipts
+                SET purchase_order_id = ?, supplier_party_id = ?, status = ?, received_at = ?,
+                    document_reference = ?, created_by = ?
+                WHERE id = ?
+                """,
+                (
+                    receipt.purchase_order_id,
+                    receipt.supplier_party_id,
+                    receipt.status,
+                    receipt.received_at.isoformat() if receipt.received_at else None,
+                    receipt.document_reference,
+                    receipt.created_by,
+                    receipt_id,
+                ),
+            )
+            cur.execute("DELETE FROM purchase_receipt_items WHERE receipt_id = ?", (receipt_id,))
+
+        for line in receipt.items:
+            cur.execute(
+                """
+                INSERT INTO purchase_receipt_items
+                    (receipt_id, item_id, quantity, unit_cost, lot_code, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    receipt_id,
+                    line.item_id,
+                    str(line.quantity),
+                    str(line.unit_cost),
+                    line.lot_code,
+                    line.expires_at.isoformat() if line.expires_at else None,
+                ),
+            )
+        self._conn.commit()
+        return replace(receipt, id=receipt_id)
+
+    def get_purchase_receipt(self, receipt_id: int) -> PurchaseReceipt | None:
+        row = self._conn.execute(
+            """
+            SELECT id, purchase_order_id, supplier_party_id, status, received_at,
+                   document_reference, created_by
+            FROM purchase_receipts WHERE id = ?
+            """,
+            (receipt_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        item_rows = self._conn.execute(
+            """
+            SELECT item_id, quantity, unit_cost, lot_code, expires_at
+            FROM purchase_receipt_items WHERE receipt_id = ?
+            ORDER BY id
+            """,
+            (receipt_id,),
+        ).fetchall()
+        items = tuple(
+            PurchaseReceiptItem(
+                item_id=item_row[0],
+                quantity=_to_decimal(item_row[1]),
+                unit_cost=_to_decimal(item_row[2]),
+                lot_code=item_row[3],
+                expires_at=datetime.fromisoformat(item_row[4]) if item_row[4] else None,
+            )
+            for item_row in item_rows
+        )
+        return PurchaseReceipt(
+            id=row[0],
+            supplier_party_id=row[2],
+            items=items,
+            purchase_order_id=row[1],
+            status=PurchaseReceiptStatus(row[3]),
+            received_at=datetime.fromisoformat(row[4]) if row[4] else None,
+            document_reference=row[5],
+            created_by=row[6],
         )

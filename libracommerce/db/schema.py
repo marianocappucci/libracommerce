@@ -107,5 +107,55 @@ def init_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_sale_items_sale
             ON sale_items(sale_id);
+
+        CREATE TABLE IF NOT EXISTS purchase_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            number TEXT NOT NULL UNIQUE,
+            supplier_party_id INTEGER NOT NULL REFERENCES parties(id),
+            branch_id INTEGER,
+            status TEXT NOT NULL DEFAULT 'draft',
+            ordered_at TEXT,
+            expected_at TEXT,
+            notes TEXT NOT NULL DEFAULT '',
+            created_by INTEGER,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS purchase_order_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            purchase_order_id INTEGER NOT NULL REFERENCES purchase_orders(id),
+            item_id INTEGER NOT NULL REFERENCES catalog_items(id),
+            quantity_ordered NUMERIC NOT NULL,
+            quantity_received NUMERIC NOT NULL DEFAULT 0,
+            unit_cost NUMERIC NOT NULL,
+            tax_rate NUMERIC NOT NULL DEFAULT 0
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_purchase_order_items_order
+            ON purchase_order_items(purchase_order_id);
+
+        CREATE TABLE IF NOT EXISTS purchase_receipts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            purchase_order_id INTEGER REFERENCES purchase_orders(id),
+            supplier_party_id INTEGER NOT NULL REFERENCES parties(id),
+            status TEXT NOT NULL DEFAULT 'draft',
+            received_at TEXT,
+            document_reference TEXT,
+            created_by INTEGER,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS purchase_receipt_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            receipt_id INTEGER NOT NULL REFERENCES purchase_receipts(id),
+            item_id INTEGER NOT NULL REFERENCES catalog_items(id),
+            quantity NUMERIC NOT NULL,
+            unit_cost NUMERIC NOT NULL,
+            lot_code TEXT,
+            expires_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_purchase_receipt_items_receipt
+            ON purchase_receipt_items(receipt_id);
         """
     )
