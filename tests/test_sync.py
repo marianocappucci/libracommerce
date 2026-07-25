@@ -86,3 +86,39 @@ def test_offline_sale_rolls_back_when_outbox_insert_fails():
     except sqlite3.IntegrityError:
         pass
     assert conn.execute("SELECT COUNT(*) FROM sales").fetchone()[0] == 0
+
+
+def test_worker_acknowledges_accepted_and_duplicate_operations():
+    from libracommerce.sync.worker import OutboxWorker, PushResult
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    repository = SqliteCommerceRepository(conn)
+    repository.enqueue_operation(operation())
+    class Transport:
+        def push(self, op):
+            return PushResult("accepted")
+    assert OutboxWorker(repository, Transport()).run_once() == 1
+    assert repository.get_operation("node-1:1").status == SyncOperationStatus.ACKNOWLEDGED
+
+
+def test_worker_retries_transport_failures_and_marks_rejections_for_review():
+    from libracommerce.sync.worker import OutboxWorker, PushResult
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    repository = SqliteCommerceRepository(conn)
+    repository.enqueue_operation(operation())
+    class FailingTransport:
+        def push(self, op):
+            raise ConnectionError("VPS offline")
+    OutboxWorker(repository, FailingTransport()).run_once()
+    saved = repository.get_operation("node-1:1")
+    assert saved.status == SyncOperationStatus.RETRYABLE_ERROR
+    assert saved.attempts == 1
+    assert saved.last_error == "VPS offline"
+
+    repository.enqueue_operation(operation("node-1:2", 2))
+    class RejectingTransport:
+        def push(self, op):
+            return PushResult("rejected", "schema incompatible")
+    OutboxWorker(repository, RejectingTransport()).run_once()
+    assert repository.get_operation("node-1:2").status == SyncOperationStatus.MANUAL_REVIEW

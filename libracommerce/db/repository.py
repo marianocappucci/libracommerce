@@ -753,6 +753,34 @@ class SqliteCommerceRepository:
         ).fetchall()
         return tuple(self.get_operation(row[0]) for row in rows)
 
+    def mark_operation_sending(self, operation_id):
+        from libracommerce.domain.sync import SyncOperationStatus
+        self._conn.execute(
+            "UPDATE sync_outbox SET status = ?, attempts = attempts + 1 WHERE operation_id = ?",
+            (SyncOperationStatus.SENDING, operation_id),
+        )
+        self._conn.commit()
+        return self.get_operation(operation_id)
+
+    def retry_operation(self, operation_id, error, next_attempt_at=None):
+        from libracommerce.domain.sync import SyncOperationStatus
+        self._conn.execute(
+            """UPDATE sync_outbox SET status = ?, last_error = ?, next_attempt_at = ?
+             WHERE operation_id = ?""",
+            (SyncOperationStatus.RETRYABLE_ERROR, error, next_attempt_at, operation_id),
+        )
+        self._conn.commit()
+        return self.get_operation(operation_id)
+
+    def mark_operation_manual_review(self, operation_id, error):
+        from libracommerce.domain.sync import SyncOperationStatus
+        self._conn.execute(
+            "UPDATE sync_outbox SET status = ?, last_error = ? WHERE operation_id = ?",
+            (SyncOperationStatus.MANUAL_REVIEW, error, operation_id),
+        )
+        self._conn.commit()
+        return self.get_operation(operation_id)
+
     def acknowledge_operation(self, operation_id, acknowledged_at):
         from libracommerce.domain.sync import SyncOperationStatus
         self._conn.execute(
