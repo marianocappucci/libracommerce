@@ -26,17 +26,25 @@ def init_schema(conn: sqlite3.Connection) -> None:
             UNIQUE(parent_id, name)
         );
 
+        CREATE TABLE IF NOT EXISTS units (
+            code TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            allows_fraction INTEGER NOT NULL DEFAULT 0,
+            decimal_scale INTEGER NOT NULL DEFAULT 0
+        );
+
         CREATE TABLE IF NOT EXISTS catalog_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             item_type TEXT NOT NULL,
             name TEXT NOT NULL,
             description TEXT NOT NULL DEFAULT '',
             category_id INTEGER REFERENCES categories(id),
-            unit_code TEXT NOT NULL,
+            unit_code TEXT NOT NULL REFERENCES units(code),
             active INTEGER NOT NULL DEFAULT 1,
             sellable INTEGER NOT NULL DEFAULT 1,
             purchasable INTEGER NOT NULL DEFAULT 1,
             tax_profile TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
             default_sale_price NUMERIC NOT NULL DEFAULT 0,
             default_cost NUMERIC NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -66,5 +74,38 @@ def init_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_stock_item_location
             ON stock_movements(item_id, location_id);
+
+        CREATE TABLE IF NOT EXISTS sales (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            number TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'draft',
+            customer_party_id INTEGER REFERENCES parties(id),
+            branch_id INTEGER,
+            register_id INTEGER,
+            source_type TEXT NOT NULL DEFAULT 'pos',
+            source_id INTEGER,
+            subtotal NUMERIC NOT NULL DEFAULT 0,
+            discount_total NUMERIC NOT NULL DEFAULT 0,
+            tax_total NUMERIC NOT NULL DEFAULT 0,
+            total NUMERIC NOT NULL DEFAULT 0,
+            confirmed_at TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS sale_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sale_id INTEGER NOT NULL REFERENCES sales(id),
+            item_id INTEGER NOT NULL REFERENCES catalog_items(id),
+            description_snapshot TEXT NOT NULL,
+            quantity NUMERIC NOT NULL,
+            unit_price NUMERIC NOT NULL,
+            discount_amount NUMERIC NOT NULL DEFAULT 0,
+            tax_rate NUMERIC NOT NULL DEFAULT 0,
+            tax_amount NUMERIC NOT NULL DEFAULT 0,
+            unit_cost_snapshot NUMERIC
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sale_items_sale
+            ON sale_items(sale_id);
         """
     )
