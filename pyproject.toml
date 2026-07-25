@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "libracommerce"
+version = "0.1.0"
+description = "Motor comercial reutilizable de la familia Libra"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["libracommerce"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
