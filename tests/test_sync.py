@@ -186,3 +186,17 @@ def test_receiver_applies_offline_sale_to_central_tables():
     assert central.items[0].description_snapshot == "Consulta"
     assert receiver.accept(event).result == "duplicate"
     assert conn.execute("SELECT COUNT(*) FROM sales").fetchone()[0] == 1
+
+
+def test_libraedge_adapter_translates_confirmed_sale():
+    import sys
+    from decimal import Decimal
+    from pathlib import Path
+    sys.path.insert(0, str(Path("/home/usuario/proyectos/libraedge")))
+    from libracommerce.domain.catalog import CatalogItemType
+    from libracommerce.domain.sales import Sale, SaleItem, SaleStatus
+    from libracommerce.integrations.libraedge import sale_to_edge_operation
+    sale = Sale(None, "V-EDGE", (SaleItem(CatalogItemType.SERVICE, "Consulta", Decimal("1"), Decimal("300")),), status=SaleStatus.CONFIRMED, total=Decimal("300"))
+    event = sale_to_edge_operation(sale, "node-1", 7, "2026-07-25T19:00:00Z")
+    assert event.operation_id == "node-1:7"
+    assert event.payload["items"][0]["description_snapshot"] == "Consulta"
