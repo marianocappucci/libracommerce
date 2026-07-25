@@ -143,3 +143,23 @@ def test_receiver_rejects_unknown_schema_version():
     result = SyncReceiver(conn).accept(replace(operation(), schema_version=99))
     assert result.result == "rejected"
     assert "schema" in result.error
+
+
+def test_fastapi_adapter_contract_when_dependency_is_available():
+    fastapi = __import__("pytest").importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from libracommerce.sync.api import create_sync_app
+    from libracommerce.sync.receiver import SyncReceiver
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    init_schema(conn)
+    client = TestClient(create_sync_app(SyncReceiver(conn)))
+    event = operation()
+    response = client.post("/sync/v1/push", json={
+        "operation_id": event.operation_id, "node_id": event.node_id,
+        "sequence": event.sequence, "operation_type": event.operation_type,
+        "aggregate_type": event.aggregate_type, "aggregate_id": event.aggregate_id,
+        "occurred_at": event.occurred_at, "schema_version": event.schema_version,
+        "payload": event.payload,
+    })
+    assert response.status_code == 200
+    assert response.json()["result"] == "accepted"
