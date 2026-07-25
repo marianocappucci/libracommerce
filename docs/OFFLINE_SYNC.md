@@ -1,6 +1,18 @@
 # Módulo offline — contrato de sincronización v0.1
 
-Estado: especificación inicial, pendiente de implementación.
+Estado: implementado, con la persistencia/transporte/recepción del outbox movidos al paquete transversal `libraedge` (ver `github.com/marianocappucci/libraedge`) — no en LibraCommerce.
+
+LibraCommerce ya no mantiene tablas propias de `node_identity`/`local_sequences`/`sync_outbox`/`sync_inbox` ni su propio worker/transporte/receiver (retirados: eran una copia de compatibilidad temporal). Su responsabilidad se limita a la traducción de dominio:
+
+- `libracommerce.integrations.libraedge.sale_to_edge_operation(sale, node_id, sequence, occurred_at)` traduce una venta confirmada al `OutboxOperation` genérico de LibraEdge.
+- `libracommerce.integrations.libraedge.apply_confirmed_sale_operation(conn, operation)` es el `operation_handler` que se pasa a `libraedge.sync.receiver.SyncReceiver` en el lado central: sabe interpretar un payload `sale.confirmed` y materializarlo como una `Sale` real.
+- La generación de `sequence` y el enqueue/worker/transporte/recepción usan las clases de `libraedge.db.repository.SqliteNodeRepository`, `libraedge.sync.worker.OutboxWorker`, `libraedge.sync.http.HttpSyncTransport` y `libraedge.sync.receiver.SyncReceiver` directamente — LibraCommerce no las reimplementa.
+
+**Importante para cualquier deployment central**: la conexión SQLite del lado central necesita correr *ambos* `init_schema` — el de `libracommerce.db.schema` (tablas de dominio comercial) y el de `libraedge.db.schema` (`sync_inbox`, que el receiver usa para idempotencia) — sobre la misma base, no solo el de LibraCommerce.
+
+Se aceptó explícitamente perder la escritura atómica única "venta + outbox" que tenía la implementación anterior (ambas vivían en la misma tabla/transacción): ahora `save_sale()` y `enqueue_operation()` son dos pasos separados, con reintento/idempotencia como red de seguridad en vez de una transacción compartida.
+
+El resto de esta especificación (identidad de nodo, envelope, estados de outbox, API conceptual, orden y consistencia) describe el diseño ya implementado, con la persistencia física en el repositorio de LibraEdge en vez de en LibraCommerce.
 
 ## Objetivo
 
@@ -56,7 +68,7 @@ Los UUID de venta y de cualquier agregado creado offline también deben ser glob
 
 ## Tablas locales adicionales
 
-Además de las tablas comerciales existentes, el nodo necesita como mínimo:
+Además de las tablas comerciales existentes, el nodo necesita como mínimo (implementadas hoy en `libraedge.db.schema.init_schema`, no acá):
 
 ```sql
 CREATE TABLE node_identity (

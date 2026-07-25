@@ -16,7 +16,7 @@ No depende de FastAPI, SQLite, LibraCore, ARCA, MercadoPago ni de un producto ve
 
 ## Módulo offline
 
-La especificación inicial del contrato de sincronización está en [`docs/OFFLINE_SYNC.md`](docs/OFFLINE_SYNC.md). Define identidad de nodo, outbox, idempotencia, API conceptual y criterios de aceptación; todavía no implementa el módulo.
+El contrato de sincronización está en [`docs/OFFLINE_SYNC.md`](docs/OFFLINE_SYNC.md): identidad de nodo, outbox, idempotencia, API conceptual y criterios de aceptación. Ya implementado — la persistencia, el worker, el transporte y el receptor viven en el paquete transversal `libraedge` (extra opcional `offline`/`offline-server`); LibraCommerce solo traduce entre su dominio (`Sale`) y el `OutboxOperation` genérico (`libracommerce.integrations.libraedge`).
 
 ## Desarrollo
 
