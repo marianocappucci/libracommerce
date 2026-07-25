@@ -122,3 +122,24 @@ def test_worker_retries_transport_failures_and_marks_rejections_for_review():
             return PushResult("rejected", "schema incompatible")
     OutboxWorker(repository, RejectingTransport()).run_once()
     assert repository.get_operation("node-1:2").status == SyncOperationStatus.MANUAL_REVIEW
+
+
+def test_receiver_accepts_once_and_returns_duplicate_afterwards():
+    from libracommerce.sync.receiver import SyncReceiver
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    receiver = SyncReceiver(conn)
+    event = operation()
+    assert receiver.accept(event).result == "accepted"
+    assert receiver.accept(event).result == "duplicate"
+    assert conn.execute("SELECT COUNT(*) FROM sync_inbox").fetchone()[0] == 1
+
+
+def test_receiver_rejects_unknown_schema_version():
+    from dataclasses import replace
+    from libracommerce.sync.receiver import SyncReceiver
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    result = SyncReceiver(conn).accept(replace(operation(), schema_version=99))
+    assert result.result == "rejected"
+    assert "schema" in result.error
