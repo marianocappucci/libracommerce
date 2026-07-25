@@ -110,7 +110,14 @@ def test_save_sale_persists_items_and_can_be_confirmed(repo: SqliteCommerceRepos
     item = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Yerba", _kg()))
     customer = repo.save_party(Party(None, PartyType.PERSON, "Ana"))
 
-    line = SaleItem(item.id, "Yerba", Decimal("2"), Decimal("1500"), tax_amount=Decimal("315"))
+    line = SaleItem(
+        kind=CatalogItemType.PRODUCT,
+        item_id=item.id,
+        description_snapshot="Yerba",
+        quantity=Decimal("2"),
+        unit_price=Decimal("1500"),
+        tax_amount=Decimal("315"),
+    )
     sale = Sale(None, "V-0001", (line,), customer_party_id=customer.id, total=Decimal("3315"))
 
     saved = repo.save_sale(sale)
@@ -124,8 +131,39 @@ def test_save_sale_persists_items_and_can_be_confirmed(repo: SqliteCommerceRepos
     assert fetched.status == SaleStatus.CONFIRMED
     assert fetched.confirmed_at == datetime(2026, 7, 25, 12, 0)
     assert len(fetched.items) == 1
+    assert fetched.items[0].kind == CatalogItemType.PRODUCT
     assert fetched.items[0].line_total == Decimal("3315")
     assert fetched.total == Decimal("3315")
+
+
+def test_save_sale_persists_ad_hoc_service_item_without_catalog_link(repo: SqliteCommerceRepository):
+    line = SaleItem(
+        kind=CatalogItemType.SERVICE,
+        item_id=None,
+        description_snapshot="Consulta fuera de catálogo",
+        quantity=Decimal("1"),
+        unit_price=Decimal("5000"),
+    )
+    sale = Sale(None, "V-0002", (line,), status=SaleStatus.CONFIRMED, total=Decimal("5000"))
+
+    saved = repo.save_sale(sale)
+    fetched = repo.get_sale(saved.id)
+
+    assert len(fetched.items) == 1
+    assert fetched.items[0].kind == CatalogItemType.SERVICE
+    assert fetched.items[0].item_id is None
+    assert fetched.items[0].description_snapshot == "Consulta fuera de catálogo"
+
+
+def test_save_sale_rejects_product_item_without_catalog_link_at_domain_level(repo: SqliteCommerceRepository):
+    with pytest.raises(ValueError):
+        SaleItem(
+            kind=CatalogItemType.PRODUCT,
+            item_id=None,
+            description_snapshot="Producto sin catalogar",
+            quantity=Decimal("1"),
+            unit_price=Decimal("100"),
+        )
 
 
 def test_save_purchase_order_persists_items_and_tracks_partial_receiving(repo: SqliteCommerceRepository):

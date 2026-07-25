@@ -365,12 +365,13 @@ class SqliteCommerceRepository:
             cur.execute(
                 """
                 INSERT INTO sale_items
-                    (sale_id, item_id, description_snapshot, quantity, unit_price,
+                    (sale_id, kind, item_id, description_snapshot, quantity, unit_price,
                      discount_amount, tax_rate, tax_amount, unit_cost_snapshot)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     sale_id,
+                    line.kind,
                     line.item_id,
                     line.description_snapshot,
                     str(line.quantity),
@@ -397,7 +398,7 @@ class SqliteCommerceRepository:
             return None
         item_rows = self._conn.execute(
             """
-            SELECT item_id, description_snapshot, quantity, unit_price, discount_amount,
+            SELECT kind, item_id, description_snapshot, quantity, unit_price, discount_amount,
                    tax_rate, tax_amount, unit_cost_snapshot
             FROM sale_items WHERE sale_id = ?
             ORDER BY id
@@ -406,14 +407,15 @@ class SqliteCommerceRepository:
         ).fetchall()
         items = tuple(
             SaleItem(
-                item_id=item_row[0],
-                description_snapshot=item_row[1],
-                quantity=_to_decimal(item_row[2]),
-                unit_price=_to_decimal(item_row[3]),
-                discount_amount=_to_decimal(item_row[4]),
-                tax_rate=_to_decimal(item_row[5]),
-                tax_amount=_to_decimal(item_row[6]),
-                unit_cost_snapshot=_to_decimal(item_row[7]) if item_row[7] is not None else None,
+                kind=CatalogItemType(item_row[0]),
+                item_id=item_row[1],
+                description_snapshot=item_row[2],
+                quantity=_to_decimal(item_row[3]),
+                unit_price=_to_decimal(item_row[4]),
+                discount_amount=_to_decimal(item_row[5]),
+                tax_rate=_to_decimal(item_row[6]),
+                tax_amount=_to_decimal(item_row[7]),
+                unit_cost_snapshot=_to_decimal(item_row[8]) if item_row[8] is not None else None,
             )
             for item_row in item_rows
         )

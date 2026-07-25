@@ -28,11 +28,13 @@ enough to do better, and these are defaults, not derived facts:
 - Sale.confirmed_at: `ventas` has no separate confirmation timestamp;
   `created_at` is used only when estado is already "cobrada".
 
-Known hard gap (not papered over): Contalibra allows ad-hoc sale lines
-(free-text `nombre`, no `producto_id`) that LibraCommerce's `SaleItem`
-cannot represent (`item_id` is required). `read_sales` raises
-`UnmappableSaleItemError` for those instead of dropping or fabricating
-data — see wiki/entities/libracommerce.md for the full list of gaps.
+Ad-hoc sale lines (free-text `nombre`, no `producto_id` — Contalibra
+allows these) map to a SERVICE-kind `SaleItem` with `item_id=None`, since
+LibraCommerce now requires a catalog link only for PRODUCT lines (see
+`libracommerce.domain.sales.SaleItem`). This is an assumption, not a
+derived fact: Contalibra doesn't record whether an unlinked line was a
+genuine one-off service or a product sold without going through the
+catalog — see wiki/entities/libracommerce.md for the full list of gaps.
 """
 import json
 import sqlite3
@@ -43,18 +45,6 @@ from libracommerce.domain.catalog import CatalogItem, CatalogItemType, Unit
 from libracommerce.domain.entities import Party, PartyType
 from libracommerce.domain.inventory import Location, StockMovement, StockMovementType
 from libracommerce.domain.sales import Sale, SaleItem, SaleStatus
-
-
-class UnmappableSaleItemError(Exception):
-    """A Contalibra sale line has no producto_id and cannot become a SaleItem."""
-
-    def __init__(self, venta_numero: str, item_nombre: str):
-        self.venta_numero = venta_numero
-        self.item_nombre = item_nombre
-        super().__init__(
-            f"Venta {venta_numero!r}: item {item_nombre!r} no tiene producto_id, "
-            "no se puede mapear a SaleItem"
-        )
 
 
 _STOCK_MOVEMENT_TYPE_MAP = {
@@ -207,10 +197,17 @@ def read_sales(conn: sqlite3.Connection) -> list[Sale]:
         sale_items = []
         for raw_item in json.loads(items_json):
             producto_id = raw_item.get("producto_id")
-            if producto_id is None:
-                raise UnmappableSaleItemError(numero, raw_item.get("nombre", "?"))
+            # Contalibra doesn't tag a sale line as product-vs-service — a line
+            # without producto_id is optimistically mapped as an ad-hoc SERVICE,
+            # since that's the only kind our domain allows without item_id. This
+            # is an assumption, not a fact: Contalibra can't tell us whether an
+            # unlinked line was really a one-off service or a product sold
+            # without going through the catalog (a data-quality gap in the
+            # source system this adapter cannot resolve).
+            kind = CatalogItemType.PRODUCT if producto_id is not None else CatalogItemType.SERVICE
             sale_items.append(
                 SaleItem(
+                    kind=kind,
                     item_id=producto_id,
                     description_snapshot=raw_item.get("nombre", ""),
                     quantity=_to_decimal(raw_item.get("qty", 0)),

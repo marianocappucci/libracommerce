@@ -95,14 +95,16 @@ def init_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS sale_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             sale_id INTEGER NOT NULL REFERENCES sales(id),
-            item_id INTEGER NOT NULL REFERENCES catalog_items(id),
+            kind TEXT NOT NULL,
+            item_id INTEGER REFERENCES catalog_items(id),
             description_snapshot TEXT NOT NULL,
             quantity NUMERIC NOT NULL,
             unit_price NUMERIC NOT NULL,
             discount_amount NUMERIC NOT NULL DEFAULT 0,
             tax_rate NUMERIC NOT NULL DEFAULT 0,
             tax_amount NUMERIC NOT NULL DEFAULT 0,
-            unit_cost_snapshot NUMERIC
+            unit_cost_snapshot NUMERIC,
+            CHECK (kind != 'product' OR item_id IS NOT NULL)
         );
 
         CREATE INDEX IF NOT EXISTS idx_sale_items_sale

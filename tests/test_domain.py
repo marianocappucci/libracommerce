@@ -1,6 +1,8 @@
 from datetime import datetime
 from decimal import Decimal
 
+import pytest
+
 from libracommerce.domain.catalog import CatalogItem, CatalogItemType, Unit
 from libracommerce.domain.entities import Party, PartyRole, PartyType
 from libracommerce.domain.inventory import Location, StockMovement, StockMovementType
@@ -33,7 +35,14 @@ def test_location_defaults_to_active_warehouse():
 
 
 def test_sale_total_uses_line_snapshots():
-    item = SaleItem(1, "Producto", Decimal("2"), Decimal("100"), tax_amount=Decimal("21"))
+    item = SaleItem(
+        kind=CatalogItemType.PRODUCT,
+        item_id=1,
+        description_snapshot="Producto",
+        quantity=Decimal("2"),
+        unit_price=Decimal("100"),
+        tax_amount=Decimal("21"),
+    )
     sale = Sale(None, "V-1", (item,))
     assert sale.calculated_total() == Decimal("221")
 
@@ -42,3 +51,37 @@ def test_sale_defaults_to_draft_status():
     sale = Sale(None, "V-1", ())
     assert sale.status == SaleStatus.DRAFT
     assert sale.calculated_total() == Decimal("0")
+
+
+def test_product_sale_item_requires_item_id():
+    with pytest.raises(ValueError):
+        SaleItem(
+            kind=CatalogItemType.PRODUCT,
+            item_id=None,
+            description_snapshot="Yerba",
+            quantity=Decimal("1"),
+            unit_price=Decimal("1500"),
+        )
+
+
+def test_service_sale_item_can_be_ad_hoc():
+    item = SaleItem(
+        kind=CatalogItemType.SERVICE,
+        item_id=None,
+        description_snapshot="Consulta fuera de catálogo",
+        quantity=Decimal("1"),
+        unit_price=Decimal("5000"),
+    )
+    assert item.item_id is None
+    assert item.line_total == Decimal("5000")
+
+
+def test_service_sale_item_can_reference_a_catalog_service():
+    item = SaleItem(
+        kind=CatalogItemType.SERVICE,
+        item_id=7,
+        description_snapshot="Corte de pelo",
+        quantity=Decimal("1"),
+        unit_price=Decimal("3000"),
+    )
+    assert item.item_id == 7

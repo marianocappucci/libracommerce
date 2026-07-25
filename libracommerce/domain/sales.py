@@ -3,6 +3,8 @@ from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 
+from libracommerce.domain.catalog import CatalogItemType
+
 
 class SaleStatus(StrEnum):
     DRAFT = "draft"
@@ -14,14 +16,29 @@ class SaleStatus(StrEnum):
 
 @dataclass(frozen=True)
 class SaleItem:
-    item_id: int
+    """A sale line. Products must reference a registered CatalogItem;
+    services may reference one (pre-loaded, priced) or be entirely
+    ad-hoc (item_id=None, free-text description_snapshot only) — a
+    professional invoicing a one-off service that was never catalogued.
+    """
+
+    kind: CatalogItemType
     description_snapshot: str
     quantity: Decimal
     unit_price: Decimal
+    item_id: int | None = None
     discount_amount: Decimal = Decimal("0")
     tax_rate: Decimal = Decimal("0")
     tax_amount: Decimal = Decimal("0")
     unit_cost_snapshot: Decimal | None = None
+
+    def __post_init__(self):
+        if self.kind == CatalogItemType.PRODUCT and self.item_id is None:
+            raise ValueError(
+                "Una línea de producto requiere item_id: a diferencia de los "
+                "servicios, las ventas de productos siempre deben referenciar "
+                "un CatalogItem registrado."
+            )
 
     @property
     def line_total(self) -> Decimal:

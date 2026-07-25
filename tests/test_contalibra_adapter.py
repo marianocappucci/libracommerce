@@ -10,7 +10,6 @@ from decimal import Decimal
 import pytest
 
 from libracommerce.adapters.contalibra import (
-    UnmappableSaleItemError,
     read_catalog_items,
     read_locations,
     read_parties_from_clients,
@@ -224,6 +223,7 @@ def test_read_sales_maps_items_and_status(contalibra_conn):
     sale = sales[0]
     assert sale.status == SaleStatus.CONFIRMED
     assert sale.customer_party_id == 1
+    assert sale.items[0].kind == CatalogItemType.PRODUCT
     assert sale.items[0].item_id == 1
     assert sale.items[0].quantity == Decimal("2")
     assert sale.total == Decimal("3000")
@@ -248,7 +248,7 @@ def test_read_sales_maps_pendiente_and_anulada(contalibra_conn):
     assert sales["V-0003"].status == SaleStatus.CANCELLED
 
 
-def test_read_sales_raises_on_ad_hoc_item_without_producto_id(contalibra_conn):
+def test_read_sales_maps_ad_hoc_item_without_producto_id_as_service(contalibra_conn):
     items = json.dumps(
         [{"nombre": "Servicio extra", "qty": 1, "precio": 500, "subtotal": 500, "producto_id": None}]
     )
@@ -257,5 +257,8 @@ def test_read_sales_raises_on_ad_hoc_item_without_producto_id(contalibra_conn):
            VALUES ('V-0004', '2026-07-25', ?, 500, 0, 500, 'cobrada')""",
         (items,),
     )
-    with pytest.raises(UnmappableSaleItemError):
-        read_sales(contalibra_conn)
+    sales = read_sales(contalibra_conn)
+    line = sales[0].items[0]
+    assert line.kind == CatalogItemType.SERVICE
+    assert line.item_id is None
+    assert line.description_snapshot == "Servicio extra"
