@@ -50,6 +50,21 @@ def init_schema(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS item_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER NOT NULL REFERENCES catalog_items(id),
+            code_type TEXT NOT NULL,
+            code TEXT NOT NULL,
+            is_primary INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(code_type, code)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_item_codes_item
+            ON item_codes(item_id);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_item_codes_one_primary_per_item
+            ON item_codes(item_id) WHERE is_primary = 1;
+
         CREATE TABLE IF NOT EXISTS locations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,

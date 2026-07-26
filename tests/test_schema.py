@@ -15,6 +15,7 @@ def test_schema_enables_foreign_keys_and_creates_core_tables():
         "categories",
         "units",
         "catalog_items",
+        "item_codes",
         "locations",
         "stock_movements",
         "sales",
@@ -66,3 +67,41 @@ def test_schema_allows_service_sale_item_without_catalog_link():
     )
     count = conn.execute("SELECT COUNT(*) FROM sale_items").fetchone()[0]
     assert count == 1
+
+
+def _make_item(conn: sqlite3.Connection) -> int:
+    conn.execute("INSERT INTO units (code, name) VALUES ('u', 'Unidad')")
+    conn.execute(
+        "INSERT INTO catalog_items (item_type, name, unit_code) VALUES ('product', 'Fideos', 'u')"
+    )
+    return conn.execute("SELECT id FROM catalog_items").fetchone()[0]
+
+
+def test_schema_rejects_duplicate_code_within_same_type():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    item_id = _make_item(conn)
+    conn.execute(
+        "INSERT INTO item_codes (item_id, code_type, code) VALUES (?, 'barcode', '7791234567890')",
+        (item_id,),
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO item_codes (item_id, code_type, code) VALUES (?, 'barcode', '7791234567890')",
+            (item_id,),
+        )
+
+
+def test_schema_rejects_second_primary_code_for_same_item():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    item_id = _make_item(conn)
+    conn.execute(
+        "INSERT INTO item_codes (item_id, code_type, code, is_primary) VALUES (?, 'internal', 'A1', 1)",
+        (item_id,),
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO item_codes (item_id, code_type, code, is_primary) VALUES (?, 'barcode', '7791234567890', 1)",
+            (item_id,),
+        )

@@ -8,6 +8,13 @@ class CatalogItemType(StrEnum):
     SERVICE = "service"
 
 
+class ItemCodeType(StrEnum):
+    INTERNAL = "internal"
+    BARCODE = "barcode"
+    SKU = "sku"
+    OTHER = "other"
+
+
 @dataclass(frozen=True)
 class Category:
     id: int | None
@@ -39,3 +46,12 @@ class CatalogItem:
     metadata: dict[str, str] = field(default_factory=dict)
     default_sale_price: Decimal = Decimal("0")
     default_cost: Decimal = Decimal("0")
+
+
+@dataclass(frozen=True)
+class ItemCode:
+    id: int | None
+    item_id: int
+    code_type: ItemCodeType
+    code: str
+    is_primary: bool = False

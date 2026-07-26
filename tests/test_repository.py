@@ -7,7 +7,7 @@ import pytest
 
 from libracommerce.db.repository import SqliteCommerceRepository
 from libracommerce.db.schema import init_schema
-from libracommerce.domain.catalog import CatalogItem, CatalogItemType, Unit
+from libracommerce.domain.catalog import CatalogItem, CatalogItemType, ItemCode, ItemCodeType, Unit
 from libracommerce.domain.entities import Party, PartyType
 from libracommerce.domain.inventory import Location, StockMovement, StockMovementType
 from libracommerce.domain.purchasing import (
@@ -77,6 +77,39 @@ def test_save_catalog_item_reuses_unit_across_items(repo: SqliteCommerceReposito
 
     units = repo._conn.execute("SELECT COUNT(*) FROM units WHERE code = 'kg'").fetchone()[0]
     assert units == 1
+
+
+def test_save_item_code_assigns_id_and_lists_by_item(repo: SqliteCommerceRepository):
+    item = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Yerba", _kg()))
+
+    saved = repo.save_item_code(ItemCode(None, item.id, ItemCodeType.BARCODE, "7791234567890", is_primary=True))
+    assert saved.id is not None
+
+    codes = repo.list_item_codes(item.id)
+    assert codes == (saved,) or list(codes) == [saved]
+
+
+def test_find_item_by_code_resolves_the_catalog_item(repo: SqliteCommerceRepository):
+    item = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Yerba", _kg()))
+    repo.save_item_code(ItemCode(None, item.id, ItemCodeType.BARCODE, "7791234567890"))
+
+    found = repo.find_item_by_code("7791234567890")
+    assert found is not None
+    assert found.id == item.id
+    assert found.name == "Yerba"
+
+
+def test_find_item_by_code_returns_none_for_unknown_code(repo: SqliteCommerceRepository):
+    assert repo.find_item_by_code("nope") is None
+
+
+def test_save_item_code_rejects_duplicate_code_within_same_type(repo: SqliteCommerceRepository):
+    item = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Yerba", _kg()))
+    other = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Azucar", _kg()))
+    repo.save_item_code(ItemCode(None, item.id, ItemCodeType.BARCODE, "7791234567890"))
+
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.save_item_code(ItemCode(None, other.id, ItemCodeType.BARCODE, "7791234567890"))
 
 
 def test_save_location_round_trips(repo: SqliteCommerceRepository):

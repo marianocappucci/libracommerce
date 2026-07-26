@@ -5,7 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Sequence
 
-from libracommerce.domain.catalog import CatalogItem, CatalogItemType, Unit
+from libracommerce.domain.catalog import CatalogItem, CatalogItemType, ItemCode, ItemCodeType, Unit
 from libracommerce.domain.entities import Party, PartyType
 from libracommerce.domain.inventory import Location, StockMovement, StockMovementType
 from libracommerce.domain.purchasing import (
@@ -186,6 +186,9 @@ class SqliteCommerceRepository:
             """,
             (item_id,),
         ).fetchone()
+        return self._catalog_item_from_row(row)
+
+    def _catalog_item_from_row(self, row) -> CatalogItem | None:
         if row is None:
             return None
         unit = Unit(
@@ -209,6 +212,66 @@ class SqliteCommerceRepository:
             default_sale_price=_to_decimal(row[10]),
             default_cost=_to_decimal(row[11]),
         )
+
+    # item codes
+
+    def save_item_code(self, item_code: ItemCode) -> ItemCode:
+        cur = self._conn.cursor()
+        if item_code.id is None:
+            cur.execute(
+                """
+                INSERT INTO item_codes (item_id, code_type, code, is_primary)
+                VALUES (?, ?, ?, ?)
+                """,
+                (item_code.item_id, item_code.code_type, item_code.code, int(item_code.is_primary)),
+            )
+            self._conn.commit()
+            return replace(item_code, id=cur.lastrowid)
+        cur.execute(
+            """
+            UPDATE item_codes SET item_id = ?, code_type = ?, code = ?, is_primary = ?
+            WHERE id = ?
+            """,
+            (item_code.item_id, item_code.code_type, item_code.code, int(item_code.is_primary), item_code.id),
+        )
+        self._conn.commit()
+        return item_code
+
+    def list_item_codes(self, item_id: int) -> Sequence[ItemCode]:
+        rows = self._conn.execute(
+            """
+            SELECT id, item_id, code_type, code, is_primary
+            FROM item_codes WHERE item_id = ?
+            ORDER BY id
+            """,
+            (item_id,),
+        ).fetchall()
+        return [
+            ItemCode(
+                id=row[0],
+                item_id=row[1],
+                code_type=ItemCodeType(row[2]),
+                code=row[3],
+                is_primary=_to_bool(row[4]),
+            )
+            for row in rows
+        ]
+
+    def find_item_by_code(self, code: str) -> CatalogItem | None:
+        row = self._conn.execute(
+            """
+            SELECT ci.id, ci.item_type, ci.name, ci.description, ci.category_id, ci.active,
+                   ci.sellable, ci.purchasable, ci.tax_profile, ci.metadata_json,
+                   ci.default_sale_price, ci.default_cost,
+                   u.code, u.name, u.allows_fraction, u.decimal_scale
+            FROM item_codes ic
+            JOIN catalog_items ci ON ci.id = ic.item_id
+            JOIN units u ON u.code = ci.unit_code
+            WHERE ic.code = ?
+            """,
+            (code,),
+        ).fetchone()
+        return self._catalog_item_from_row(row)
 
     # locations
 
