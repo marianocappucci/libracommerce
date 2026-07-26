@@ -27,6 +27,7 @@ class SaleItem:
     quantity: Decimal
     unit_price: Decimal
     item_id: int | None = None
+    variant_id: int | None = None
     discount_amount: Decimal = Decimal("0")
     tax_rate: Decimal = Decimal("0")
     tax_amount: Decimal = Decimal("0")
@@ -38,6 +39,11 @@ class SaleItem:
                 "Una línea de producto requiere item_id: a diferencia de los "
                 "servicios, las ventas de productos siempre deben referenciar "
                 "un CatalogItem registrado."
+            )
+        if self.variant_id is not None and self.item_id is None:
+            raise ValueError(
+                "Una línea con variant_id requiere item_id: una variante "
+                "siempre pertenece a un item del catálogo."
             )
 
     @property

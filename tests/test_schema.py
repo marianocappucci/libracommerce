@@ -16,6 +16,7 @@ def test_schema_enables_foreign_keys_and_creates_core_tables():
         "units",
         "catalog_items",
         "item_codes",
+        "item_variants",
         "price_lists",
         "item_prices",
         "locations",
@@ -129,4 +130,29 @@ def test_schema_rejects_item_price_with_valid_until_not_after_valid_from():
             VALUES (?, 1, 1000, '2026-01-01T00:00:00', '2026-01-01T00:00:00')
             """,
             (item_id,),
+        )
+
+
+def test_schema_rejects_duplicate_variant_sku():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    item_id = _make_item(conn)
+    conn.execute("INSERT INTO item_variants (item_id, sku, name) VALUES (?, 'REM-M', 'M')", (item_id,))
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO item_variants (item_id, sku, name) VALUES (?, 'REM-M', 'M otra vez')", (item_id,))
+
+
+def test_schema_rejects_sale_item_with_variant_but_no_item_id():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    item_id = _make_item(conn)
+    conn.execute("INSERT INTO sales (number) VALUES ('V-0001')")
+    conn.execute("INSERT INTO item_variants (item_id, sku, name) VALUES (?, 'REM-M', 'M')", (item_id,))
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """
+            INSERT INTO sale_items
+                (sale_id, kind, item_id, variant_id, description_snapshot, quantity, unit_price)
+            VALUES (1, 'service', NULL, 1, 'No deberia poder pasar esto', 1, 100)
+            """
         )

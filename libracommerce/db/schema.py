@@ -65,6 +65,18 @@ def init_schema(conn: sqlite3.Connection) -> None:
         CREATE UNIQUE INDEX IF NOT EXISTS idx_item_codes_one_primary_per_item
             ON item_codes(item_id) WHERE is_primary = 1;
 
+        CREATE TABLE IF NOT EXISTS item_variants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER NOT NULL REFERENCES catalog_items(id),
+            sku TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            attributes_json TEXT NOT NULL DEFAULT '{}',
+            active INTEGER NOT NULL DEFAULT 1
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_item_variants_item
+            ON item_variants(item_id);
+
         CREATE TABLE IF NOT EXISTS price_lists (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -103,6 +115,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS stock_movements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             item_id INTEGER NOT NULL REFERENCES catalog_items(id),
+            variant_id INTEGER REFERENCES item_variants(id),
             location_id INTEGER NOT NULL REFERENCES locations(id),
             movement_type TEXT NOT NULL,
             quantity_delta NUMERIC NOT NULL CHECK (quantity_delta <> 0),
@@ -116,6 +129,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_stock_item_location
             ON stock_movements(item_id, location_id);
+
+        CREATE INDEX IF NOT EXISTS idx_stock_item_variant_location
+            ON stock_movements(item_id, variant_id, location_id);
 
         CREATE TABLE IF NOT EXISTS sales (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -139,6 +155,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             sale_id INTEGER NOT NULL REFERENCES sales(id),
             kind TEXT NOT NULL,
             item_id INTEGER REFERENCES catalog_items(id),
+            variant_id INTEGER REFERENCES item_variants(id),
             description_snapshot TEXT NOT NULL,
             quantity NUMERIC NOT NULL,
             unit_price NUMERIC NOT NULL,
@@ -146,7 +163,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
             tax_rate NUMERIC NOT NULL DEFAULT 0,
             tax_amount NUMERIC NOT NULL DEFAULT 0,
             unit_cost_snapshot NUMERIC,
-            CHECK (kind != 'product' OR item_id IS NOT NULL)
+            CHECK (kind != 'product' OR item_id IS NOT NULL),
+            CHECK (variant_id IS NULL OR item_id IS NOT NULL)
         );
 
         CREATE INDEX IF NOT EXISTS idx_sale_items_sale

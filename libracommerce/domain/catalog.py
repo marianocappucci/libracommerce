@@ -82,3 +82,18 @@ class ItemPrice:
     def __post_init__(self):
         if self.valid_until is not None and self.valid_until <= self.valid_from:
             raise ValueError("valid_until debe ser posterior a valid_from")
+
+
+@dataclass(frozen=True)
+class ItemVariant:
+    """Una combinacion concreta de atributos de un item (ej. talle/color en
+    ropa). La despensa puede seguir usando un item sin ninguna variante --
+    esto es un detalle opcional del catalogo, no un requisito general.
+    """
+
+    id: int | None
+    item_id: int
+    sku: str
+    name: str
+    attributes: dict[str, str] = field(default_factory=dict)
+    active: bool = True

@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 
-from libracommerce.domain.catalog import CatalogItem, CatalogItemType, ItemPrice, Unit
+from libracommerce.domain.catalog import CatalogItem, CatalogItemType, ItemPrice, ItemVariant, Unit
 from libracommerce.domain.entities import Party, PartyRole, PartyType
 from libracommerce.domain.inventory import Location, StockMovement, StockMovementType
 from libracommerce.domain.sales import Sale, SaleItem, SaleStatus
@@ -96,4 +96,22 @@ def test_item_price_rejects_valid_until_not_after_valid_from():
             amount=Decimal("100"),
             valid_from=datetime(2026, 1, 1),
             valid_until=datetime(2026, 1, 1),
+        )
+
+
+def test_item_variant_carries_attributes():
+    variant = ItemVariant(None, 1, "REM-M-AZUL", "M / Azul", attributes={"talle": "M", "color": "azul"})
+    assert variant.attributes == {"talle": "M", "color": "azul"}
+    assert variant.active
+
+
+def test_sale_item_with_variant_requires_item_id():
+    with pytest.raises(ValueError):
+        SaleItem(
+            kind=CatalogItemType.SERVICE,
+            item_id=None,
+            variant_id=5,
+            description_snapshot="No debería poder pasar esto",
+            quantity=Decimal("1"),
+            unit_price=Decimal("100"),
         )

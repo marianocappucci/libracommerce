@@ -13,6 +13,7 @@ from libracommerce.domain.catalog import (
     ItemCode,
     ItemCodeType,
     ItemPrice,
+    ItemVariant,
     PriceList,
     Unit,
 )
@@ -118,6 +119,55 @@ def test_save_item_code_rejects_duplicate_code_within_same_type(repo: SqliteComm
 
     with pytest.raises(sqlite3.IntegrityError):
         repo.save_item_code(ItemCode(None, other.id, ItemCodeType.BARCODE, "7791234567890"))
+
+
+def _unit_u() -> Unit:
+    return Unit("u", "Unidad")
+
+
+def test_save_item_variant_assigns_id_and_round_trips(repo: SqliteCommerceRepository):
+    item = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Remera", _unit_u()))
+
+    saved = repo.save_item_variant(
+        ItemVariant(None, item.id, "REM-M-AZUL", "M / Azul", attributes={"talle": "M", "color": "azul"})
+    )
+    assert saved.id is not None
+    assert repo.get_item_variant(saved.id) == saved
+
+    variants = repo.list_item_variants(item.id)
+    assert list(variants) == [saved]
+
+
+def test_save_item_variant_rejects_duplicate_sku(repo: SqliteCommerceRepository):
+    item = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Remera", _unit_u()))
+    repo.save_item_variant(ItemVariant(None, item.id, "REM-M-AZUL", "M / Azul"))
+
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.save_item_variant(ItemVariant(None, item.id, "REM-M-AZUL", "M / Azul otra vez"))
+
+
+def test_current_stock_is_tracked_independently_per_variant(repo: SqliteCommerceRepository):
+    item = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Remera", _unit_u()))
+    variant_m = repo.save_item_variant(ItemVariant(None, item.id, "REM-M", "M"))
+    variant_l = repo.save_item_variant(ItemVariant(None, item.id, "REM-L", "L"))
+    location = repo.save_location(Location(None, "Deposito Central"))
+
+    repo.append_stock_movement(
+        StockMovement(
+            None, item.id, location.id, StockMovementType.PURCHASE, Decimal("10"), datetime.now(),
+            variant_id=variant_m.id,
+        )
+    )
+    repo.append_stock_movement(
+        StockMovement(
+            None, item.id, location.id, StockMovementType.PURCHASE, Decimal("5"), datetime.now(),
+            variant_id=variant_l.id,
+        )
+    )
+
+    assert repo.current_stock(item.id, location.id, variant_id=variant_m.id) == Decimal("10")
+    assert repo.current_stock(item.id, location.id, variant_id=variant_l.id) == Decimal("5")
+    assert repo.current_stock(item.id, location.id) == Decimal("0")
 
 
 def test_save_price_list_assigns_id_and_round_trips(repo: SqliteCommerceRepository):
@@ -265,6 +315,26 @@ def test_save_sale_persists_items_and_can_be_confirmed(repo: SqliteCommerceRepos
     assert fetched.items[0].kind == CatalogItemType.PRODUCT
     assert fetched.items[0].line_total == Decimal("3315")
     assert fetched.total == Decimal("3315")
+
+
+def test_save_sale_persists_variant_id(repo: SqliteCommerceRepository):
+    item = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Remera", _kg()))
+    variant = repo.save_item_variant(ItemVariant(None, item.id, "REM-M-AZUL", "M / Azul"))
+
+    line = SaleItem(
+        kind=CatalogItemType.PRODUCT,
+        item_id=item.id,
+        variant_id=variant.id,
+        description_snapshot="Remera M / Azul",
+        quantity=Decimal("1"),
+        unit_price=Decimal("5000"),
+    )
+    sale = Sale(None, "V-0003", (line,), total=Decimal("5000"))
+
+    saved = repo.save_sale(sale)
+    fetched = repo.get_sale(saved.id)
+
+    assert fetched.items[0].variant_id == variant.id
 
 
 def test_save_sale_persists_ad_hoc_service_item_without_catalog_link(repo: SqliteCommerceRepository):

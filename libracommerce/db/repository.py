@@ -11,6 +11,7 @@ from libracommerce.domain.catalog import (
     ItemCode,
     ItemCodeType,
     ItemPrice,
+    ItemVariant,
     PriceList,
     Unit,
 )
@@ -281,6 +282,61 @@ class SqliteCommerceRepository:
         ).fetchone()
         return self._catalog_item_from_row(row)
 
+    # item variants
+
+    def save_item_variant(self, variant: ItemVariant) -> ItemVariant:
+        cur = self._conn.cursor()
+        attributes_json = json.dumps(variant.attributes)
+        if variant.id is None:
+            cur.execute(
+                """
+                INSERT INTO item_variants (item_id, sku, name, attributes_json, active)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (variant.item_id, variant.sku, variant.name, attributes_json, int(variant.active)),
+            )
+            self._conn.commit()
+            return replace(variant, id=cur.lastrowid)
+        cur.execute(
+            """
+            UPDATE item_variants SET item_id = ?, sku = ?, name = ?, attributes_json = ?, active = ?
+            WHERE id = ?
+            """,
+            (variant.item_id, variant.sku, variant.name, attributes_json, int(variant.active), variant.id),
+        )
+        self._conn.commit()
+        return variant
+
+    def _item_variant_from_row(self, row) -> ItemVariant | None:
+        if row is None:
+            return None
+        return ItemVariant(
+            id=row[0],
+            item_id=row[1],
+            sku=row[2],
+            name=row[3],
+            attributes=json.loads(row[4]),
+            active=_to_bool(row[5]),
+        )
+
+    def get_item_variant(self, variant_id: int) -> ItemVariant | None:
+        row = self._conn.execute(
+            "SELECT id, item_id, sku, name, attributes_json, active FROM item_variants WHERE id = ?",
+            (variant_id,),
+        ).fetchone()
+        return self._item_variant_from_row(row)
+
+    def list_item_variants(self, item_id: int) -> Sequence[ItemVariant]:
+        rows = self._conn.execute(
+            """
+            SELECT id, item_id, sku, name, attributes_json, active
+            FROM item_variants WHERE item_id = ?
+            ORDER BY id
+            """,
+            (item_id,),
+        ).fetchall()
+        return [self._item_variant_from_row(row) for row in rows]
+
     # price lists
 
     def save_price_list(self, price_list: PriceList) -> PriceList:
@@ -465,12 +521,13 @@ class SqliteCommerceRepository:
         cur.execute(
             """
             INSERT INTO stock_movements
-                (item_id, location_id, movement_type, quantity_delta, occurred_at,
+                (item_id, variant_id, location_id, movement_type, quantity_delta, occurred_at,
                  source_type, source_id, unit_cost, lot_code, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 movement.item_id,
+                movement.variant_id,
                 movement.location_id,
                 movement.movement_type,
                 str(movement.quantity_delta),
@@ -485,42 +542,49 @@ class SqliteCommerceRepository:
         self._conn.commit()
         return replace(movement, id=cur.lastrowid)
 
-    def list_stock_movements(self, item_id: int, location_id: int) -> Sequence[StockMovement]:
+    def list_stock_movements(
+        self, item_id: int, location_id: int, *, variant_id: int | None = None
+    ) -> Sequence[StockMovement]:
+        variant_filter = "variant_id IS NULL" if variant_id is None else "variant_id = ?"
+        params = (item_id, location_id) if variant_id is None else (item_id, location_id, variant_id)
         rows = self._conn.execute(
-            """
-            SELECT id, item_id, location_id, movement_type, quantity_delta, occurred_at,
+            f"""
+            SELECT id, item_id, variant_id, location_id, movement_type, quantity_delta, occurred_at,
                    source_type, source_id, unit_cost, lot_code, expires_at
             FROM stock_movements
-            WHERE item_id = ? AND location_id = ?
+            WHERE item_id = ? AND location_id = ? AND {variant_filter}
             ORDER BY occurred_at, id
             """,
-            (item_id, location_id),
+            params,
         ).fetchall()
         return [
             StockMovement(
                 id=row[0],
                 item_id=row[1],
-                location_id=row[2],
-                movement_type=StockMovementType(row[3]),
-                quantity_delta=_to_decimal(row[4]),
-                occurred_at=datetime.fromisoformat(row[5]),
-                source_type=row[6],
-                source_id=row[7],
-                unit_cost=_to_decimal(row[8]) if row[8] is not None else None,
-                lot_code=row[9],
-                expires_at=datetime.fromisoformat(row[10]) if row[10] else None,
+                variant_id=row[2],
+                location_id=row[3],
+                movement_type=StockMovementType(row[4]),
+                quantity_delta=_to_decimal(row[5]),
+                occurred_at=datetime.fromisoformat(row[6]),
+                source_type=row[7],
+                source_id=row[8],
+                unit_cost=_to_decimal(row[9]) if row[9] is not None else None,
+                lot_code=row[10],
+                expires_at=datetime.fromisoformat(row[11]) if row[11] else None,
             )
             for row in rows
         ]
 
-    def current_stock(self, item_id: int, location_id: int) -> Decimal:
+    def current_stock(self, item_id: int, location_id: int, *, variant_id: int | None = None) -> Decimal:
+        variant_filter = "variant_id IS NULL" if variant_id is None else "variant_id = ?"
+        params = (item_id, location_id) if variant_id is None else (item_id, location_id, variant_id)
         row = self._conn.execute(
-            """
+            f"""
             SELECT COALESCE(SUM(quantity_delta), 0)
             FROM stock_movements
-            WHERE item_id = ? AND location_id = ?
+            WHERE item_id = ? AND location_id = ? AND {variant_filter}
             """,
-            (item_id, location_id),
+            params,
         ).fetchone()
         return _to_decimal(row[0])
 
@@ -584,14 +648,15 @@ class SqliteCommerceRepository:
             cur.execute(
                 """
                 INSERT INTO sale_items
-                    (sale_id, kind, item_id, description_snapshot, quantity, unit_price,
+                    (sale_id, kind, item_id, variant_id, description_snapshot, quantity, unit_price,
                      discount_amount, tax_rate, tax_amount, unit_cost_snapshot)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     sale_id,
                     line.kind,
                     line.item_id,
+                    line.variant_id,
                     line.description_snapshot,
                     str(line.quantity),
                     str(line.unit_price),
@@ -618,7 +683,7 @@ class SqliteCommerceRepository:
             return None
         item_rows = self._conn.execute(
             """
-            SELECT kind, item_id, description_snapshot, quantity, unit_price, discount_amount,
+            SELECT kind, item_id, variant_id, description_snapshot, quantity, unit_price, discount_amount,
                    tax_rate, tax_amount, unit_cost_snapshot
             FROM sale_items WHERE sale_id = ?
             ORDER BY id
@@ -629,13 +694,14 @@ class SqliteCommerceRepository:
             SaleItem(
                 kind=CatalogItemType(item_row[0]),
                 item_id=item_row[1],
-                description_snapshot=item_row[2],
-                quantity=_to_decimal(item_row[3]),
-                unit_price=_to_decimal(item_row[4]),
-                discount_amount=_to_decimal(item_row[5]),
-                tax_rate=_to_decimal(item_row[6]),
-                tax_amount=_to_decimal(item_row[7]),
-                unit_cost_snapshot=_to_decimal(item_row[8]) if item_row[8] is not None else None,
+                variant_id=item_row[2],
+                description_snapshot=item_row[3],
+                quantity=_to_decimal(item_row[4]),
+                unit_price=_to_decimal(item_row[5]),
+                discount_amount=_to_decimal(item_row[6]),
+                tax_rate=_to_decimal(item_row[7]),
+                tax_amount=_to_decimal(item_row[8]),
+                unit_cost_snapshot=_to_decimal(item_row[9]) if item_row[9] is not None else None,
             )
             for item_row in item_rows
         )

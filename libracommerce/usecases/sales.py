@@ -35,6 +35,7 @@ def confirm_sale(
             StockMovement(
                 id=None,
                 item_id=line.item_id,
+                variant_id=line.variant_id,
                 location_id=location_id,
                 movement_type=StockMovementType.SALE,
                 quantity_delta=-line.quantity,

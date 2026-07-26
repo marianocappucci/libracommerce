@@ -36,6 +36,7 @@ class StockMovement:
     unit_cost: Decimal | None = None
     lot_code: str | None = None
     expires_at: datetime | None = None
+    variant_id: int | None = None
 
     def is_inbound(self) -> bool:
         return self.quantity_delta > 0

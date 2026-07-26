@@ -6,7 +6,7 @@ import pytest
 
 from libracommerce.db.repository import SqliteCommerceRepository
 from libracommerce.db.schema import init_schema
-from libracommerce.domain.catalog import CatalogItem, CatalogItemType, Unit
+from libracommerce.domain.catalog import CatalogItem, CatalogItemType, ItemVariant, Unit
 from libracommerce.domain.entities import Party, PartyType
 from libracommerce.domain.inventory import Location, StockMovementType
 from libracommerce.domain.purchasing import (
@@ -74,6 +74,29 @@ def test_confirm_sale_moves_stock_for_product_lines_only(repo: SqliteCommerceRep
     assert movements[0].movement_type == StockMovementType.SALE
     assert movements[0].source_type == "sale"
     assert movements[0].source_id == confirmed.id
+
+
+def test_confirm_sale_moves_stock_for_the_specific_variant_sold(repo: SqliteCommerceRepository):
+    product = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Remera", _unit()))
+    variant_m = repo.save_item_variant(ItemVariant(None, product.id, "REM-M-AZUL", "M / Azul"))
+    variant_l = repo.save_item_variant(ItemVariant(None, product.id, "REM-L-AZUL", "L / Azul"))
+    location = _location(repo)
+    sale = Sale(
+        None,
+        "V-3",
+        (
+            SaleItem(
+                CatalogItemType.PRODUCT, "Remera M/Azul", Decimal("2"), Decimal("5000"),
+                item_id=product.id, variant_id=variant_m.id,
+            ),
+        ),
+    )
+
+    confirm_sale(repo, sale, location.id, WHEN)
+
+    assert repo.current_stock(product.id, location.id, variant_id=variant_m.id) == Decimal("-2")
+    assert repo.current_stock(product.id, location.id, variant_id=variant_l.id) == Decimal("0")
+    assert repo.current_stock(product.id, location.id) == Decimal("0")
 
 
 def test_confirm_sale_rejects_non_draft(repo: SqliteCommerceRepository):
