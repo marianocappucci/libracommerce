@@ -798,6 +798,9 @@ class SqliteCommerceRepository:
             """,
             (order_id,),
         ).fetchone()
+        return self._purchase_order_from_row(row)
+
+    def _purchase_order_from_row(self, row) -> PurchaseOrder | None:
         if row is None:
             return None
         item_rows = self._conn.execute(
@@ -806,7 +809,7 @@ class SqliteCommerceRepository:
             FROM purchase_order_items WHERE purchase_order_id = ?
             ORDER BY id
             """,
-            (order_id,),
+            (row[0],),
         ).fetchall()
         items = tuple(
             PurchaseOrderItem(
@@ -830,6 +833,17 @@ class SqliteCommerceRepository:
             notes=row[7],
             created_by=row[8],
         )
+
+    def list_purchase_orders(self) -> Sequence[PurchaseOrder]:
+        rows = self._conn.execute(
+            """
+            SELECT id, number, supplier_party_id, branch_id, status, ordered_at, expected_at,
+                   notes, created_by
+            FROM purchase_orders
+            ORDER BY id DESC
+            """,
+        ).fetchall()
+        return [self._purchase_order_from_row(row) for row in rows]
 
     def save_purchase_receipt(self, receipt: PurchaseReceipt) -> PurchaseReceipt:
         cur = self._conn.cursor()
@@ -900,6 +914,9 @@ class SqliteCommerceRepository:
             """,
             (receipt_id,),
         ).fetchone()
+        return self._purchase_receipt_from_row(row)
+
+    def _purchase_receipt_from_row(self, row) -> PurchaseReceipt | None:
         if row is None:
             return None
         item_rows = self._conn.execute(
@@ -908,7 +925,7 @@ class SqliteCommerceRepository:
             FROM purchase_receipt_items WHERE receipt_id = ?
             ORDER BY id
             """,
-            (receipt_id,),
+            (row[0],),
         ).fetchall()
         items = tuple(
             PurchaseReceiptItem(
@@ -930,3 +947,14 @@ class SqliteCommerceRepository:
             document_reference=row[5],
             created_by=row[6],
         )
+
+    def list_purchase_receipts(self) -> Sequence[PurchaseReceipt]:
+        rows = self._conn.execute(
+            """
+            SELECT id, purchase_order_id, supplier_party_id, status, received_at,
+                   document_reference, created_by
+            FROM purchase_receipts
+            ORDER BY id DESC
+            """,
+        ).fetchall()
+        return [self._purchase_receipt_from_row(row) for row in rows]

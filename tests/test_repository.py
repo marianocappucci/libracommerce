@@ -425,3 +425,33 @@ def test_save_purchase_receipt_persists_lot_and_expiry(repo: SqliteCommerceRepos
     assert fetched.purchase_order_id == order.id
     assert fetched.items[0].lot_code == "L-2026-07"
     assert fetched.items[0].expires_at == datetime(2027, 1, 1)
+
+
+def test_list_purchase_orders_returns_newest_first(repo: SqliteCommerceRepository):
+    item = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Yerba", _kg()))
+    supplier = repo.save_party(Party(None, PartyType.ORGANIZATION, "Distribuidora SA"))
+    first = repo.save_purchase_order(
+        PurchaseOrder(None, "OC-0010", supplier_party_id=supplier.id, items=(PurchaseOrderItem(item.id, Decimal("5"), Decimal("100")),))
+    )
+    second = repo.save_purchase_order(
+        PurchaseOrder(None, "OC-0011", supplier_party_id=supplier.id, items=(PurchaseOrderItem(item.id, Decimal("5"), Decimal("100")),))
+    )
+
+    orders = repo.list_purchase_orders()
+
+    assert [o.id for o in orders] == [second.id, first.id]
+
+
+def test_list_purchase_receipts_returns_newest_first(repo: SqliteCommerceRepository):
+    item = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Yerba", _kg()))
+    supplier = repo.save_party(Party(None, PartyType.ORGANIZATION, "Distribuidora SA"))
+    first = repo.save_purchase_receipt(
+        PurchaseReceipt(None, supplier_party_id=supplier.id, items=(PurchaseReceiptItem(item.id, Decimal("5"), Decimal("100")),))
+    )
+    second = repo.save_purchase_receipt(
+        PurchaseReceipt(None, supplier_party_id=supplier.id, items=(PurchaseReceiptItem(item.id, Decimal("5"), Decimal("100")),))
+    )
+
+    receipts = repo.list_purchase_receipts()
+
+    assert [r.id for r in receipts] == [second.id, first.id]
