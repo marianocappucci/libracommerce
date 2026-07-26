@@ -1,5 +1,7 @@
 import sqlite3
 
+from .migrations import run_migrations
+
 
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
@@ -130,9 +132,6 @@ def init_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_stock_item_location
             ON stock_movements(item_id, location_id);
 
-        CREATE INDEX IF NOT EXISTS idx_stock_item_variant_location
-            ON stock_movements(item_id, variant_id, location_id);
-
         CREATE TABLE IF NOT EXISTS sales (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             number TEXT NOT NULL UNIQUE,
@@ -221,3 +220,4 @@ def init_schema(conn: sqlite3.Connection) -> None:
             ON purchase_receipt_items(receipt_id);
         """
     )
+    run_migrations(conn)
