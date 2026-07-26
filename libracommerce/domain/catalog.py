@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from decimal import Decimal
 
@@ -55,3 +56,29 @@ class ItemCode:
     code_type: ItemCodeType
     code: str
     is_primary: bool = False
+
+
+@dataclass(frozen=True)
+class PriceList:
+    id: int | None
+    name: str
+    description: str = ""
+    active: bool = True
+    is_default: bool = False
+
+
+@dataclass(frozen=True)
+class ItemPrice:
+    id: int | None
+    item_id: int
+    price_list_id: int
+    amount: Decimal
+    valid_from: datetime
+    currency: str = "ARS"
+    valid_until: datetime | None = None
+    min_quantity: Decimal | None = None
+    branch_id: int | None = None
+
+    def __post_init__(self):
+        if self.valid_until is not None and self.valid_until <= self.valid_from:
+            raise ValueError("valid_until debe ser posterior a valid_from")

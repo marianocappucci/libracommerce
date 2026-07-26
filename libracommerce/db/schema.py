@@ -65,6 +65,33 @@ def init_schema(conn: sqlite3.Connection) -> None:
         CREATE UNIQUE INDEX IF NOT EXISTS idx_item_codes_one_primary_per_item
             ON item_codes(item_id) WHERE is_primary = 1;
 
+        CREATE TABLE IF NOT EXISTS price_lists (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            active INTEGER NOT NULL DEFAULT 1,
+            is_default INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_price_lists_one_default
+            ON price_lists(is_default) WHERE is_default = 1;
+
+        CREATE TABLE IF NOT EXISTS item_prices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER NOT NULL REFERENCES catalog_items(id),
+            price_list_id INTEGER NOT NULL REFERENCES price_lists(id),
+            amount NUMERIC NOT NULL,
+            currency TEXT NOT NULL DEFAULT 'ARS',
+            valid_from TEXT NOT NULL,
+            valid_until TEXT,
+            min_quantity NUMERIC,
+            branch_id INTEGER,
+            CHECK (valid_until IS NULL OR valid_until > valid_from)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_item_prices_item_list
+            ON item_prices(item_id, price_list_id);
+
         CREATE TABLE IF NOT EXISTS locations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,

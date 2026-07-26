@@ -16,6 +16,8 @@ def test_schema_enables_foreign_keys_and_creates_core_tables():
         "units",
         "catalog_items",
         "item_codes",
+        "price_lists",
+        "item_prices",
         "locations",
         "stock_movements",
         "sales",
@@ -103,5 +105,28 @@ def test_schema_rejects_second_primary_code_for_same_item():
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
             "INSERT INTO item_codes (item_id, code_type, code, is_primary) VALUES (?, 'barcode', '7791234567890', 1)",
+            (item_id,),
+        )
+
+
+def test_schema_rejects_second_default_price_list():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    conn.execute("INSERT INTO price_lists (name, is_default) VALUES ('Mayorista', 1)")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO price_lists (name, is_default) VALUES ('Minorista', 1)")
+
+
+def test_schema_rejects_item_price_with_valid_until_not_after_valid_from():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    item_id = _make_item(conn)
+    conn.execute("INSERT INTO price_lists (name) VALUES ('General')")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """
+            INSERT INTO item_prices (item_id, price_list_id, amount, valid_from, valid_until)
+            VALUES (?, 1, 1000, '2026-01-01T00:00:00', '2026-01-01T00:00:00')
+            """,
             (item_id,),
         )

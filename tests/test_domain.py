@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 
-from libracommerce.domain.catalog import CatalogItem, CatalogItemType, Unit
+from libracommerce.domain.catalog import CatalogItem, CatalogItemType, ItemPrice, Unit
 from libracommerce.domain.entities import Party, PartyRole, PartyType
 from libracommerce.domain.inventory import Location, StockMovement, StockMovementType
 from libracommerce.domain.sales import Sale, SaleItem, SaleStatus
@@ -85,3 +85,15 @@ def test_service_sale_item_can_reference_a_catalog_service():
         unit_price=Decimal("3000"),
     )
     assert item.item_id == 7
+
+
+def test_item_price_rejects_valid_until_not_after_valid_from():
+    with pytest.raises(ValueError):
+        ItemPrice(
+            id=None,
+            item_id=1,
+            price_list_id=1,
+            amount=Decimal("100"),
+            valid_from=datetime(2026, 1, 1),
+            valid_until=datetime(2026, 1, 1),
+        )

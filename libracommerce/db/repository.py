@@ -5,7 +5,15 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Sequence
 
-from libracommerce.domain.catalog import CatalogItem, CatalogItemType, ItemCode, ItemCodeType, Unit
+from libracommerce.domain.catalog import (
+    CatalogItem,
+    CatalogItemType,
+    ItemCode,
+    ItemCodeType,
+    ItemPrice,
+    PriceList,
+    Unit,
+)
 from libracommerce.domain.entities import Party, PartyType
 from libracommerce.domain.inventory import Location, StockMovement, StockMovementType
 from libracommerce.domain.purchasing import (
@@ -272,6 +280,154 @@ class SqliteCommerceRepository:
             (code,),
         ).fetchone()
         return self._catalog_item_from_row(row)
+
+    # price lists
+
+    def save_price_list(self, price_list: PriceList) -> PriceList:
+        cur = self._conn.cursor()
+        if price_list.id is None:
+            cur.execute(
+                """
+                INSERT INTO price_lists (name, description, active, is_default)
+                VALUES (?, ?, ?, ?)
+                """,
+                (price_list.name, price_list.description, int(price_list.active), int(price_list.is_default)),
+            )
+            self._conn.commit()
+            return replace(price_list, id=cur.lastrowid)
+        cur.execute(
+            """
+            UPDATE price_lists SET name = ?, description = ?, active = ?, is_default = ?
+            WHERE id = ?
+            """,
+            (
+                price_list.name, price_list.description, int(price_list.active),
+                int(price_list.is_default), price_list.id,
+            ),
+        )
+        self._conn.commit()
+        return price_list
+
+    def get_price_list(self, price_list_id: int) -> PriceList | None:
+        row = self._conn.execute(
+            "SELECT id, name, description, active, is_default FROM price_lists WHERE id = ?",
+            (price_list_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return PriceList(
+            id=row[0], name=row[1], description=row[2], active=_to_bool(row[3]), is_default=_to_bool(row[4])
+        )
+
+    def save_item_price(self, item_price: ItemPrice) -> ItemPrice:
+        cur = self._conn.cursor()
+        values = (
+            item_price.item_id,
+            item_price.price_list_id,
+            str(item_price.amount),
+            item_price.currency,
+            item_price.valid_from.isoformat(),
+            item_price.valid_until.isoformat() if item_price.valid_until else None,
+            str(item_price.min_quantity) if item_price.min_quantity is not None else None,
+            item_price.branch_id,
+        )
+        if item_price.id is None:
+            cur.execute(
+                """
+                INSERT INTO item_prices
+                    (item_id, price_list_id, amount, currency, valid_from, valid_until, min_quantity, branch_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                values,
+            )
+            self._conn.commit()
+            return replace(item_price, id=cur.lastrowid)
+        cur.execute(
+            """
+            UPDATE item_prices
+            SET item_id = ?, price_list_id = ?, amount = ?, currency = ?, valid_from = ?,
+                valid_until = ?, min_quantity = ?, branch_id = ?
+            WHERE id = ?
+            """,
+            values + (item_price.id,),
+        )
+        self._conn.commit()
+        return item_price
+
+    def _item_price_from_row(self, row) -> ItemPrice:
+        return ItemPrice(
+            id=row[0],
+            item_id=row[1],
+            price_list_id=row[2],
+            amount=_to_decimal(row[3]),
+            currency=row[4],
+            valid_from=datetime.fromisoformat(row[5]),
+            valid_until=datetime.fromisoformat(row[6]) if row[6] else None,
+            min_quantity=_to_decimal(row[7]) if row[7] is not None else None,
+            branch_id=row[8],
+        )
+
+    def list_item_prices(self, item_id: int) -> Sequence[ItemPrice]:
+        rows = self._conn.execute(
+            """
+            SELECT id, item_id, price_list_id, amount, currency, valid_from, valid_until, min_quantity, branch_id
+            FROM item_prices WHERE item_id = ?
+            ORDER BY valid_from
+            """,
+            (item_id,),
+        ).fetchall()
+        return [self._item_price_from_row(row) for row in rows]
+
+    def resolve_price(
+        self,
+        item_id: int,
+        *,
+        price_list_id: int | None = None,
+        quantity: Decimal = Decimal("1"),
+        at: datetime | None = None,
+        branch_id: int | None = None,
+    ) -> Decimal | None:
+        """Resuelve el precio efectivo: si `price_list_id` no se pasa, usa la
+        lista marcada `is_default` (activa). Entre los precios vigentes en
+        `at` para esa cantidad, prioriza el más específico: precio por
+        sucursal antes que general, luego el quiebre de cantidad más alto
+        aplicable, y como último desempate el más reciente.
+        """
+        list_id = price_list_id
+        if list_id is None:
+            row = self._conn.execute(
+                "SELECT id FROM price_lists WHERE is_default = 1 AND active = 1"
+            ).fetchone()
+            if row is None:
+                return None
+            list_id = row[0]
+
+        moment = (at or datetime.now()).isoformat()
+        rows = self._conn.execute(
+            """
+            SELECT amount, min_quantity, branch_id, valid_from
+            FROM item_prices
+            WHERE item_id = ? AND price_list_id = ?
+              AND valid_from <= ?
+              AND (valid_until IS NULL OR valid_until >= ?)
+              AND (min_quantity IS NULL OR min_quantity <= ?)
+              AND (branch_id IS NULL OR branch_id = ?)
+            """,
+            (item_id, list_id, moment, moment, str(quantity), branch_id),
+        ).fetchall()
+        if not rows:
+            return None
+
+        def sort_key(row):
+            amount, min_quantity, row_branch_id, valid_from = row
+            return (
+                1 if row_branch_id is not None else 0,
+                _to_decimal(min_quantity) if min_quantity is not None else Decimal("0"),
+                valid_from,
+            )
+
+        best = max(rows, key=sort_key)
+        return _to_decimal(best[0])
 
     # locations
 

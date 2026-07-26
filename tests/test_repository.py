@@ -7,7 +7,15 @@ import pytest
 
 from libracommerce.db.repository import SqliteCommerceRepository
 from libracommerce.db.schema import init_schema
-from libracommerce.domain.catalog import CatalogItem, CatalogItemType, ItemCode, ItemCodeType, Unit
+from libracommerce.domain.catalog import (
+    CatalogItem,
+    CatalogItemType,
+    ItemCode,
+    ItemCodeType,
+    ItemPrice,
+    PriceList,
+    Unit,
+)
 from libracommerce.domain.entities import Party, PartyType
 from libracommerce.domain.inventory import Location, StockMovement, StockMovementType
 from libracommerce.domain.purchasing import (
@@ -110,6 +118,96 @@ def test_save_item_code_rejects_duplicate_code_within_same_type(repo: SqliteComm
 
     with pytest.raises(sqlite3.IntegrityError):
         repo.save_item_code(ItemCode(None, other.id, ItemCodeType.BARCODE, "7791234567890"))
+
+
+def test_save_price_list_assigns_id_and_round_trips(repo: SqliteCommerceRepository):
+    saved = repo.save_price_list(PriceList(None, "Mayorista", is_default=True))
+    assert saved.id is not None
+    assert repo.get_price_list(saved.id) == saved
+
+
+def test_save_price_list_rejects_second_default(repo: SqliteCommerceRepository):
+    repo.save_price_list(PriceList(None, "Mayorista", is_default=True))
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.save_price_list(PriceList(None, "Minorista", is_default=True))
+
+
+def test_save_item_price_round_trips(repo: SqliteCommerceRepository):
+    item = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Yerba", _kg()))
+    price_list = repo.save_price_list(PriceList(None, "General"))
+
+    saved = repo.save_item_price(
+        ItemPrice(None, item.id, price_list.id, Decimal("1500.50"), valid_from=datetime(2026, 1, 1))
+    )
+    assert saved.id is not None
+
+    prices = repo.list_item_prices(item.id)
+    assert list(prices) == [saved]
+
+
+def test_resolve_price_returns_none_when_no_price_configured(repo: SqliteCommerceRepository):
+    item = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Yerba", _kg()))
+    price_list = repo.save_price_list(PriceList(None, "General"))
+    assert repo.resolve_price(item.id, price_list_id=price_list.id) is None
+
+
+def test_resolve_price_uses_default_price_list_when_not_specified(repo: SqliteCommerceRepository):
+    item = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Yerba", _kg()))
+    price_list = repo.save_price_list(PriceList(None, "General", is_default=True))
+    repo.save_item_price(
+        ItemPrice(None, item.id, price_list.id, Decimal("1500"), valid_from=datetime(2026, 1, 1))
+    )
+
+    assert repo.resolve_price(item.id, at=datetime(2026, 6, 1)) == Decimal("1500")
+
+
+def test_resolve_price_respects_validity_window(repo: SqliteCommerceRepository):
+    item = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Yerba", _kg()))
+    price_list = repo.save_price_list(PriceList(None, "General"))
+    repo.save_item_price(
+        ItemPrice(
+            None, item.id, price_list.id, Decimal("1500"),
+            valid_from=datetime(2026, 1, 1), valid_until=datetime(2026, 3, 1),
+        )
+    )
+
+    assert repo.resolve_price(item.id, price_list_id=price_list.id, at=datetime(2026, 2, 1)) == Decimal("1500")
+    assert repo.resolve_price(item.id, price_list_id=price_list.id, at=datetime(2026, 4, 1)) is None
+    assert repo.resolve_price(item.id, price_list_id=price_list.id, at=datetime(2025, 12, 1)) is None
+
+
+def test_resolve_price_applies_quantity_break(repo: SqliteCommerceRepository):
+    item = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Yerba", _kg()))
+    price_list = repo.save_price_list(PriceList(None, "General"))
+    repo.save_item_price(
+        ItemPrice(None, item.id, price_list.id, Decimal("1500"), valid_from=datetime(2026, 1, 1))
+    )
+    repo.save_item_price(
+        ItemPrice(
+            None, item.id, price_list.id, Decimal("1300"),
+            valid_from=datetime(2026, 1, 1), min_quantity=Decimal("10"),
+        )
+    )
+
+    assert repo.resolve_price(item.id, price_list_id=price_list.id, quantity=Decimal("3")) == Decimal("1500")
+    assert repo.resolve_price(item.id, price_list_id=price_list.id, quantity=Decimal("10")) == Decimal("1300")
+
+
+def test_resolve_price_prefers_branch_specific_over_general(repo: SqliteCommerceRepository):
+    item = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Yerba", _kg()))
+    price_list = repo.save_price_list(PriceList(None, "General"))
+    repo.save_item_price(
+        ItemPrice(None, item.id, price_list.id, Decimal("1500"), valid_from=datetime(2026, 1, 1))
+    )
+    repo.save_item_price(
+        ItemPrice(
+            None, item.id, price_list.id, Decimal("1600"),
+            valid_from=datetime(2026, 1, 1), branch_id=2,
+        )
+    )
+
+    assert repo.resolve_price(item.id, price_list_id=price_list.id, branch_id=2) == Decimal("1600")
+    assert repo.resolve_price(item.id, price_list_id=price_list.id, branch_id=1) == Decimal("1500")
 
 
 def test_save_location_round_trips(repo: SqliteCommerceRepository):
