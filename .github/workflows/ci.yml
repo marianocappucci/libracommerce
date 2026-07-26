@@ -19,6 +19,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      # libraedge (dependencia privada del extra offline-server, agregada
+      # cuando la sync se migro ahi) es inalcanzable con el GITHUB_TOKEN
+      # por defecto. LIBRA_PAT es un PAT fine-grained con acceso de
+      # lectura a libraedge -- mismo patron que ventalibra/gestiolibra/medlibra.
+      - name: Configure git for private Libra dependencies
+        run: git config --global url."https://${{ secrets.LIBRA_PAT }}@github.com/".insteadOf "https://github.com/"
+
       - name: Install package + dev deps
         run: pip install -e ".[dev,offline-server]"
 
