@@ -30,6 +30,23 @@ end-to-end (Fase 3, 2026-07-27): `cobrar_pedido` fallaba con
 `UPDATE pedidos SET venta_id=?` con un id de `sales`, porque la FK
 todavia apuntaba a la vieja `ventas`. Se repunta igual que
 recetas/receta_items.
+
+Segundo bug real, tambien encontrado end-to-end (mismo dia): `pedidos`
+es tabla padre de `comandas`/`pedido_items` (`pedido_id REFERENCES
+pedidos(id)`). El rebuild de 12 pasos de SQLite (`ALTER TABLE pedidos
+RENAME TO pedidos_old`) hace que SQLite **reescriba automaticamente** el
+texto de la FK en las tablas hijas para que apunten a `pedidos_old` --
+comportamiento estandar de `ALTER TABLE ... RENAME TO` desde SQLite
+3.25. Como el nuevo `pedidos` se crea con `CREATE TABLE` (no un rename),
+esa reescritura automatica nunca se corrige sola, y `comandas`/
+`pedido_items` quedan apuntando permanentemente a una tabla que ya no
+existe (`sqlite3.OperationalError: no such table: main.pedidos_old` al
+insertar). Se resuelve reconstruyendo tambien esas dos tablas, en orden
+de dependencia (pedidos -> comandas -> pedido_items, porque
+`pedido_items.comanda_id` referencia `comandas`, que tambien se
+reconstruye). De paso, `pedido_items.producto_id` -- que nunca se habia
+tocado -- se repunta de `productos` a `catalog_items`, mismo criterio
+que `receta_items.ingrediente_id`.
 """
 import sqlite3
 from dataclasses import dataclass
@@ -45,6 +62,8 @@ class RestolibraMigrationReport(MigrationReport):
     recetas_repointed: bool = False
     receta_items_repointed: bool = False
     pedidos_repointed: bool = False
+    comandas_repointed: bool = False
+    pedido_items_repointed: bool = False
 
 
 def _repoint_recetas_fk(conn: sqlite3.Connection) -> bool:
@@ -157,20 +176,112 @@ def _repoint_pedidos_venta_fk(conn: sqlite3.Connection) -> bool:
     return True
 
 
+def _repoint_comandas_fk(conn: sqlite3.Connection) -> bool:
+    """Corre DESPUES de `_repoint_pedidos_venta_fk`: el rename de `pedidos`
+    dejo `comandas.pedido_id` apuntando a `pedidos_old` (ver docstring del
+    modulo). Si `pedidos` nunca se reapunto (base ya migrada, o instalacion
+    nueva que ya nace con el schema correcto), esto es un no-op."""
+    fks = conn.execute("PRAGMA foreign_key_list(comandas)").fetchall()
+    if not any(row[2] == "pedidos_old" for row in fks):
+        return False
+
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("ALTER TABLE comandas RENAME TO comandas_old")
+        conn.execute(
+            """
+            CREATE TABLE comandas (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                pedido_id  INTEGER NOT NULL REFERENCES pedidos(id) ON DELETE CASCADE,
+                estacion   TEXT NOT NULL,
+                numero     INTEGER NOT NULL DEFAULT 0,
+                estado     TEXT NOT NULL DEFAULT 'pendiente',
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                preparacion_at TEXT,
+                listo_at TEXT,
+                entregado_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO comandas (id, pedido_id, estacion, numero, estado, created_at, "
+            "updated_at, preparacion_at, listo_at, entregado_at) "
+            "SELECT id, pedido_id, estacion, numero, estado, created_at, "
+            "updated_at, preparacion_at, listo_at, entregado_at FROM comandas_old"
+        )
+        conn.execute("DROP TABLE comandas_old")
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+    return True
+
+
+def _repoint_pedido_items_fk(conn: sqlite3.Connection) -> bool:
+    """Corre DESPUES de `_repoint_pedidos_venta_fk` y `_repoint_comandas_fk`
+    -- `pedido_items` referencia a ambas, asi que se reconstruye al final
+    para heredar los nombres ya corregidos. De paso repunta `producto_id`
+    de `productos` a `catalog_items` (nunca lo cubria ningun repoint
+    anterior)."""
+    fks = conn.execute("PRAGMA foreign_key_list(pedido_items)").fetchall()
+    necesita_fix = any(row[2] in ("pedidos_old", "comandas_old", "productos") for row in fks)
+    if not necesita_fix:
+        return False
+
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("ALTER TABLE pedido_items RENAME TO pedido_items_old")
+        conn.execute(
+            """
+            CREATE TABLE pedido_items (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                pedido_id   INTEGER NOT NULL REFERENCES pedidos(id) ON DELETE CASCADE,
+                comanda_id  INTEGER REFERENCES comandas(id) ON DELETE SET NULL,
+                producto_id INTEGER REFERENCES catalog_items(id) ON DELETE SET NULL,
+                nombre      TEXT NOT NULL,
+                qty         REAL NOT NULL DEFAULT 1,
+                precio      REAL NOT NULL DEFAULT 0,
+                subtotal    REAL NOT NULL DEFAULT 0,
+                estacion    TEXT DEFAULT '',
+                nota        TEXT DEFAULT '',
+                estado      TEXT NOT NULL DEFAULT 'nuevo',
+                created_at  TEXT DEFAULT (datetime('now')),
+                modificadores TEXT DEFAULT ''
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO pedido_items (id, pedido_id, comanda_id, producto_id, nombre, qty, "
+            "precio, subtotal, estacion, nota, estado, created_at, modificadores) "
+            "SELECT id, pedido_id, comanda_id, producto_id, nombre, qty, "
+            "precio, subtotal, estacion, nota, estado, created_at, modificadores FROM pedido_items_old"
+        )
+        conn.execute("DROP TABLE pedido_items_old")
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+    return True
+
+
 def migrate(conn: sqlite3.Connection) -> RestolibraMigrationReport:
     """Corre la migracion base (identica a Contalibra) y despues repunta
-    recetas/receta_items/pedidos. Misma politica que la base: falla
-    ruidosamente si se corre dos veces sobre el mismo destino, pensada
-    para una copia limpia (Fase 1) y luego, con confirmacion explicita,
-    produccion real (Fase 4)."""
+    recetas/receta_items/pedidos/comandas/pedido_items, en ese orden (cada
+    uno depende de que el anterior ya haya quedado con su nombre final --
+    ver docstring del modulo sobre la reescritura automatica de FK de
+    SQLite). Misma politica que la base: falla ruidosamente si se corre
+    dos veces sobre el mismo destino, pensada para una copia limpia
+    (Fase 1) y luego, con confirmacion explicita, produccion real
+    (Fase 4)."""
     base_report = _migrate_base(conn)
     recetas_repointed = _repoint_recetas_fk(conn)
     receta_items_repointed = _repoint_receta_items_fk(conn)
     pedidos_repointed = _repoint_pedidos_venta_fk(conn)
+    comandas_repointed = _repoint_comandas_fk(conn)
+    pedido_items_repointed = _repoint_pedido_items_fk(conn)
     conn.commit()
     return RestolibraMigrationReport(
         **base_report.__dict__,
         recetas_repointed=recetas_repointed,
         receta_items_repointed=receta_items_repointed,
         pedidos_repointed=pedidos_repointed,
+        comandas_repointed=comandas_repointed,
+        pedido_items_repointed=pedido_items_repointed,
     )

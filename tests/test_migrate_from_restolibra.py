@@ -155,6 +155,35 @@ def restolibra_conn() -> sqlite3.Connection:
             updated_at     TEXT DEFAULT (datetime('now')),
             hora_retiro    TEXT DEFAULT ''
         );
+
+        CREATE TABLE comandas (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            pedido_id  INTEGER NOT NULL REFERENCES pedidos(id) ON DELETE CASCADE,
+            estacion   TEXT NOT NULL,
+            numero     INTEGER NOT NULL DEFAULT 0,
+            estado     TEXT NOT NULL DEFAULT 'pendiente',
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
+            preparacion_at TEXT,
+            listo_at TEXT,
+            entregado_at TEXT
+        );
+
+        CREATE TABLE pedido_items (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            pedido_id   INTEGER NOT NULL REFERENCES pedidos(id) ON DELETE CASCADE,
+            comanda_id  INTEGER REFERENCES comandas(id) ON DELETE SET NULL,
+            producto_id INTEGER REFERENCES productos(id) ON DELETE SET NULL,
+            nombre      TEXT NOT NULL,
+            qty         REAL NOT NULL DEFAULT 1,
+            precio      REAL NOT NULL DEFAULT 0,
+            subtotal    REAL NOT NULL DEFAULT 0,
+            estacion    TEXT DEFAULT '',
+            nota        TEXT DEFAULT '',
+            estado      TEXT NOT NULL DEFAULT 'nuevo',
+            created_at  TEXT DEFAULT (datetime('now')),
+            modificadores TEXT DEFAULT ''
+        );
         """
     )
     return conn
@@ -206,6 +235,13 @@ def _seed_realistic_dataset(conn: sqlite3.Connection) -> None:
     conn.execute(
         """INSERT INTO pedidos (numero, canal, estado, venta_id)
            VALUES ('P-0001', 'barra', 'cobrado', 1)"""
+    )
+    conn.execute(
+        "INSERT INTO comandas (id, pedido_id, estacion, numero) VALUES (1, 1, 'cocina', 1)"
+    )
+    conn.execute(
+        """INSERT INTO pedido_items (pedido_id, comanda_id, producto_id, nombre, qty, precio, subtotal)
+           VALUES (1, 1, 2, 'Papas Fritas', 1, 4000, 4000)"""
     )
 
 
@@ -283,6 +319,54 @@ def test_migrate_repoints_pedidos_venta_id_to_sales(restolibra_conn):
     restolibra_conn.execute("UPDATE pedidos SET venta_id=1 WHERE numero='P-0001'")
 
 
+def test_migrate_repoints_comandas_and_pedido_items(restolibra_conn):
+    _seed_realistic_dataset(restolibra_conn)
+    report = migrate(restolibra_conn)
+
+    assert report.comandas_repointed is True
+    assert report.pedido_items_repointed is True
+
+    fks_comandas = restolibra_conn.execute("PRAGMA foreign_key_list(comandas)").fetchall()
+    assert [row[2] for row in fks_comandas] == ["pedidos"]
+
+    fks_items = {row[3]: row[2] for row in restolibra_conn.execute(
+        "PRAGMA foreign_key_list(pedido_items)"
+    ).fetchall()}
+    assert fks_items["pedido_id"] == "pedidos"
+    assert fks_items["comanda_id"] == "comandas"
+    assert fks_items["producto_id"] == "catalog_items"
+
+    # Los datos se preservan.
+    comanda = restolibra_conn.execute(
+        "SELECT pedido_id, estacion, numero FROM comandas WHERE id=1"
+    ).fetchone()
+    assert comanda == (1, "cocina", 1)
+    item = restolibra_conn.execute(
+        "SELECT pedido_id, comanda_id, producto_id, nombre, qty FROM pedido_items"
+    ).fetchone()
+    assert item == (1, 1, 2, "Papas Fritas", 1)
+
+    # Bug real reproducido: antes del fix, este INSERT tiraba
+    # sqlite3.OperationalError: no such table: main.pedidos_old (comandas
+    # quedaba apuntando a la tabla temporal que el rebuild de pedidos ya
+    # habia borrado). Con las tres tablas reconstruidas en el orden
+    # correcto, un pedido/comanda/item nuevo funciona sin error.
+    restolibra_conn.execute(
+        "INSERT INTO pedidos (numero, canal, estado) VALUES ('P-0002', 'barra', 'abierto')"
+    )
+    nuevo_pedido_id = restolibra_conn.execute(
+        "SELECT id FROM pedidos WHERE numero='P-0002'"
+    ).fetchone()[0]
+    restolibra_conn.execute(
+        "INSERT INTO comandas (pedido_id, estacion) VALUES (?, 'barra')", (nuevo_pedido_id,)
+    )
+    restolibra_conn.execute(
+        "INSERT INTO pedido_items (pedido_id, producto_id, nombre, qty, precio, subtotal) "
+        "VALUES (?, 2, 'Papas Fritas', 1, 4000, 4000)",
+        (nuevo_pedido_id,),
+    )
+
+
 def test_migrate_is_idempotent_guard_fails_loudly_on_second_run(restolibra_conn):
     _seed_realistic_dataset(restolibra_conn)
     migrate(restolibra_conn)
@@ -327,3 +411,26 @@ def test_verify_catches_orphaned_pedido_venta(restolibra_conn):
     report = verify(restolibra_conn)
     assert not report.ok
     assert any(d.check == "pedidos_venta_huerfanos" for d in report.discrepancies)
+
+
+def test_verify_catches_comandas_pointing_at_dropped_temp_table(restolibra_conn):
+    _seed_realistic_dataset(restolibra_conn)
+    migrate(restolibra_conn)
+    # Reproduce a mano el estado roto que tenia el bug real (comandas
+    # apuntando a "pedidos_old", el nombre temporal que el rebuild de
+    # pedidos ya borro), sin depender de que _repoint_pedidos_venta_fk siga
+    # teniendo el bug -- solo para probar que verify() lo detecta.
+    restolibra_conn.execute("PRAGMA foreign_keys = OFF")
+    restolibra_conn.execute("DROP TABLE comandas")
+    restolibra_conn.execute(
+        """CREATE TABLE comandas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pedido_id INTEGER NOT NULL REFERENCES pedidos_old(id) ON DELETE CASCADE,
+            estacion TEXT NOT NULL, numero INTEGER NOT NULL DEFAULT 0,
+            estado TEXT NOT NULL DEFAULT 'pendiente',
+            created_at TEXT, updated_at TEXT, preparacion_at TEXT, listo_at TEXT, entregado_at TEXT
+        )"""
+    )
+    report = verify(restolibra_conn)
+    assert not report.ok
+    assert any(d.check == "comandas_fk" for d in report.discrepancies)

@@ -58,6 +58,24 @@ def _verify_pedidos(conn: sqlite3.Connection, report: VerificationReport) -> Non
             f"ids={[r[0] for r in huerfanos]}",
         )
 
+    # comandas/pedido_items son tablas hijas de pedidos (y pedido_items
+    # tambien de comandas) -- el rebuild de pedidos las puede dejar
+    # apuntando a una tabla temporal ya borrada si no se reconstruyen en
+    # cadena (bug real, ver migrate_from_restolibra.py). Se verifica la FK
+    # declarada, no solo la integridad referencial de los datos.
+    fks_comandas = conn.execute("PRAGMA foreign_key_list(comandas)").fetchall()
+    if any(row[2] == "pedidos_old" for row in fks_comandas):
+        report.add("comandas_fk", "comandas.pedido_id quedo apuntando a pedidos_old")
+
+    fks_items = conn.execute("PRAGMA foreign_key_list(pedido_items)").fetchall()
+    targets = {row[3]: row[2] for row in fks_items}
+    if targets.get("pedido_id") == "pedidos_old":
+        report.add("pedido_items_pedido_fk", "pedido_items.pedido_id quedo apuntando a pedidos_old")
+    if targets.get("comanda_id") == "comandas_old":
+        report.add("pedido_items_comanda_fk", "pedido_items.comanda_id quedo apuntando a comandas_old")
+    if targets.get("producto_id") == "productos":
+        report.add("pedido_items_producto_fk", "pedido_items.producto_id no quedo repuntado a catalog_items")
+
 
 def _costo_receta(conn: sqlite3.Connection, producto_id: int, precio_costo_col: str,
                    tabla_producto: str) -> Decimal | None:
