@@ -167,21 +167,26 @@ def _migrate_item_codes(source: sqlite3.Connection, target: sqlite3.Connection) 
     return len(rows)
 
 
-def _migrate_stock_movements(target: sqlite3.Connection, movements) -> int:
+def _migrate_stock_movements(source: sqlite3.Connection, target: sqlite3.Connection, movements) -> int:
+    # `created_at` (cuando se REGISTRO el movimiento) es distinto de
+    # `occurred_at` (cuando PASO). En un ledger append-only de un sistema
+    # financiero los dos importan; el primero no se puede reconstruir despues.
+    created_at = dict(source.execute("SELECT id, created_at FROM movimientos_stock").fetchall())
     for movement in movements:
         target.execute(
             """
             INSERT INTO stock_movements
                 (id, item_id, variant_id, location_id, movement_type, quantity_delta,
                  occurred_at, source_type, source_id, unit_cost, lot_code, expires_at,
-                 note, created_by, reason_code)
-            VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?)
+                 note, created_by, reason_code, created_at)
+            VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?)
             """,
             (
                 movement.id, movement.item_id, movement.location_id, movement.movement_type,
                 str(movement.quantity_delta), movement.occurred_at.isoformat(),
                 movement.source_type, movement.source_id,
                 movement.note, movement.created_by, movement.reason_code,
+                created_at.get(movement.id),
             ),
         )
     return len(movements)
@@ -258,7 +263,7 @@ def migrate(conn: sqlite3.Connection) -> MigrationReport:
     )
     report.catalog_items = _migrate_catalog_items(conn, conn, catalog_items)
     report.item_codes = _migrate_item_codes(conn, conn)
-    report.stock_movements = _migrate_stock_movements(conn, stock_movements)
+    report.stock_movements = _migrate_stock_movements(conn, conn, stock_movements)
     _migrate_sales_and_items(conn, sales, report)
 
     conn.commit()

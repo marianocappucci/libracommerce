@@ -133,7 +133,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
             expires_at TEXT,
             note TEXT NOT NULL DEFAULT '',
             created_by INTEGER,
-            reason_code TEXT
+            reason_code TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE INDEX IF NOT EXISTS idx_stock_item_location

@@ -146,6 +146,20 @@ def _migration_0004_add_locations_created_at(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE locations ADD COLUMN created_at TEXT")
 
 
+def _migration_0005_add_stock_movements_created_at(conn: sqlite3.Connection) -> None:
+    """`occurred_at` es CUANDO PASO el movimiento (fecha de negocio, la
+    elige el usuario); `created_at` es cuando se REGISTRO. En un ledger
+    append-only de un sistema financiero los dos importan y el segundo no se
+    puede reconstruir despues — Contalibra ya lo guardaba en
+    `movimientos_stock.created_at` y se habria perdido al migrar.
+
+    Sin DEFAULT en el ALTER por la misma razon que la migracion 0004: SQLite
+    no admite un default no-constante al agregar una columna.
+    """
+    if "created_at" not in _table_columns(conn, "stock_movements"):
+        conn.execute("ALTER TABLE stock_movements ADD COLUMN created_at TEXT")
+
+
 # Orden fijo: agregar al final, nunca reordenar ni reusar un numero ya
 # asignado (aunque la migracion se haya borrado despues).
 _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
@@ -154,6 +168,7 @@ _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (3, "add_stock_movement_note_reason_and_author",
      _migration_0003_add_stock_movement_note_reason_and_author),
     (4, "add_locations_created_at", _migration_0004_add_locations_created_at),
+    (5, "add_stock_movements_created_at", _migration_0005_add_stock_movements_created_at),
 ]
 
 

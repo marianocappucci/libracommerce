@@ -78,7 +78,8 @@ def contalibra_conn() -> sqlite3.Connection:
             venta_id INTEGER,
             usuario_id INTEGER,
             fecha TEXT NOT NULL,
-            deposito_id INTEGER
+            deposito_id INTEGER,
+            created_at TEXT DEFAULT (datetime('now'))
         );
 
         CREATE TABLE ventas (
