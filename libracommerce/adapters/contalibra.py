@@ -179,7 +179,8 @@ def read_locations(conn: sqlite3.Connection) -> list[Location]:
 def read_stock_movements(conn: sqlite3.Connection) -> list[StockMovement]:
     rows = conn.execute(
         """
-        SELECT id, producto_id, deposito_id, tipo, cantidad, fecha, venta_id
+        SELECT id, producto_id, deposito_id, tipo, cantidad, fecha, venta_id,
+               referencia, usuario_id
         FROM movimientos_stock
         WHERE deposito_id IS NOT NULL
         ORDER BY fecha, id
@@ -187,7 +188,8 @@ def read_stock_movements(conn: sqlite3.Connection) -> list[StockMovement]:
     ).fetchall()
     movements = []
     for row in rows:
-        movement_id, item_id, location_id, tipo, cantidad, fecha, venta_id = row
+        (movement_id, item_id, location_id, tipo, cantidad, fecha, venta_id,
+         referencia, usuario_id) = row
         if tipo not in _STOCK_MOVEMENT_TYPE_MAP:
             raise ValueError(f"movimientos_stock.id={movement_id}: tipo {tipo!r} sin mapeo conocido")
         movements.append(
@@ -200,6 +202,9 @@ def read_stock_movements(conn: sqlite3.Connection) -> list[StockMovement]:
                 occurred_at=datetime.fromisoformat(fecha),
                 source_type="venta" if venta_id else None,
                 source_id=venta_id,
+                note=referencia or "",
+                created_by=usuario_id,
+                reason_code=tipo,
             )
         )
     return movements

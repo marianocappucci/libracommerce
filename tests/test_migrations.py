@@ -6,6 +6,7 @@ import sqlite3
 
 import pytest
 
+from libracommerce.db.migrations import _MIGRATIONS
 from libracommerce.db.schema import init_schema
 
 
@@ -156,19 +157,30 @@ def test_migration_0002_enforces_a_single_default_location():
         conn.execute("UPDATE locations SET is_default = 1 WHERE name = 'Otro'")
 
 
+def test_migration_0003_adds_note_created_by_and_reason_code():
+    conn = _old_schema_conn()
+    init_schema(conn)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(stock_movements)")}
+    assert {"note", "created_by", "reason_code"} <= columns
+    # El movimiento preexistente sobrevive con los defaults documentados.
+    assert conn.execute(
+        "SELECT note, created_by, reason_code FROM stock_movements WHERE id = 1"
+    ).fetchone() == ("", None, None)
+
+
 def test_init_schema_is_idempotent_on_already_migrated_database():
     conn = _old_schema_conn()
     init_schema(conn)
     init_schema(conn)  # no debe fallar ni duplicar la migracion
     applied = conn.execute("SELECT version FROM schema_migrations").fetchall()
-    assert applied == [(1,), (2,)]
+    # Se compara contra _MIGRATIONS en vez de una lista escrita a mano: lo que
+    # se prueba es "cada migracion se aplico exactamente una vez", no cuantas
+    # hay — enumerarlas obligaba a tocar este test en cada migracion nueva.
+    assert applied == [(version,) for version, _, _ in _MIGRATIONS]
 
 
 def test_init_schema_on_a_fresh_database_records_migration_as_applied():
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
     applied = conn.execute("SELECT version, name FROM schema_migrations").fetchall()
-    assert applied == [
-        (1, "add_variant_id_to_stock_movements_and_sale_items"),
-        (2, "add_min_stock_and_location_defaults"),
-    ]
+    assert applied == [(version, name) for version, name, _ in _MIGRATIONS]

@@ -39,6 +39,9 @@ class StockMovement:
     lot_code: str | None = None
     expires_at: datetime | None = None
     variant_id: int | None = None
+    note: str = ""
+    created_by: int | None = None
+    reason_code: str | None = None
 
     def is_inbound(self) -> bool:
         return self.quantity_delta > 0

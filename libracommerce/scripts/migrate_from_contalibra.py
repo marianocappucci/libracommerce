@@ -57,6 +57,7 @@ class MigrationReport:
     parties_from_clients: int = 0
     parties_from_proveedores: int = 0
     catalog_items: int = 0
+    item_codes: int = 0
     locations: int = 0
     stock_movements: int = 0
     sales: int = 0
@@ -143,19 +144,37 @@ def _migrate_catalog_items(target: sqlite3.Connection, items) -> int:
     return len(items)
 
 
+def _migrate_item_codes(source: sqlite3.Connection, target: sqlite3.Connection) -> int:
+    """`productos.codigo` (UNIQUE, nullable) pasa a ser el codigo interno
+    primario del item en `item_codes`. Contalibra tiene un solo codigo por
+    producto; LibraCommerce admite varios por tipo, asi que este queda como
+    `is_primary=1`."""
+    rows = source.execute(
+        "SELECT id, codigo FROM productos WHERE codigo IS NOT NULL AND codigo != ''"
+    ).fetchall()
+    for item_id, codigo in rows:
+        target.execute(
+            "INSERT INTO item_codes (item_id, code_type, code, is_primary) VALUES (?, 'internal', ?, 1)",
+            (item_id, codigo),
+        )
+    return len(rows)
+
+
 def _migrate_stock_movements(target: sqlite3.Connection, movements) -> int:
     for movement in movements:
         target.execute(
             """
             INSERT INTO stock_movements
                 (id, item_id, variant_id, location_id, movement_type, quantity_delta,
-                 occurred_at, source_type, source_id, unit_cost, lot_code, expires_at)
-            VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+                 occurred_at, source_type, source_id, unit_cost, lot_code, expires_at,
+                 note, created_by, reason_code)
+            VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?)
             """,
             (
                 movement.id, movement.item_id, movement.location_id, movement.movement_type,
                 str(movement.quantity_delta), movement.occurred_at.isoformat(),
                 movement.source_type, movement.source_id,
+                movement.note, movement.created_by, movement.reason_code,
             ),
         )
     return len(movements)
@@ -231,6 +250,7 @@ def migrate(conn: sqlite3.Connection) -> MigrationReport:
         conn, parties_clients, parties_proveedores
     )
     report.catalog_items = _migrate_catalog_items(conn, catalog_items)
+    report.item_codes = _migrate_item_codes(conn, conn)
     report.stock_movements = _migrate_stock_movements(conn, stock_movements)
     _migrate_sales_and_items(conn, sales, report)
 

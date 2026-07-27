@@ -586,8 +586,9 @@ class SqliteCommerceRepository:
             """
             INSERT INTO stock_movements
                 (item_id, variant_id, location_id, movement_type, quantity_delta, occurred_at,
-                 source_type, source_id, unit_cost, lot_code, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 source_type, source_id, unit_cost, lot_code, expires_at,
+                 note, created_by, reason_code)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 movement.item_id,
@@ -601,6 +602,9 @@ class SqliteCommerceRepository:
                 str(movement.unit_cost) if movement.unit_cost is not None else None,
                 movement.lot_code,
                 movement.expires_at.isoformat() if movement.expires_at else None,
+                movement.note,
+                movement.created_by,
+                movement.reason_code,
             ),
         )
         self._conn.commit()
@@ -614,7 +618,8 @@ class SqliteCommerceRepository:
         rows = self._conn.execute(
             f"""
             SELECT id, item_id, variant_id, location_id, movement_type, quantity_delta, occurred_at,
-                   source_type, source_id, unit_cost, lot_code, expires_at
+                   source_type, source_id, unit_cost, lot_code, expires_at,
+                   note, created_by, reason_code
             FROM stock_movements
             WHERE item_id = ? AND location_id = ? AND {variant_filter}
             ORDER BY occurred_at, id
@@ -635,6 +640,9 @@ class SqliteCommerceRepository:
                 unit_cost=_to_decimal(row[9]) if row[9] is not None else None,
                 lot_code=row[10],
                 expires_at=datetime.fromisoformat(row[11]) if row[11] else None,
+                note=row[12],
+                created_by=row[13],
+                reason_code=row[14],
             )
             for row in rows
         ]

@@ -106,11 +106,38 @@ def _migration_0002_add_min_stock_and_location_defaults(conn: sqlite3.Connection
     )
 
 
+def _migration_0003_add_stock_movement_note_reason_and_author(conn: sqlite3.Connection) -> None:
+    """P7: un movimiento de stock real necesita mas que su tipo semantico.
+
+    - `note`: texto libre que describe el movimiento ("Compra a proveedor X",
+      "Anulacion venta ID 12"). Contalibra lo llama `referencia`, lo muestra
+      en pantalla y lo usa en su vista de logs.
+    - `created_by`: que usuario lo genero (auditoria).
+    - `reason_code`: refinamiento del `movement_type` propio de cada producto.
+      `movement_type` es el tipo semantico del motor (sale/purchase/
+      adjustment/transfer/return/waste); un producto puede necesitar un
+      vocabulario mas fino dentro de un mismo tipo — Contalibra distingue
+      'entrada'/'salida'/'ajuste', los tres ADJUSTMENT para el motor pero
+      con iconos y semantica distintos en su UI. Guardarlo acá evita tanto
+      inflar el enum del motor con vocabulario de un solo producto como
+      perder el dato al migrar.
+    """
+    columns = _table_columns(conn, "stock_movements")
+    if "note" not in columns:
+        conn.execute("ALTER TABLE stock_movements ADD COLUMN note TEXT NOT NULL DEFAULT ''")
+    if "created_by" not in columns:
+        conn.execute("ALTER TABLE stock_movements ADD COLUMN created_by INTEGER")
+    if "reason_code" not in columns:
+        conn.execute("ALTER TABLE stock_movements ADD COLUMN reason_code TEXT")
+
+
 # Orden fijo: agregar al final, nunca reordenar ni reusar un numero ya
 # asignado (aunque la migracion se haya borrado despues).
 _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "add_variant_id_to_stock_movements_and_sale_items", _migration_0001_add_variant_id),
     (2, "add_min_stock_and_location_defaults", _migration_0002_add_min_stock_and_location_defaults),
+    (3, "add_stock_movement_note_reason_and_author",
+     _migration_0003_add_stock_movement_note_reason_and_author),
 ]
 
 
