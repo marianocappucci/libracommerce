@@ -273,10 +273,25 @@ def test_read_stock_movements_rejects_unknown_type(contalibra_conn):
     contalibra_conn.execute("INSERT INTO depositos (nombre) VALUES ('Deposito Central')")
     contalibra_conn.execute(
         "INSERT INTO movimientos_stock (producto_id, tipo, cantidad, fecha, deposito_id) "
-        "VALUES (1, 'produccion', 5, '2026-07-01', 1)"
+        "VALUES (1, 'tipo_inexistente', 5, '2026-07-01', 1)"
     )
     with pytest.raises(ValueError):
         read_stock_movements(contalibra_conn)
+
+
+def test_read_stock_movements_maps_restolibra_only_types(contalibra_conn):
+    # 'merma'/'produccion': Contalibra nunca los escribe, pero Restolibra si
+    # (mermas de cocina, produccion de lotes de una receta) -- el adapter es
+    # schema-shaped y P8 lo reusa tal cual para Restolibra.
+    contalibra_conn.execute("INSERT INTO productos (nombre, unidad) VALUES ('Papa', 'kg')")
+    contalibra_conn.execute("INSERT INTO depositos (nombre) VALUES ('Deposito Central')")
+    contalibra_conn.execute(
+        "INSERT INTO movimientos_stock (producto_id, tipo, cantidad, fecha, deposito_id) "
+        "VALUES (1, 'merma', -2, '2026-07-01', 1), (1, 'produccion', 10, '2026-07-01', 1)"
+    )
+    movements = read_stock_movements(contalibra_conn)
+    assert [m.movement_type for m in movements] == [StockMovementType.WASTE, StockMovementType.ADJUSTMENT]
+    assert [m.reason_code for m in movements] == ["merma", "produccion"]
 
 
 def test_read_sales_maps_items_and_status(contalibra_conn):

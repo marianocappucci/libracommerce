@@ -1,14 +1,21 @@
-"""Read-only adapters that map Contalibra's real SQLite schema onto
+"""Read-only adapters that map the shared libracore ERP SQLite schema onto
 LibraCommerce domain objects, per the migration strategy documented in
 wiki/analyses/arquitectura-familia-libra-alcance.md ("Crear adaptadores
 de lectura sobre las tablas actuales de Contalibra" — paso 2, antes de
 normalizar o mover ninguna tabla real).
 
 These functions only SELECT from a connection the caller already opened
-against a Contalibra-shaped database. They never write, and they do not
+against a database with this schema. They never write, and they do not
 import contalibra or libracore code — only raw SQL against the column
 names documented in libracore/libracore/db/schema.py (`init_core_schema`),
 so this package keeps no runtime dependency on either sibling repo.
+
+Module kept under the name "contalibra" for history (P7, the first
+consumer), but the schema it reads (`productos`/`movimientos_stock`/
+`ventas`/`depositos`) is the shared libracore ERP schema, not anything
+Contalibra-specific — Restolibra is a fork with the exact same tables via
+the same libracore package, so P8 (2026-07-27) reuses these functions
+as-is for Restolibra's migration script instead of duplicating them.
 
 Known, deliberate lossy mappings — Contalibra's schema does not capture
 enough to do better, and these are defaults, not derived facts:
@@ -69,6 +76,12 @@ _STOCK_MOVEMENT_TYPE_MAP = {
     "salida": StockMovementType.ADJUSTMENT,
     "transferencia_salida": StockMovementType.TRANSFER_OUT,
     "transferencia_entrada": StockMovementType.TRANSFER_IN,
+    # 'merma'/'produccion': tipos que solo escribe Restolibra (mermas de
+    # cocina via web/api/stock.py, produccion de lotes via
+    # db_recetas.py::producir_receta) -- ausentes en Contalibra, que nunca
+    # los genera. reason_code preserva el valor original igual que el resto.
+    "merma": StockMovementType.WASTE,
+    "produccion": StockMovementType.ADJUSTMENT,
 }
 
 _SALE_STATUS_MAP = {
