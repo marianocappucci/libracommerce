@@ -87,15 +87,17 @@ def _migrate_categories(source: sqlite3.Connection, target: sqlite3.Connection) 
         )
 
 
-def _migrate_locations(target: sqlite3.Connection, locations) -> int:
+def _migrate_locations(source: sqlite3.Connection, target: sqlite3.Connection, locations) -> int:
+    created_at = dict(source.execute("SELECT id, created_at FROM depositos").fetchall())
     for location in locations:
         target.execute(
             """
-            INSERT INTO locations (id, name, branch_id, location_type, active, description, is_default)
-            VALUES (?, ?, NULL, ?, ?, ?, ?)
+            INSERT INTO locations
+                (id, name, branch_id, location_type, active, description, is_default, created_at)
+            VALUES (?, ?, NULL, ?, ?, ?, ?, ?)
             """,
             (location.id, location.name, location.location_type, int(location.active),
-             location.description, int(location.is_default)),
+             location.description, int(location.is_default), created_at.get(location.id)),
         )
     return len(locations)
 
@@ -124,21 +126,26 @@ def _migrate_parties(target: sqlite3.Connection, clients, proveedores) -> tuple[
     return len(clients), len(proveedores)
 
 
-def _migrate_catalog_items(target: sqlite3.Connection, items) -> int:
+def _migrate_catalog_items(source: sqlite3.Connection, target: sqlite3.Connection, items) -> int:
+    # `created_at` no es parte del dominio `CatalogItem`, pero es un dato real
+    # de Contalibra: sin esto, cada producto migrado quedaria fechado el dia de
+    # la migracion (default CURRENT_TIMESTAMP) en vez de su alta original.
+    created_at = dict(source.execute("SELECT id, created_at FROM productos").fetchall())
     for item in items:
         target.execute(
             """
             INSERT INTO catalog_items
                 (id, item_type, name, description, category_id, unit_code, active,
                  sellable, purchasable, tax_profile, metadata_json,
-                 default_sale_price, default_cost, min_stock)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 default_sale_price, default_cost, min_stock, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 item.id, item.item_type, item.name, item.description, item.category_id,
                 item.unit.code, int(item.active), int(item.sellable), int(item.purchasable),
                 item.tax_profile, json.dumps(item.metadata, ensure_ascii=False),
                 str(item.default_sale_price), str(item.default_cost), str(item.min_stock),
+                created_at.get(item.id),
             ),
         )
     return len(items)
@@ -245,11 +252,11 @@ def migrate(conn: sqlite3.Connection) -> MigrationReport:
 
     _migrate_units(conn, conn, catalog_items)
     _migrate_categories(conn, conn)
-    report.locations = _migrate_locations(conn, locations)
+    report.locations = _migrate_locations(conn, conn, locations)
     report.parties_from_clients, report.parties_from_proveedores = _migrate_parties(
         conn, parties_clients, parties_proveedores
     )
-    report.catalog_items = _migrate_catalog_items(conn, catalog_items)
+    report.catalog_items = _migrate_catalog_items(conn, conn, catalog_items)
     report.item_codes = _migrate_item_codes(conn, conn)
     report.stock_movements = _migrate_stock_movements(conn, stock_movements)
     _migrate_sales_and_items(conn, sales, report)

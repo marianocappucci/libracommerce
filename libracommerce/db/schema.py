@@ -114,7 +114,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
             location_type TEXT NOT NULL DEFAULT 'warehouse',
             active INTEGER NOT NULL DEFAULT 1,
             description TEXT NOT NULL DEFAULT '',
-            is_default INTEGER NOT NULL DEFAULT 0
+            is_default INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS stock_movements (

@@ -131,6 +131,21 @@ def _migration_0003_add_stock_movement_note_reason_and_author(conn: sqlite3.Conn
         conn.execute("ALTER TABLE stock_movements ADD COLUMN reason_code TEXT")
 
 
+def _migration_0004_add_locations_created_at(conn: sqlite3.Connection) -> None:
+    """`locations` era la unica tabla del esquema sin `created_at`. Aparecio
+    al comparar la salida vieja contra la nueva del CRUD de depositos de
+    Contalibra (P7): era el unico campo que se perdia en toda la migracion.
+
+    No lleva DEFAULT CURRENT_TIMESTAMP en el ALTER: SQLite no admite un
+    default no-constante al agregar una columna a una tabla existente. El
+    default vive en el CREATE TABLE de `schema.py` (bases nuevas) y las filas
+    preexistentes quedan en NULL, que es lo honesto — no se sabe cuando se
+    crearon.
+    """
+    if "created_at" not in _table_columns(conn, "locations"):
+        conn.execute("ALTER TABLE locations ADD COLUMN created_at TEXT")
+
+
 # Orden fijo: agregar al final, nunca reordenar ni reusar un numero ya
 # asignado (aunque la migracion se haya borrado despues).
 _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
@@ -138,6 +153,7 @@ _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (2, "add_min_stock_and_location_defaults", _migration_0002_add_min_stock_and_location_defaults),
     (3, "add_stock_movement_note_reason_and_author",
      _migration_0003_add_stock_movement_note_reason_and_author),
+    (4, "add_locations_created_at", _migration_0004_add_locations_created_at),
 ]
 
 

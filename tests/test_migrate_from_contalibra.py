@@ -56,7 +56,8 @@ def contalibra_conn() -> sqlite3.Connection:
             stock_minimo REAL NOT NULL DEFAULT 0,
             estacion TEXT DEFAULT '',
             vendible INTEGER NOT NULL DEFAULT 1,
-            tipo TEXT NOT NULL DEFAULT 'producto'
+            tipo TEXT NOT NULL DEFAULT 'producto',
+            created_at TEXT DEFAULT (datetime('now'))
         );
 
         CREATE TABLE depositos (
@@ -64,7 +65,8 @@ def contalibra_conn() -> sqlite3.Connection:
             nombre TEXT NOT NULL,
             descripcion TEXT DEFAULT '',
             activo INTEGER NOT NULL DEFAULT 1,
-            es_default INTEGER NOT NULL DEFAULT 0
+            es_default INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now'))
         );
 
         CREATE TABLE movimientos_stock (
