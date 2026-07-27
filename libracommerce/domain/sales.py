@@ -67,6 +67,11 @@ class Sale:
     tax_total: Decimal = Decimal("0")
     total: Decimal = Decimal("0")
     confirmed_at: datetime | None = None
+    occurred_on: str | None = None
+    customer_name_snapshot: str = ""
+    created_by: int | None = None
+    notes: str = ""
+    status_detail: str | None = None
 
     def calculated_total(self) -> Decimal:
         return sum((item.line_total for item in self.items), Decimal("0"))

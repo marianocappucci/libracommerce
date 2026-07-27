@@ -73,6 +73,10 @@ _STOCK_MOVEMENT_TYPE_MAP = {
 
 _SALE_STATUS_MAP = {
     "cobrada": SaleStatus.CONFIRMED,
+    # 'parcial' = parcialmente COBRADA. Es estado de cobranza, no de la venta:
+    # la venta esta confirmada igual. El valor original se preserva en
+    # `Sale.status_detail`, mismo patron que `StockMovement.reason_code`.
+    "parcial": SaleStatus.CONFIRMED,
     "pendiente": SaleStatus.DRAFT,
     "anulada": SaleStatus.CANCELLED,
 }
@@ -213,13 +217,15 @@ def read_stock_movements(conn: sqlite3.Connection) -> list[StockMovement]:
 def read_sales(conn: sqlite3.Connection) -> list[Sale]:
     rows = conn.execute(
         """
-        SELECT id, numero, items, subtotal, descuento, total, cliente_id, estado, created_at
+        SELECT id, numero, items, subtotal, descuento, total, cliente_id, estado, created_at,
+               fecha, cliente_nombre, usuario_id, observaciones
         FROM ventas
         """
     ).fetchall()
     sales = []
     for row in rows:
-        sale_id, numero, items_json, subtotal, descuento, total, cliente_id, estado, created_at = row
+        (sale_id, numero, items_json, subtotal, descuento, total, cliente_id, estado, created_at,
+         fecha, cliente_nombre, usuario_id, observaciones) = row
         if estado not in _SALE_STATUS_MAP:
             raise ValueError(f"venta {numero!r}: estado {estado!r} sin mapeo conocido")
         status = _SALE_STATUS_MAP[estado]
@@ -258,6 +264,11 @@ def read_sales(conn: sqlite3.Connection) -> list[Sale]:
                 tax_total=Decimal("0"),
                 total=_to_decimal(total),
                 confirmed_at=datetime.fromisoformat(created_at) if status == SaleStatus.CONFIRMED and created_at else None,
+                occurred_on=fecha,
+                customer_name_snapshot=cliente_nombre or "",
+                created_by=usuario_id,
+                notes=observaciones or "",
+                status_detail=estado,
             )
         )
     return sales

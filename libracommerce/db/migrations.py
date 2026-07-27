@@ -160,6 +160,41 @@ def _migration_0005_add_stock_movements_created_at(conn: sqlite3.Connection) -> 
         conn.execute("ALTER TABLE stock_movements ADD COLUMN created_at TEXT")
 
 
+def _migration_0006_add_sales_business_fields(conn: sqlite3.Connection) -> None:
+    """P7: datos que toda venta de mostrador tiene y que `sales` no modelaba.
+    Ninguno es especifico de Contalibra -- VentaLibra los necesita igual.
+
+    - `occurred_on`: fecha de negocio de la venta, la elige el usuario y puede
+      no ser hoy. Distinta de `created_at` (cuando se registro) y de
+      `confirmed_at` (timestamp de confirmacion).
+    - `customer_name_snapshot`: nombre del cliente tal como estaba al vender.
+      Una venta a consumidor final no tiene `customer_party_id` pero si puede
+      llevar nombre; y si el cliente se renombra o se borra, el historico no
+      debe cambiar -- mismo criterio que `SaleItem.description_snapshot`.
+    - `created_by`: que usuario la registro (auditoria).
+    - `notes`: observaciones libres.
+    - `status_detail`: refinamiento de `status` propio de cada producto, mismo
+      patron que `stock_movements.reason_code`. `status` es el estado
+      semantico del motor (draft/confirmed/cancelled/...); Contalibra
+      distingue ademas 'cobrada'/'parcial'/'pendiente', que es estado de
+      COBRANZA, no de la venta -- no corresponde inflar el enum del motor con
+      eso, pero tampoco perderlo.
+    """
+    columns = _table_columns(conn, "sales")
+    if "occurred_on" not in columns:
+        conn.execute("ALTER TABLE sales ADD COLUMN occurred_on TEXT")
+    if "customer_name_snapshot" not in columns:
+        conn.execute(
+            "ALTER TABLE sales ADD COLUMN customer_name_snapshot TEXT NOT NULL DEFAULT ''"
+        )
+    if "created_by" not in columns:
+        conn.execute("ALTER TABLE sales ADD COLUMN created_by INTEGER")
+    if "notes" not in columns:
+        conn.execute("ALTER TABLE sales ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
+    if "status_detail" not in columns:
+        conn.execute("ALTER TABLE sales ADD COLUMN status_detail TEXT")
+
+
 # Orden fijo: agregar al final, nunca reordenar ni reusar un numero ya
 # asignado (aunque la migracion se haya borrado despues).
 _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
@@ -169,6 +204,7 @@ _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
      _migration_0003_add_stock_movement_note_reason_and_author),
     (4, "add_locations_created_at", _migration_0004_add_locations_created_at),
     (5, "add_stock_movements_created_at", _migration_0005_add_stock_movements_created_at),
+    (6, "add_sales_business_fields", _migration_0006_add_sales_business_fields),
 ]
 
 

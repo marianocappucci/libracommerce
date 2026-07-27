@@ -93,7 +93,14 @@ def contalibra_conn() -> sqlite3.Connection:
             descuento REAL NOT NULL DEFAULT 0,
             total REAL NOT NULL DEFAULT 0,
             estado TEXT NOT NULL DEFAULT 'cobrada',
-            created_at TEXT DEFAULT (datetime('now'))
+            created_at TEXT DEFAULT (datetime('now')),
+            usuario_id INTEGER,
+            observaciones TEXT DEFAULT '',
+            factura_id INTEGER,
+            remito_id INTEGER,
+            turno_id INTEGER,
+            mp_order_id TEXT DEFAULT '',
+            mp_payment_id TEXT DEFAULT ''
         );
         """
     )

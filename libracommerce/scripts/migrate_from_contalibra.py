@@ -62,6 +62,7 @@ class MigrationReport:
     stock_movements: int = 0
     sales: int = 0
     sale_items: int = 0
+    venta_links: int = 0
     skipped_sale_items: list[str] = field(default_factory=list)
 
 
@@ -192,20 +193,25 @@ def _migrate_stock_movements(source: sqlite3.Connection, target: sqlite3.Connect
     return len(movements)
 
 
-def _migrate_sales_and_items(target: sqlite3.Connection, sales, report: MigrationReport) -> None:
+def _migrate_sales_and_items(source: sqlite3.Connection, target: sqlite3.Connection,
+                             sales, report: MigrationReport) -> None:
+    created_at = dict(source.execute("SELECT id, created_at FROM ventas").fetchall())
     for sale in sales:
         customer_party_id = sale.customer_party_id
         target.execute(
             """
             INSERT INTO sales
                 (id, number, status, customer_party_id, branch_id, register_id, source_type,
-                 source_id, subtotal, discount_total, tax_total, total, confirmed_at)
-            VALUES (?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ?, ?, ?, ?)
+                 source_id, subtotal, discount_total, tax_total, total, confirmed_at,
+                 created_at, occurred_on, customer_name_snapshot, created_by, notes, status_detail)
+            VALUES (?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 sale.id, sale.number, sale.status, customer_party_id, sale.source_type,
                 str(sale.subtotal), str(sale.discount_total), str(sale.tax_total),
                 str(sale.total), sale.confirmed_at.isoformat() if sale.confirmed_at else None,
+                created_at.get(sale.id), sale.occurred_on, sale.customer_name_snapshot,
+                sale.created_by, sale.notes, sale.status_detail,
             ),
         )
         report.sales += 1
@@ -232,6 +238,120 @@ def _migrate_sales_and_items(target: sqlite3.Connection, sales, report: Migratio
                 ),
             )
             report.sale_items += 1
+
+
+def _migrate_venta_links(conn: sqlite3.Connection) -> int:
+    """`ventas` tiene 5 referencias a contextos que NO son de LibraCommerce:
+    `factura_id`/`remito_id` (facturacion, LibraCore), `turno_id` (caja,
+    LibraCore) y `mp_order_id`/`mp_payment_id` (MercadoPago). Meterlas en la
+    tabla `sales` generica seria filtrar el dominio de otro producto dentro
+    del motor; se mueven a una tabla propia de Contalibra que referencia
+    `sales(id)` -- el pegamento entre contextos vive del lado del producto,
+    no del motor.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS venta_links (
+            venta_id      INTEGER PRIMARY KEY REFERENCES sales(id) ON DELETE CASCADE,
+            factura_id    INTEGER REFERENCES facturas(id) ON DELETE SET NULL,
+            remito_id     INTEGER REFERENCES remitos(id) ON DELETE SET NULL,
+            turno_id      INTEGER REFERENCES turnos_caja(id) ON DELETE SET NULL,
+            mp_order_id   TEXT DEFAULT '',
+            mp_payment_id TEXT DEFAULT ''
+        )
+        """
+    )
+    rows = conn.execute(
+        """
+        SELECT id, factura_id, remito_id, turno_id, mp_order_id, mp_payment_id
+        FROM ventas
+        WHERE factura_id IS NOT NULL OR remito_id IS NOT NULL OR turno_id IS NOT NULL
+           OR (mp_order_id IS NOT NULL AND mp_order_id != '')
+           OR (mp_payment_id IS NOT NULL AND mp_payment_id != '')
+        """
+    ).fetchall()
+    for row in rows:
+        conn.execute(
+            """INSERT INTO venta_links
+               (venta_id, factura_id, remito_id, turno_id, mp_order_id, mp_payment_id)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            row,
+        )
+    return len(rows)
+
+
+def _repoint_ventas_pagos_fk(conn: sqlite3.Connection) -> None:
+    """`ventas_pagos.venta_id` referencia `ventas(id)`. Una vez que las ventas
+    viven en `sales`, cada pago nuevo violaria esa FK. La tabla sigue siendo
+    de dominio LibraCore (pagos/caja) y conserva su nombre y sus datos; solo
+    se reapunta la FK a la nueva ubicacion de las ventas.
+
+    Requiere el rebuild de 12 pasos que recomienda la documentacion de SQLite
+    (no se puede alterar una FK con ALTER TABLE), con `foreign_keys = OFF`
+    alrededor -- mismo procedimiento que la migracion 0001 de este repo.
+    """
+    fks = conn.execute("PRAGMA foreign_key_list(ventas_pagos)").fetchall()
+    if not any(row[2] == "ventas" for row in fks):
+        return  # ya reapuntada, o base nueva sin la FK vieja
+
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("ALTER TABLE ventas_pagos RENAME TO ventas_pagos_old")
+        conn.execute(
+            """
+            CREATE TABLE ventas_pagos (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                venta_id   INTEGER NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
+                medio      TEXT NOT NULL,
+                monto      REAL NOT NULL,
+                referencia TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO ventas_pagos (id, venta_id, medio, monto, referencia, created_at) "
+            "SELECT id, venta_id, medio, monto, referencia, created_at FROM ventas_pagos_old"
+        )
+        conn.execute("DROP TABLE ventas_pagos_old")
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+
+def _repoint_lista_precio_items_fk(conn: sqlite3.Connection) -> None:
+    """`lista_precio_items.producto_id` referencia `productos(id)`. Las listas
+    de precio siguen siendo de LibraCore (no se migran a `price_lists`/
+    `item_prices`: ese es otro modelo, con vigencias y quiebres de cantidad,
+    y mapear el modelo simple de Contalibra ahi es un proyecto propio), pero
+    su FK tiene que apuntar a donde viven ahora los productos.
+
+    Los IDs se preservaron en la migracion, asi que las filas existentes
+    siguen siendo validas sin tocar sus datos.
+    """
+    fks = conn.execute("PRAGMA foreign_key_list(lista_precio_items)").fetchall()
+    if not any(row[2] == "productos" for row in fks):
+        return
+
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("ALTER TABLE lista_precio_items RENAME TO lista_precio_items_old")
+        conn.execute(
+            """
+            CREATE TABLE lista_precio_items (
+                lista_id    INTEGER NOT NULL REFERENCES listas_precio(id) ON DELETE CASCADE,
+                producto_id INTEGER NOT NULL REFERENCES catalog_items(id) ON DELETE CASCADE,
+                precio      REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (lista_id, producto_id)
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO lista_precio_items (lista_id, producto_id, precio) "
+            "SELECT lista_id, producto_id, precio FROM lista_precio_items_old"
+        )
+        conn.execute("DROP TABLE lista_precio_items_old")
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
 
 
 def migrate(conn: sqlite3.Connection) -> MigrationReport:
@@ -264,7 +384,10 @@ def migrate(conn: sqlite3.Connection) -> MigrationReport:
     report.catalog_items = _migrate_catalog_items(conn, conn, catalog_items)
     report.item_codes = _migrate_item_codes(conn, conn)
     report.stock_movements = _migrate_stock_movements(conn, conn, stock_movements)
-    _migrate_sales_and_items(conn, sales, report)
+    _migrate_sales_and_items(conn, conn, sales, report)
+    report.venta_links = _migrate_venta_links(conn)
+    _repoint_ventas_pagos_fk(conn)
+    _repoint_lista_precio_items_fk(conn)
 
     conn.commit()
     return report

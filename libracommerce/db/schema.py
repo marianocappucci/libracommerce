@@ -154,7 +154,12 @@ def init_schema(conn: sqlite3.Connection) -> None:
             tax_total NUMERIC NOT NULL DEFAULT 0,
             total NUMERIC NOT NULL DEFAULT 0,
             confirmed_at TEXT,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            occurred_on TEXT,
+            customer_name_snapshot TEXT NOT NULL DEFAULT '',
+            created_by INTEGER,
+            notes TEXT NOT NULL DEFAULT '',
+            status_detail TEXT
         );
 
         CREATE TABLE IF NOT EXISTS sale_items (

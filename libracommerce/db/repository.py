@@ -669,8 +669,9 @@ class SqliteCommerceRepository:
                 """
                 INSERT INTO sales
                     (number, status, customer_party_id, branch_id, register_id, source_type,
-                     source_id, subtotal, discount_total, tax_total, total, confirmed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     source_id, subtotal, discount_total, tax_total, total, confirmed_at,
+                     occurred_on, customer_name_snapshot, created_by, notes, status_detail)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     sale.number,
@@ -685,6 +686,11 @@ class SqliteCommerceRepository:
                     str(sale.tax_total),
                     str(sale.total),
                     sale.confirmed_at.isoformat() if sale.confirmed_at else None,
+                    sale.occurred_on,
+                    sale.customer_name_snapshot,
+                    sale.created_by,
+                    sale.notes,
+                    sale.status_detail,
                 ),
             )
             sale_id = cur.lastrowid
@@ -695,7 +701,8 @@ class SqliteCommerceRepository:
                 UPDATE sales
                 SET number = ?, status = ?, customer_party_id = ?, branch_id = ?, register_id = ?,
                     source_type = ?, source_id = ?, subtotal = ?, discount_total = ?, tax_total = ?,
-                    total = ?, confirmed_at = ?
+                    total = ?, confirmed_at = ?, occurred_on = ?, customer_name_snapshot = ?,
+                    created_by = ?, notes = ?, status_detail = ?
                 WHERE id = ?
                 """,
                 (
@@ -711,6 +718,11 @@ class SqliteCommerceRepository:
                     str(sale.tax_total),
                     str(sale.total),
                     sale.confirmed_at.isoformat() if sale.confirmed_at else None,
+                    sale.occurred_on,
+                    sale.customer_name_snapshot,
+                    sale.created_by,
+                    sale.notes,
+                    sale.status_detail,
                     sale_id,
                 ),
             )
@@ -746,7 +758,8 @@ class SqliteCommerceRepository:
         row = self._conn.execute(
             """
             SELECT id, number, status, customer_party_id, branch_id, register_id, source_type,
-                   source_id, subtotal, discount_total, tax_total, total, confirmed_at
+                   source_id, subtotal, discount_total, tax_total, total, confirmed_at,
+                   occurred_on, customer_name_snapshot, created_by, notes, status_detail
             FROM sales WHERE id = ?
             """,
             (sale_id,),
@@ -792,6 +805,11 @@ class SqliteCommerceRepository:
             tax_total=_to_decimal(row[10]),
             total=_to_decimal(row[11]),
             confirmed_at=datetime.fromisoformat(row[12]) if row[12] else None,
+            occurred_on=row[13],
+            customer_name_snapshot=row[14],
+            created_by=row[15],
+            notes=row[16],
+            status_detail=row[17],
         )
 
     # purchasing
