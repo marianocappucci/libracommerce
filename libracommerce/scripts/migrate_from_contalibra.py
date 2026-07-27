@@ -354,6 +354,54 @@ def _repoint_lista_precio_items_fk(conn: sqlite3.Connection) -> None:
         conn.execute("PRAGMA foreign_keys = ON")
 
 
+# Tabla nueva -> tabla vieja de la que hereda su secuencia de IDs.
+_SEQUENCE_HEREDADA = {
+    "sales": "ventas",
+    "catalog_items": "productos",
+    "stock_movements": "movimientos_stock",
+    "locations": "depositos",
+    "categories": "categorias_producto",
+}
+
+
+def _preservar_sqlite_sequence(conn: sqlite3.Connection) -> None:
+    """Evita que las tablas nuevas reusen IDs que las viejas ya consumieron.
+
+    Bug real encontrado probando la app entera contra una copia de dev: la
+    migracion inserta IDs explicitos, asi que el AUTOINCREMENT de la tabla
+    nueva arranca en el maximo migrado -- pero la tabla vieja podia tener un
+    `sqlite_sequence` mas alto por filas ya borradas. En dev, `ventas` estaba
+    en 13 y `sales` quedo en 5: la venta siguiente tomo el id 6, que una
+    venta vieja ya habia usado.
+
+    Eso no es cosmetico. `caja_movimientos` guarda referencias con el id de
+    la venta (`anulacion:venta:6:pago:5`), y `create_caja_movimiento` dedupe
+    por referencia a proposito. Al reusar el id 6, la anulacion de la venta
+    nueva choco con la referencia de la vieja y **el egreso de caja no se
+    genero**: la venta quedaba anulada pero el dinero no se revertia.
+
+    Se lleva cada secuencia al maximo entre la propia y la de la tabla vieja.
+    """
+    for tabla_nueva, tabla_vieja in _SEQUENCE_HEREDADA.items():
+        vieja = conn.execute(
+            "SELECT seq FROM sqlite_sequence WHERE name = ?", (tabla_vieja,)
+        ).fetchone()
+        if vieja is None:
+            continue
+        nueva = conn.execute(
+            "SELECT seq FROM sqlite_sequence WHERE name = ?", (tabla_nueva,)
+        ).fetchone()
+        objetivo = max(vieja[0], nueva[0] if nueva else 0)
+        if nueva is None:
+            conn.execute(
+                "INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)", (tabla_nueva, objetivo)
+            )
+        elif objetivo > nueva[0]:
+            conn.execute(
+                "UPDATE sqlite_sequence SET seq = ? WHERE name = ?", (objetivo, tabla_nueva)
+            )
+
+
 def migrate(conn: sqlite3.Connection) -> MigrationReport:
     """Corre la migracion completa sobre `conn` -- lee las tablas de
     Contalibra y escribe las de LibraCommerce en la MISMA conexion/archivo
@@ -388,6 +436,7 @@ def migrate(conn: sqlite3.Connection) -> MigrationReport:
     report.venta_links = _migrate_venta_links(conn)
     _repoint_ventas_pagos_fk(conn)
     _repoint_lista_precio_items_fk(conn)
+    _preservar_sqlite_sequence(conn)
 
     conn.commit()
     return report

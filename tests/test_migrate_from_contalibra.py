@@ -215,6 +215,38 @@ def test_migrate_preserves_stock_minimo_and_deposito_default(contalibra_conn):
     ).fetchall() == [("Origen", "Principal", 1), ("Destino", "", 0)]
 
 
+def test_migrate_no_reusa_ids_que_las_tablas_viejas_ya_consumieron(contalibra_conn):
+    """Bug real (encontrado probando la app entera contra una copia de dev):
+    la tabla vieja puede tener un `sqlite_sequence` más alto que el máximo id
+    vivo, por filas ya borradas. Si la tabla nueva arranca desde el máximo
+    migrado, la fila siguiente reusa un id ya consumido — y las referencias
+    que llevan el id de la venta embebido (`anulacion:venta:6:pago:5` en
+    `caja_movimientos`) colisionan, con lo que la anulación no revierte la
+    caja."""
+    _seed_realistic_dataset(contalibra_conn)
+    # Simula ventas/productos borrados: la secuencia quedó por encima del
+    # máximo id vivo.
+    contalibra_conn.execute("UPDATE sqlite_sequence SET seq = 13 WHERE name = 'ventas'")
+    contalibra_conn.execute("UPDATE sqlite_sequence SET seq = 9 WHERE name = 'productos'")
+
+    migrate(contalibra_conn)
+
+    def seq(tabla):
+        row = contalibra_conn.execute(
+            "SELECT seq FROM sqlite_sequence WHERE name = ?", (tabla,)
+        ).fetchone()
+        return row[0] if row else None
+
+    assert seq("sales") >= 13
+    assert seq("catalog_items") >= 9
+
+    # La venta siguiente no puede tomar un id que `ventas` ya había usado.
+    cur = contalibra_conn.execute(
+        "INSERT INTO sales (number, status, total) VALUES ('V-9999', 'draft', 0)"
+    )
+    assert cur.lastrowid > 13
+
+
 def test_verify_reports_no_discrepancies_on_clean_migration(contalibra_conn):
     _seed_realistic_dataset(contalibra_conn)
     migrate(contalibra_conn)
