@@ -226,6 +226,28 @@ def test_read_stock_movements_maps_known_types_in_date_order(contalibra_conn):
     assert movements[0].source_id is None
 
 
+def test_read_stock_movements_maps_transferencia_between_depositos(contalibra_conn):
+    # Generado por libracore/db/productos.py::transferir_stock — dos filas,
+    # una por depósito, ambas con el mismo producto_id.
+    contalibra_conn.execute("INSERT INTO productos (nombre, unidad) VALUES ('Yerba', 'kg')")
+    contalibra_conn.executemany(
+        "INSERT INTO depositos (nombre) VALUES (?)", [("Origen",), ("Destino",)]
+    )
+    contalibra_conn.executemany(
+        "INSERT INTO movimientos_stock (producto_id, tipo, cantidad, fecha, deposito_id) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [
+            (1, "transferencia_salida", -5, "2026-07-01", 1),
+            (1, "transferencia_entrada", 5, "2026-07-01", 2),
+        ],
+    )
+    movements = read_stock_movements(contalibra_conn)
+    assert [m.movement_type for m in movements] == [
+        StockMovementType.TRANSFER_OUT,
+        StockMovementType.TRANSFER_IN,
+    ]
+
+
 def test_read_stock_movements_skips_rows_without_deposito(contalibra_conn):
     contalibra_conn.execute("INSERT INTO productos (nombre, unidad) VALUES ('Yerba', 'kg')")
     contalibra_conn.execute(

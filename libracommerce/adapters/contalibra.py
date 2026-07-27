@@ -24,6 +24,11 @@ enough to do better, and these are defaults, not derived facts:
   decimal_scale always default to False/0.
 - CatalogItem.tax_profile: Contalibra resolves IVA at invoicing time
   (`facturas`), not per product — always None here.
+- StockMovement.movement_type: `movimientos_stock.tipo` values `entrada`/
+  `salida`/`ajuste` all collapse to ADJUSTMENT (Contalibra doesn't
+  distinguish a reason beyond the sign of `cantidad`). `transferencia_salida`/
+  `transferencia_entrada` (written by `productos.py::transferir_stock`) map
+  to TRANSFER_OUT/TRANSFER_IN respectively.
 - CatalogItem.purchasable: not tracked in `productos` — always True.
 - StockMovement.unit_cost/lot_code/expires_at: not tracked in
   `movimientos_stock` — always None.
@@ -57,6 +62,8 @@ _STOCK_MOVEMENT_TYPE_MAP = {
     "ajuste": StockMovementType.ADJUSTMENT,
     "entrada": StockMovementType.ADJUSTMENT,
     "salida": StockMovementType.ADJUSTMENT,
+    "transferencia_salida": StockMovementType.TRANSFER_OUT,
+    "transferencia_entrada": StockMovementType.TRANSFER_IN,
 }
 
 _SALE_STATUS_MAP = {
