@@ -402,13 +402,14 @@ class SqliteCommerceRepository:
 
     def get_price_list(self, price_list_id: int) -> PriceList | None:
         row = self._conn.execute(
-            "SELECT id, name, description, active, is_default FROM price_lists WHERE id = ?",
+            "SELECT id, name, description, active, is_default, created_at FROM price_lists WHERE id = ?",
             (price_list_id,),
         ).fetchone()
         if row is None:
             return None
         return PriceList(
-            id=row[0], name=row[1], description=row[2], active=_to_bool(row[3]), is_default=_to_bool(row[4])
+            id=row[0], name=row[1], description=row[2], active=_to_bool(row[3]),
+            is_default=_to_bool(row[4]), created_at=row[5],
         )
 
     def save_item_price(self, item_price: ItemPrice) -> ItemPrice:

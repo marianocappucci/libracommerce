@@ -195,6 +195,13 @@ def _migration_0006_add_sales_business_fields(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE sales ADD COLUMN status_detail TEXT")
 
 
+def _migration_0007_add_price_lists_created_at(conn: sqlite3.Connection) -> None:
+    """`price_lists` era la unica tabla de precios sin `created_at`
+    -- Contalibra ya lo tenia en `listas_precio` (P7b)."""
+    if "created_at" not in _table_columns(conn, "price_lists"):
+        conn.execute("ALTER TABLE price_lists ADD COLUMN created_at TEXT")
+
+
 # Orden fijo: agregar al final, nunca reordenar ni reusar un numero ya
 # asignado (aunque la migracion se haya borrado despues).
 _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
@@ -205,6 +212,7 @@ _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (4, "add_locations_created_at", _migration_0004_add_locations_created_at),
     (5, "add_stock_movements_created_at", _migration_0005_add_stock_movements_created_at),
     (6, "add_sales_business_fields", _migration_0006_add_sales_business_fields),
+    (7, "add_price_lists_created_at", _migration_0007_add_price_lists_created_at),
 ]
 
 

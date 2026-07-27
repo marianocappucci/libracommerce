@@ -109,7 +109,7 @@ def contalibra_conn() -> sqlite3.Connection:
             descripcion TEXT DEFAULT '',
             es_default INTEGER NOT NULL DEFAULT 0,
             activa INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT DEFAULT (datetime('now'))
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
         CREATE TABLE lista_precio_items (

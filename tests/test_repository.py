@@ -173,7 +173,12 @@ def test_current_stock_is_tracked_independently_per_variant(repo: SqliteCommerce
 def test_save_price_list_assigns_id_and_round_trips(repo: SqliteCommerceRepository):
     saved = repo.save_price_list(PriceList(None, "Mayorista", is_default=True))
     assert saved.id is not None
-    assert repo.get_price_list(saved.id) == saved
+    # `created_at` lo pone el DEFAULT CURRENT_TIMESTAMP del schema -- save_price_list
+    # no lo conoce (el dataclass que se le pasa nunca lo trae), solo get_price_list
+    # lo devuelve real. Se compara todo lo demas y se confirma que quedo seteado.
+    fetched = repo.get_price_list(saved.id)
+    assert fetched == replace(saved, created_at=fetched.created_at)
+    assert fetched.created_at is not None
 
 
 def test_save_price_list_rejects_second_default(repo: SqliteCommerceRepository):

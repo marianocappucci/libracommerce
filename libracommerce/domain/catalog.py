@@ -66,6 +66,7 @@ class PriceList:
     description: str = ""
     active: bool = True
     is_default: bool = False
+    created_at: str | None = None
 
 
 @dataclass(frozen=True)

@@ -191,10 +191,10 @@ def _migrate_price_lists(source: sqlite3.Connection, target: sqlite3.Connection,
     dejando constancia en el reporte en vez de que la migracion explote.
     """
     rows = source.execute(
-        "SELECT id, nombre, descripcion, es_default, activa FROM listas_precio ORDER BY id"
+        "SELECT id, nombre, descripcion, es_default, activa, created_at FROM listas_precio ORDER BY id"
     ).fetchall()
     ya_hay_default = False
-    for row_id, nombre, descripcion, es_default, activa in rows:
+    for row_id, nombre, descripcion, es_default, activa, created_at in rows:
         es_default_final = es_default
         if es_default and ya_hay_default:
             report.price_list_default_conflicts.append(
@@ -205,8 +205,9 @@ def _migrate_price_lists(source: sqlite3.Connection, target: sqlite3.Connection,
         elif es_default:
             ya_hay_default = True
         target.execute(
-            "INSERT INTO price_lists (id, name, description, active, is_default) VALUES (?,?,?,?,?)",
-            (row_id, nombre, descripcion, activa, es_default_final),
+            "INSERT INTO price_lists (id, name, description, active, is_default, created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (row_id, nombre, descripcion, activa, es_default_final, created_at),
         )
     return len(rows)
 
