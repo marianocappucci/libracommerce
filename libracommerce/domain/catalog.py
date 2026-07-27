@@ -47,6 +47,7 @@ class CatalogItem:
     metadata: dict[str, str] = field(default_factory=dict)
     default_sale_price: Decimal = Decimal("0")
     default_cost: Decimal = Decimal("0")
+    min_stock: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True)

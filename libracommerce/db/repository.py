@@ -135,8 +135,8 @@ class SqliteCommerceRepository:
                 INSERT INTO catalog_items
                     (item_type, name, description, category_id, unit_code, active,
                      sellable, purchasable, tax_profile, metadata_json,
-                     default_sale_price, default_cost)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     default_sale_price, default_cost, min_stock)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     item.item_type,
@@ -151,6 +151,7 @@ class SqliteCommerceRepository:
                     metadata_json,
                     str(item.default_sale_price),
                     str(item.default_cost),
+                    str(item.min_stock),
                 ),
             )
             self._conn.commit()
@@ -160,7 +161,7 @@ class SqliteCommerceRepository:
             UPDATE catalog_items
             SET item_type = ?, name = ?, description = ?, category_id = ?, unit_code = ?,
                 active = ?, sellable = ?, purchasable = ?, tax_profile = ?, metadata_json = ?,
-                default_sale_price = ?, default_cost = ?
+                default_sale_price = ?, default_cost = ?, min_stock = ?
             WHERE id = ?
             """,
             (
@@ -176,6 +177,7 @@ class SqliteCommerceRepository:
                 metadata_json,
                 str(item.default_sale_price),
                 str(item.default_cost),
+                str(item.min_stock),
                 item.id,
             ),
         )
@@ -187,7 +189,7 @@ class SqliteCommerceRepository:
             """
             SELECT ci.id, ci.item_type, ci.name, ci.description, ci.category_id, ci.active,
                    ci.sellable, ci.purchasable, ci.tax_profile, ci.metadata_json,
-                   ci.default_sale_price, ci.default_cost,
+                   ci.default_sale_price, ci.default_cost, ci.min_stock,
                    u.code, u.name, u.allows_fraction, u.decimal_scale
             FROM catalog_items ci
             JOIN units u ON u.code = ci.unit_code
@@ -197,14 +199,47 @@ class SqliteCommerceRepository:
         ).fetchone()
         return self._catalog_item_from_row(row)
 
+    def list_catalog_items(
+        self,
+        *,
+        active_only: bool = False,
+        sellable_only: bool = False,
+        item_type: CatalogItemType | None = None,
+        search: str = "",
+    ) -> Sequence[CatalogItem]:
+        sql = """
+            SELECT ci.id, ci.item_type, ci.name, ci.description, ci.category_id, ci.active,
+                   ci.sellable, ci.purchasable, ci.tax_profile, ci.metadata_json,
+                   ci.default_sale_price, ci.default_cost, ci.min_stock,
+                   u.code, u.name, u.allows_fraction, u.decimal_scale
+            FROM catalog_items ci
+            JOIN units u ON u.code = ci.unit_code
+        """
+        where, params = [], []
+        if active_only:
+            where.append("ci.active = 1")
+        if sellable_only:
+            where.append("ci.sellable = 1")
+        if item_type is not None:
+            where.append("ci.item_type = ?")
+            params.append(item_type)
+        if search:
+            where.append("ci.name LIKE ?")
+            params.append(f"%{search}%")
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY ci.name"
+        rows = self._conn.execute(sql, params).fetchall()
+        return [self._catalog_item_from_row(row) for row in rows]
+
     def _catalog_item_from_row(self, row) -> CatalogItem | None:
         if row is None:
             return None
         unit = Unit(
-            code=row[12],
-            name=row[13],
-            allows_fraction=_to_bool(row[14]),
-            decimal_scale=row[15],
+            code=row[13],
+            name=row[14],
+            allows_fraction=_to_bool(row[15]),
+            decimal_scale=row[16],
         )
         return CatalogItem(
             id=row[0],
@@ -220,6 +255,7 @@ class SqliteCommerceRepository:
             metadata=json.loads(row[9]),
             default_sale_price=_to_decimal(row[10]),
             default_cost=_to_decimal(row[11]),
+            min_stock=_to_decimal(row[12]),
         )
 
     # item codes
@@ -271,7 +307,7 @@ class SqliteCommerceRepository:
             """
             SELECT ci.id, ci.item_type, ci.name, ci.description, ci.category_id, ci.active,
                    ci.sellable, ci.purchasable, ci.tax_profile, ci.metadata_json,
-                   ci.default_sale_price, ci.default_cost,
+                   ci.default_sale_price, ci.default_cost, ci.min_stock,
                    u.code, u.name, u.allows_fraction, u.decimal_scale
             FROM item_codes ic
             JOIN catalog_items ci ON ci.id = ic.item_id
@@ -491,27 +527,55 @@ class SqliteCommerceRepository:
         cur = self._conn.cursor()
         if location.id is None:
             cur.execute(
-                "INSERT INTO locations (name, branch_id, location_type, active) VALUES (?, ?, ?, ?)",
-                (location.name, location.branch_id, location.location_type, int(location.active)),
+                """
+                INSERT INTO locations (name, branch_id, location_type, active, description, is_default)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    location.name, location.branch_id, location.location_type, int(location.active),
+                    location.description, int(location.is_default),
+                ),
             )
             self._conn.commit()
             return replace(location, id=cur.lastrowid)
         cur.execute(
-            "UPDATE locations SET name = ?, branch_id = ?, location_type = ?, active = ? WHERE id = ?",
-            (location.name, location.branch_id, location.location_type, int(location.active), location.id),
+            """
+            UPDATE locations SET name = ?, branch_id = ?, location_type = ?, active = ?,
+                description = ?, is_default = ?
+            WHERE id = ?
+            """,
+            (
+                location.name, location.branch_id, location.location_type, int(location.active),
+                location.description, int(location.is_default), location.id,
+            ),
         )
         self._conn.commit()
         return location
 
     def get_location(self, location_id: int) -> Location | None:
         row = self._conn.execute(
-            "SELECT id, name, branch_id, location_type, active FROM locations WHERE id = ?",
+            "SELECT id, name, branch_id, location_type, active, description, is_default "
+            "FROM locations WHERE id = ?",
             (location_id,),
         ).fetchone()
+        return self._location_from_row(row)
+
+    def list_locations(self, *, active_only: bool = False) -> Sequence[Location]:
+        sql = (
+            "SELECT id, name, branch_id, location_type, active, description, is_default FROM locations"
+        )
+        if active_only:
+            sql += " WHERE active = 1"
+        sql += " ORDER BY is_default DESC, name"
+        rows = self._conn.execute(sql).fetchall()
+        return [self._location_from_row(row) for row in rows]
+
+    def _location_from_row(self, row) -> Location | None:
         if row is None:
             return None
         return Location(
-            id=row[0], name=row[1], branch_id=row[2], location_type=row[3], active=_to_bool(row[4])
+            id=row[0], name=row[1], branch_id=row[2], location_type=row[3], active=_to_bool(row[4]),
+            description=row[5], is_default=_to_bool(row[6]),
         )
 
     # inventory

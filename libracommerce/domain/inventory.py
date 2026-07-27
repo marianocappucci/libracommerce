@@ -21,6 +21,8 @@ class Location:
     branch_id: int | None = None
     location_type: str = "warehouse"
     active: bool = True
+    description: str = ""
+    is_default: bool = False
 
 
 @dataclass(frozen=True)

@@ -88,10 +88,29 @@ def _migration_0001_add_variant_id(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sale_items_sale ON sale_items(sale_id)")
 
 
+def _migration_0002_add_min_stock_and_location_defaults(conn: sqlite3.Connection) -> None:
+    """P7 (migracion Contalibra -> LibraCommerce): `catalog_items.min_stock`
+    (equivalente a `productos.stock_minimo` de Contalibra, usado para alertas
+    de stock bajo) y `locations.is_default`/`description` (equivalentes a
+    `depositos.es_default`/`descripcion`)."""
+    if "min_stock" not in _table_columns(conn, "catalog_items"):
+        conn.execute("ALTER TABLE catalog_items ADD COLUMN min_stock NUMERIC NOT NULL DEFAULT 0")
+
+    if "description" not in _table_columns(conn, "locations"):
+        conn.execute("ALTER TABLE locations ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+    if "is_default" not in _table_columns(conn, "locations"):
+        conn.execute("ALTER TABLE locations ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_locations_one_default "
+        "ON locations(is_default) WHERE is_default = 1"
+    )
+
+
 # Orden fijo: agregar al final, nunca reordenar ni reusar un numero ya
 # asignado (aunque la migracion se haya borrado despues).
 _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "add_variant_id_to_stock_movements_and_sale_items", _migration_0001_add_variant_id),
+    (2, "add_min_stock_and_location_defaults", _migration_0002_add_min_stock_and_location_defaults),
 ]
 
 

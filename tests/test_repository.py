@@ -267,6 +267,62 @@ def test_save_location_round_trips(repo: SqliteCommerceRepository):
     assert repo.get_location(saved.id) == saved
 
 
+def test_save_location_round_trips_description_and_default(repo: SqliteCommerceRepository):
+    location = Location(None, "Principal", description="Deposito por defecto", is_default=True)
+    saved = repo.save_location(location)
+    assert repo.get_location(saved.id) == saved
+
+
+def test_list_locations_puts_the_default_first_and_can_filter_inactive(
+    repo: SqliteCommerceRepository,
+):
+    repo.save_location(Location(None, "Zzz Secundario"))
+    repo.save_location(Location(None, "Aaa Principal", is_default=True))
+    repo.save_location(Location(None, "Baja", active=False))
+
+    names = [loc.name for loc in repo.list_locations()]
+    assert names == ["Aaa Principal", "Baja", "Zzz Secundario"]
+    assert [loc.name for loc in repo.list_locations(active_only=True)] == [
+        "Aaa Principal",
+        "Zzz Secundario",
+    ]
+
+
+def test_catalog_item_round_trips_min_stock(repo: SqliteCommerceRepository):
+    item = CatalogItem(None, CatalogItemType.PRODUCT, "Yerba", _kg(), min_stock=Decimal("2.5"))
+    saved = repo.save_catalog_item(item)
+    assert repo.get_catalog_item(saved.id).min_stock == Decimal("2.5")
+
+
+def test_list_catalog_items_filters_by_type_active_sellable_and_search(
+    repo: SqliteCommerceRepository,
+):
+    repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Yerba", _kg()))
+    repo.save_catalog_item(
+        CatalogItem(None, CatalogItemType.PRODUCT, "Yerba vieja", _kg(), active=False)
+    )
+    repo.save_catalog_item(
+        CatalogItem(None, CatalogItemType.PRODUCT, "Insumo interno", _kg(), sellable=False)
+    )
+    repo.save_catalog_item(CatalogItem(None, CatalogItemType.SERVICE, "Consulta", _kg()))
+
+    assert len(repo.list_catalog_items()) == 4
+    assert [i.name for i in repo.list_catalog_items(active_only=True)] == [
+        "Consulta",
+        "Insumo interno",
+        "Yerba",
+    ]
+    assert [i.name for i in repo.list_catalog_items(sellable_only=True)] == [
+        "Consulta",
+        "Yerba",
+        "Yerba vieja",
+    ]
+    assert [i.name for i in repo.list_catalog_items(item_type=CatalogItemType.SERVICE)] == [
+        "Consulta"
+    ]
+    assert [i.name for i in repo.list_catalog_items(search="yerba")] == ["Yerba", "Yerba vieja"]
+
+
 def test_stock_movements_are_immutable_and_listed_in_order(repo: SqliteCommerceRepository):
     item = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Yerba", _kg()))
     location = repo.save_location(Location(None, "Deposito Central"))

@@ -90,10 +90,11 @@ def _migrate_locations(target: sqlite3.Connection, locations) -> int:
     for location in locations:
         target.execute(
             """
-            INSERT INTO locations (id, name, branch_id, location_type, active)
-            VALUES (?, ?, NULL, ?, ?)
+            INSERT INTO locations (id, name, branch_id, location_type, active, description, is_default)
+            VALUES (?, ?, NULL, ?, ?, ?, ?)
             """,
-            (location.id, location.name, location.location_type, int(location.active)),
+            (location.id, location.name, location.location_type, int(location.active),
+             location.description, int(location.is_default)),
         )
     return len(locations)
 
@@ -129,14 +130,14 @@ def _migrate_catalog_items(target: sqlite3.Connection, items) -> int:
             INSERT INTO catalog_items
                 (id, item_type, name, description, category_id, unit_code, active,
                  sellable, purchasable, tax_profile, metadata_json,
-                 default_sale_price, default_cost)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 default_sale_price, default_cost, min_stock)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 item.id, item.item_type, item.name, item.description, item.category_id,
                 item.unit.code, int(item.active), int(item.sellable), int(item.purchasable),
                 item.tax_profile, json.dumps(item.metadata, ensure_ascii=False),
-                str(item.default_sale_price), str(item.default_cost),
+                str(item.default_sale_price), str(item.default_cost), str(item.min_stock),
             ),
         )
     return len(items)

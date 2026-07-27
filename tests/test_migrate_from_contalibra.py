@@ -53,6 +53,7 @@ def contalibra_conn() -> sqlite3.Connection:
             unidad TEXT NOT NULL DEFAULT 'u',
             categoria TEXT DEFAULT '',
             activo INTEGER NOT NULL DEFAULT 1,
+            stock_minimo REAL NOT NULL DEFAULT 0,
             estacion TEXT DEFAULT '',
             vendible INTEGER NOT NULL DEFAULT 1,
             tipo TEXT NOT NULL DEFAULT 'producto'
@@ -61,7 +62,9 @@ def contalibra_conn() -> sqlite3.Connection:
         CREATE TABLE depositos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nombre TEXT NOT NULL,
-            activo INTEGER NOT NULL DEFAULT 1
+            descripcion TEXT DEFAULT '',
+            activo INTEGER NOT NULL DEFAULT 1,
+            es_default INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE movimientos_stock (
@@ -99,14 +102,16 @@ def _seed_realistic_dataset(conn: sqlite3.Connection) -> None:
     conn.execute("INSERT INTO proveedores (id, nombre, cuit_dni) VALUES (1, 'Distribuidora SA', '30111222333')")
     conn.execute("INSERT INTO categorias_producto (id, nombre) VALUES (1, 'Almacen')")
     conn.execute(
-        """INSERT INTO productos (id, nombre, precio_venta, precio_costo, unidad, categoria, tipo)
-           VALUES (1, 'Yerba', 1500, 900, 'kg', 'Almacen', 'producto')"""
+        """INSERT INTO productos (id, nombre, precio_venta, precio_costo, unidad, categoria, tipo, stock_minimo)
+           VALUES (1, 'Yerba', 1500, 900, 'kg', 'Almacen', 'producto', 5)"""
     )
     conn.execute(
         """INSERT INTO productos (id, nombre, precio_venta, precio_costo, unidad, tipo)
            VALUES (2, 'Consulta', 0, 0, 'u', 'servicio')"""
     )
-    conn.execute("INSERT INTO depositos (id, nombre) VALUES (1, 'Origen')")
+    conn.execute(
+        "INSERT INTO depositos (id, nombre, descripcion, es_default) VALUES (1, 'Origen', 'Principal', 1)"
+    )
     conn.execute("INSERT INTO depositos (id, nombre) VALUES (2, 'Destino')")
     conn.executemany(
         "INSERT INTO movimientos_stock (producto_id, tipo, cantidad, fecha, deposito_id, venta_id) "
@@ -186,6 +191,18 @@ def test_migrate_preserves_catalog_item_ids_and_type(contalibra_conn):
         "SELECT id, item_type FROM catalog_items ORDER BY id"
     ).fetchall()
     assert rows == [(1, "product"), (2, "service")]
+
+
+def test_migrate_preserves_stock_minimo_and_deposito_default(contalibra_conn):
+    _seed_realistic_dataset(contalibra_conn)
+    migrate(contalibra_conn)
+    # min_stock tiene afinidad NUMERIC: SQLite guarda "5.0" como el entero 5.
+    assert contalibra_conn.execute(
+        "SELECT min_stock FROM catalog_items WHERE id = 1"
+    ).fetchone()[0] == 5
+    assert contalibra_conn.execute(
+        "SELECT name, description, is_default FROM locations ORDER BY id"
+    ).fetchall() == [("Origen", "Principal", 1), ("Destino", "", 0)]
 
 
 def test_verify_reports_no_discrepancies_on_clean_migration(contalibra_conn):

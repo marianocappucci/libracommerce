@@ -135,16 +135,40 @@ def test_migration_enforces_variant_requires_item_id_check():
         )
 
 
+def test_migration_0002_adds_min_stock_and_location_defaults():
+    conn = _old_schema_conn()
+    init_schema(conn)
+    catalog_columns = {row[1] for row in conn.execute("PRAGMA table_info(catalog_items)")}
+    location_columns = {row[1] for row in conn.execute("PRAGMA table_info(locations)")}
+    assert "min_stock" in catalog_columns
+    assert {"description", "is_default"} <= location_columns
+    # Los datos preexistentes sobreviven y toman el default documentado.
+    assert conn.execute("SELECT min_stock FROM catalog_items WHERE id = 1").fetchone()[0] == 0
+    assert conn.execute("SELECT is_default FROM locations WHERE id = 1").fetchone()[0] == 0
+
+
+def test_migration_0002_enforces_a_single_default_location():
+    conn = _old_schema_conn()
+    init_schema(conn)
+    conn.execute("UPDATE locations SET is_default = 1 WHERE id = 1")
+    conn.execute("INSERT INTO locations (name, is_default) VALUES ('Otro', 0)")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE locations SET is_default = 1 WHERE name = 'Otro'")
+
+
 def test_init_schema_is_idempotent_on_already_migrated_database():
     conn = _old_schema_conn()
     init_schema(conn)
     init_schema(conn)  # no debe fallar ni duplicar la migracion
     applied = conn.execute("SELECT version FROM schema_migrations").fetchall()
-    assert applied == [(1,)]
+    assert applied == [(1,), (2,)]
 
 
 def test_init_schema_on_a_fresh_database_records_migration_as_applied():
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
     applied = conn.execute("SELECT version, name FROM schema_migrations").fetchall()
-    assert applied == [(1, "add_variant_id_to_stock_movements_and_sale_items")]
+    assert applied == [
+        (1, "add_variant_id_to_stock_movements_and_sale_items"),
+        (2, "add_min_stock_and_location_defaults"),
+    ]

@@ -60,6 +60,7 @@ def contalibra_conn() -> sqlite3.Connection:
             unidad TEXT NOT NULL DEFAULT 'u',
             categoria TEXT DEFAULT '',
             activo INTEGER NOT NULL DEFAULT 1,
+            stock_minimo REAL NOT NULL DEFAULT 0,
             estacion TEXT DEFAULT '',
             vendible INTEGER NOT NULL DEFAULT 1,
             tipo TEXT NOT NULL DEFAULT 'producto'
@@ -68,7 +69,9 @@ def contalibra_conn() -> sqlite3.Connection:
         CREATE TABLE depositos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nombre TEXT NOT NULL,
-            activo INTEGER NOT NULL DEFAULT 1
+            descripcion TEXT DEFAULT '',
+            activo INTEGER NOT NULL DEFAULT 1,
+            es_default INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE movimientos_stock (
@@ -169,6 +172,7 @@ def test_read_catalog_items_defaults_to_product_when_tipo_column_missing(contali
             unidad TEXT NOT NULL DEFAULT 'u',
             categoria TEXT DEFAULT '',
             activo INTEGER NOT NULL DEFAULT 1,
+            stock_minimo REAL NOT NULL DEFAULT 0,
             estacion TEXT DEFAULT '',
             vendible INTEGER NOT NULL DEFAULT 1
         )

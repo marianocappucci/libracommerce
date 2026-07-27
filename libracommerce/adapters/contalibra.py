@@ -30,6 +30,11 @@ enough to do better, and these are defaults, not derived facts:
   `transferencia_entrada` (written by `productos.py::transferir_stock`) map
   to TRANSFER_OUT/TRANSFER_IN respectively.
 - CatalogItem.purchasable: not tracked in `productos` — always True.
+- CatalogItem.min_stock / Location.is_default / Location.description: these
+  are NOT lossy — they map 1:1 onto `productos.stock_minimo`,
+  `depositos.es_default` and `depositos.descripcion`, which LibraCommerce
+  gained as first-class fields in migration 0002 precisely so the P7
+  migration wouldn't have to drop them.
 - StockMovement.unit_cost/lot_code/expires_at: not tracked in
   `movimientos_stock` — always None.
 - Sale.tax_total: not tracked on `ventas` (only appears later on
@@ -126,7 +131,7 @@ def read_catalog_items(conn: sqlite3.Connection) -> list[CatalogItem]:
     has_tipo = any(row[1] == "tipo" for row in conn.execute("PRAGMA table_info(productos)"))
     columns = (
         "id, nombre, descripcion, categoria, unidad, activo, vendible, "
-        "precio_venta, precio_costo, estacion"
+        "precio_venta, precio_costo, estacion, stock_minimo"
     )
     if has_tipo:
         columns += ", tipo"
@@ -135,7 +140,7 @@ def read_catalog_items(conn: sqlite3.Connection) -> list[CatalogItem]:
     for row in rows:
         unit_code = row[4] or "u"
         metadata = {"estacion": row[9]} if row[9] else {}
-        tipo = row[10] if has_tipo else "producto"
+        tipo = row[11] if has_tipo else "producto"
         item_type = CatalogItemType.SERVICE if tipo == "servicio" else CatalogItemType.PRODUCT
         items.append(
             CatalogItem(
@@ -152,15 +157,21 @@ def read_catalog_items(conn: sqlite3.Connection) -> list[CatalogItem]:
                 metadata=metadata,
                 default_sale_price=_to_decimal(row[7]),
                 default_cost=_to_decimal(row[8]),
+                min_stock=_to_decimal(row[10]),
             )
         )
     return items
 
 
 def read_locations(conn: sqlite3.Connection) -> list[Location]:
-    rows = conn.execute("SELECT id, nombre, activo FROM depositos").fetchall()
+    rows = conn.execute(
+        "SELECT id, nombre, activo, descripcion, es_default FROM depositos"
+    ).fetchall()
     return [
-        Location(id=row[0], name=row[1], branch_id=None, location_type="warehouse", active=bool(row[2]))
+        Location(
+            id=row[0], name=row[1], branch_id=None, location_type="warehouse",
+            active=bool(row[2]), description=row[3] or "", is_default=bool(row[4]),
+        )
         for row in rows
     ]
 

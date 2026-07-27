@@ -49,6 +49,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             metadata_json TEXT NOT NULL DEFAULT '{}',
             default_sale_price NUMERIC NOT NULL DEFAULT 0,
             default_cost NUMERIC NOT NULL DEFAULT 0,
+            min_stock NUMERIC NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -111,7 +112,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
             name TEXT NOT NULL,
             branch_id INTEGER,
             location_type TEXT NOT NULL DEFAULT 'warehouse',
-            active INTEGER NOT NULL DEFAULT 1
+            active INTEGER NOT NULL DEFAULT 1,
+            description TEXT NOT NULL DEFAULT '',
+            is_default INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS stock_movements (
