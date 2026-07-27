@@ -134,6 +134,27 @@ def restolibra_conn() -> sqlite3.Connection:
             cantidad       REAL NOT NULL DEFAULT 0,
             created_at     TEXT DEFAULT (datetime('now'))
         );
+
+        CREATE TABLE pedidos (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            numero         TEXT NOT NULL,
+            canal          TEXT NOT NULL DEFAULT 'salon',
+            mesa_id        INTEGER,
+            estado         TEXT NOT NULL DEFAULT 'abierto',
+            comensales     INTEGER NOT NULL DEFAULT 1,
+            usuario_id     INTEGER,
+            cliente_id     INTEGER,
+            cliente_nombre TEXT DEFAULT '',
+            direccion      TEXT DEFAULT '',
+            telefono       TEXT DEFAULT '',
+            repartidor     TEXT DEFAULT '',
+            costo_envio    REAL NOT NULL DEFAULT 0,
+            observaciones  TEXT DEFAULT '',
+            venta_id       INTEGER REFERENCES ventas(id) ON DELETE SET NULL,
+            created_at     TEXT DEFAULT (datetime('now')),
+            updated_at     TEXT DEFAULT (datetime('now')),
+            hora_retiro    TEXT DEFAULT ''
+        );
         """
     )
     return conn
@@ -181,6 +202,10 @@ def _seed_realistic_dataset(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "INSERT INTO receta_items (receta_id, ingrediente_id, cantidad) VALUES (1, 1, 1.2)"
+    )
+    conn.execute(
+        """INSERT INTO pedidos (numero, canal, estado, venta_id)
+           VALUES ('P-0001', 'barra', 'cobrado', 1)"""
     )
 
 
@@ -237,6 +262,27 @@ def test_migrate_repoints_recetas_and_receta_items_to_catalog_items(restolibra_c
     assert joined == ("Papa",)
 
 
+def test_migrate_repoints_pedidos_venta_id_to_sales(restolibra_conn):
+    _seed_realistic_dataset(restolibra_conn)
+    report = migrate(restolibra_conn)
+
+    assert report.pedidos_repointed is True
+
+    fks = restolibra_conn.execute("PRAGMA foreign_key_list(pedidos)").fetchall()
+    assert any(row[2] == "sales" for row in fks)
+
+    # El dato (venta_id=1) se preserva -- solo cambia a que tabla apunta la FK.
+    pedido = restolibra_conn.execute(
+        "SELECT numero, estado, venta_id FROM pedidos WHERE numero='P-0001'"
+    ).fetchone()
+    assert pedido == ("P-0001", "cobrado", 1)
+
+    # Y ahora la FK sirve de verdad contra sales (bug real: antes del fix,
+    # UPDATE pedidos SET venta_id=<id de una sales nueva> tiraba
+    # sqlite3.IntegrityError porque la FK seguia apuntando a la vieja ventas).
+    restolibra_conn.execute("UPDATE pedidos SET venta_id=1 WHERE numero='P-0001'")
+
+
 def test_migrate_is_idempotent_guard_fails_loudly_on_second_run(restolibra_conn):
     _seed_realistic_dataset(restolibra_conn)
     migrate(restolibra_conn)
@@ -271,3 +317,13 @@ def test_verify_catches_orphaned_receta_item(restolibra_conn):
     report = verify(restolibra_conn)
     assert not report.ok
     assert any(d.check == "receta_items_huerfanos" for d in report.discrepancies)
+
+
+def test_verify_catches_orphaned_pedido_venta(restolibra_conn):
+    _seed_realistic_dataset(restolibra_conn)
+    migrate(restolibra_conn)
+    restolibra_conn.execute("PRAGMA foreign_keys = OFF")
+    restolibra_conn.execute("DELETE FROM sales WHERE id = 1")
+    report = verify(restolibra_conn)
+    assert not report.ok
+    assert any(d.check == "pedidos_venta_huerfanos" for d in report.discrepancies)

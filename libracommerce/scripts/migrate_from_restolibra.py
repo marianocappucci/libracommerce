@@ -21,6 +21,15 @@ catalog_items se preservan 1:1 desde productos.id, las filas de
 recetas/receta_items no necesitan reescribirse: solo se repunta el
 FOREIGN KEY de `productos(id)` a `catalog_items(id)` (rebuild de 12 pasos
 de SQLite, mismo patron que `_repoint_lista_precio_items_fk`).
+
+`pedidos.venta_id` tambien tiene una FK dura a `ventas(id)` -- a
+diferencia de Contalibra, que no tiene tabla `pedidos`, este caso no lo
+cubria ningun repoint de la migracion base. Bug real encontrado
+end-to-end (Fase 3, 2026-07-27): `cobrar_pedido` fallaba con
+`sqlite3.IntegrityError: FOREIGN KEY constraint failed` al hacer
+`UPDATE pedidos SET venta_id=?` con un id de `sales`, porque la FK
+todavia apuntaba a la vieja `ventas`. Se repunta igual que
+recetas/receta_items.
 """
 import sqlite3
 from dataclasses import dataclass
@@ -35,6 +44,7 @@ from libracommerce.scripts.migrate_from_contalibra import (
 class RestolibraMigrationReport(MigrationReport):
     recetas_repointed: bool = False
     receta_items_repointed: bool = False
+    pedidos_repointed: bool = False
 
 
 def _repoint_recetas_fk(conn: sqlite3.Connection) -> bool:
@@ -101,18 +111,66 @@ def _repoint_receta_items_fk(conn: sqlite3.Connection) -> bool:
     return True
 
 
+def _repoint_pedidos_venta_fk(conn: sqlite3.Connection) -> bool:
+    fks = conn.execute("PRAGMA foreign_key_list(pedidos)").fetchall()
+    if not any(row[2] == "ventas" for row in fks):
+        return False  # ya reapuntada, o base sin pedidos
+
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("ALTER TABLE pedidos RENAME TO pedidos_old")
+        conn.execute(
+            """
+            CREATE TABLE pedidos (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                numero         TEXT NOT NULL,
+                canal          TEXT NOT NULL DEFAULT 'salon',
+                mesa_id        INTEGER REFERENCES mesas(id) ON DELETE SET NULL,
+                estado         TEXT NOT NULL DEFAULT 'abierto',
+                comensales     INTEGER NOT NULL DEFAULT 1,
+                usuario_id     INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+                cliente_id     INTEGER REFERENCES clients(id) ON DELETE SET NULL,
+                cliente_nombre TEXT DEFAULT '',
+                direccion      TEXT DEFAULT '',
+                telefono       TEXT DEFAULT '',
+                repartidor     TEXT DEFAULT '',
+                costo_envio    REAL NOT NULL DEFAULT 0,
+                observaciones  TEXT DEFAULT '',
+                venta_id       INTEGER REFERENCES sales(id) ON DELETE SET NULL,
+                created_at     TEXT DEFAULT (datetime('now')),
+                updated_at     TEXT DEFAULT (datetime('now')),
+                hora_retiro    TEXT DEFAULT ''
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO pedidos (id, numero, canal, mesa_id, estado, comensales, usuario_id, "
+            "cliente_id, cliente_nombre, direccion, telefono, repartidor, costo_envio, "
+            "observaciones, venta_id, created_at, updated_at, hora_retiro) "
+            "SELECT id, numero, canal, mesa_id, estado, comensales, usuario_id, "
+            "cliente_id, cliente_nombre, direccion, telefono, repartidor, costo_envio, "
+            "observaciones, venta_id, created_at, updated_at, hora_retiro FROM pedidos_old"
+        )
+        conn.execute("DROP TABLE pedidos_old")
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+    return True
+
+
 def migrate(conn: sqlite3.Connection) -> RestolibraMigrationReport:
     """Corre la migracion base (identica a Contalibra) y despues repunta
-    recetas/receta_items. Misma politica que la base: falla ruidosamente si
-    se corre dos veces sobre el mismo destino, pensada para una copia
-    limpia (Fase 1) y luego, con confirmacion explicita, produccion real
-    (Fase 4)."""
+    recetas/receta_items/pedidos. Misma politica que la base: falla
+    ruidosamente si se corre dos veces sobre el mismo destino, pensada
+    para una copia limpia (Fase 1) y luego, con confirmacion explicita,
+    produccion real (Fase 4)."""
     base_report = _migrate_base(conn)
     recetas_repointed = _repoint_recetas_fk(conn)
     receta_items_repointed = _repoint_receta_items_fk(conn)
+    pedidos_repointed = _repoint_pedidos_venta_fk(conn)
     conn.commit()
     return RestolibraMigrationReport(
         **base_report.__dict__,
         recetas_repointed=recetas_repointed,
         receta_items_repointed=receta_items_repointed,
+        pedidos_repointed=pedidos_repointed,
     )

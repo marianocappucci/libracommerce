@@ -9,7 +9,10 @@ la verificacion del dominio exclusivo de Restolibra: recetas/receta_items,
 comparando el costo de cada receta calculado contra `productos.precio_costo`
 (tabla vieja, intacta) versus contra `catalog_items.default_cost` (tabla
 nueva) -- deben coincidir exactamente, ya que la migracion nunca reescribe
-esos valores, solo los copia.
+esos valores, solo los copia -- y `pedidos.venta_id`, que tenia una FK
+dura a la vieja `ventas` sin cubrir por ningun repoint de la migracion
+base (bug real encontrado end-to-end en Fase 3, ver
+migrate_from_restolibra.py).
 
 No modifica nada -- solo lectura. Pensado para correrse siempre contra una
 COPIA de la base real (nunca la base viva), tanto en Fase 1 como, repetido,
@@ -24,7 +27,36 @@ from libracommerce.scripts.verify_contalibra_migration import VerificationReport
 def verify(conn: sqlite3.Connection) -> VerificationReport:
     report = _verify_base(conn)
     _verify_recetas(conn, report)
+    _verify_pedidos(conn, report)
     return report
+
+
+def _verify_pedidos(conn: sqlite3.Connection, report: VerificationReport) -> None:
+    """`pedidos.venta_id` referenciaba `ventas(id)` -- si el repoint a
+    `sales(id)` no corrio, cualquier `UPDATE pedidos SET venta_id=...`
+    contra una venta nueva rompe con IntegrityError (bug real encontrado
+    end-to-end en Fase 3, 2026-07-27)."""
+    has_pedidos = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='pedidos'"
+    ).fetchone()[0]
+    if not has_pedidos:
+        return
+
+    fks = conn.execute("PRAGMA foreign_key_list(pedidos)").fetchall()
+    if not any(row[2] == "sales" for row in fks):
+        report.add("pedidos_venta_fk", "pedidos.venta_id no quedo repuntado a sales")
+
+    huerfanos = conn.execute(
+        """SELECT p.id FROM pedidos p
+           LEFT JOIN sales s ON s.id = p.venta_id
+           WHERE p.venta_id IS NOT NULL AND s.id IS NULL"""
+    ).fetchall()
+    if huerfanos:
+        report.add(
+            "pedidos_venta_huerfanos",
+            f"{len(huerfanos)} pedido(s) con venta_id sin sales correspondiente: "
+            f"ids={[r[0] for r in huerfanos]}",
+        )
 
 
 def _costo_receta(conn: sqlite3.Connection, producto_id: int, precio_costo_col: str,
