@@ -102,6 +102,22 @@ def contalibra_conn() -> sqlite3.Connection:
             mp_order_id TEXT DEFAULT '',
             mp_payment_id TEXT DEFAULT ''
         );
+
+        CREATE TABLE listas_precio (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT NOT NULL,
+            descripcion TEXT DEFAULT '',
+            es_default INTEGER NOT NULL DEFAULT 0,
+            activa INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE lista_precio_items (
+            lista_id INTEGER NOT NULL,
+            producto_id INTEGER NOT NULL,
+            precio REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY (lista_id, producto_id)
+        );
         """
     )
     return conn
@@ -148,6 +164,14 @@ def _seed_realistic_dataset(conn: sqlite3.Connection) -> None:
         """INSERT INTO ventas (numero, fecha, cliente_id, items, subtotal, descuento, total, estado)
            VALUES ('V-0002', '2026-07-04', NULL, ?, 500, 0, 500, 'cobrada')""",
         (items_venta_2,),
+    )
+    conn.execute(
+        "INSERT INTO listas_precio (id, nombre, descripcion, es_default) VALUES (1, 'Mayorista', '', 1)"
+    )
+    conn.execute("INSERT INTO listas_precio (id, nombre) VALUES (2, 'Minorista')")
+    conn.executemany(
+        "INSERT INTO lista_precio_items (lista_id, producto_id, precio) VALUES (?, ?, ?)",
+        [(1, 1, 1200), (2, 1, 1500)],
     )
 
 
@@ -245,6 +269,44 @@ def test_migrate_no_reusa_ids_que_las_tablas_viejas_ya_consumieron(contalibra_co
         "INSERT INTO sales (number, status, total) VALUES ('V-9999', 'draft', 0)"
     )
     assert cur.lastrowid > 13
+
+
+def test_migrate_preserves_price_lists_and_item_prices(contalibra_conn):
+    _seed_realistic_dataset(contalibra_conn)
+    report = migrate(contalibra_conn)
+
+    assert report.price_lists == 2
+    assert report.item_prices == 2
+    assert report.price_list_default_conflicts == []
+
+    rows = contalibra_conn.execute(
+        "SELECT id, name, is_default, active FROM price_lists ORDER BY id"
+    ).fetchall()
+    assert rows == [(1, "Mayorista", 1, 1), (2, "Minorista", 0, 1)]
+
+    precios = contalibra_conn.execute(
+        "SELECT price_list_id, item_id, amount, valid_from, valid_until, branch_id, min_quantity "
+        "FROM item_prices ORDER BY price_list_id"
+    ).fetchall()
+    assert precios == [
+        (1, 1, 1200, "2000-01-01T00:00:00", None, None, None),
+        (2, 1, 1500, "2000-01-01T00:00:00", None, None, None),
+    ]
+
+
+def test_migrate_resolves_multiple_default_price_lists_without_crashing(contalibra_conn):
+    _seed_realistic_dataset(contalibra_conn)
+    # Contalibra nunca enforceo "una sola lista default" a nivel de API --
+    # se simula el caso limite de dos filas con es_default=1 en la base real.
+    contalibra_conn.execute("UPDATE listas_precio SET es_default = 1 WHERE id = 2")
+
+    report = migrate(contalibra_conn)
+
+    assert len(report.price_list_default_conflicts) == 1
+    rows = contalibra_conn.execute(
+        "SELECT id, is_default FROM price_lists ORDER BY id"
+    ).fetchall()
+    assert rows == [(1, 1), (2, 0)]
 
 
 def test_verify_reports_no_discrepancies_on_clean_migration(contalibra_conn):

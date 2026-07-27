@@ -42,6 +42,7 @@ def verify(conn: sqlite3.Connection) -> VerificationReport:
     _verify_counts(conn, report)
     _verify_stock_per_item_location(conn, report)
     _verify_sale_totals(conn, report)
+    _verify_price_lists(conn, report)
 
     return report
 
@@ -145,4 +146,42 @@ def _verify_sale_totals(conn: sqlite3.Connection, report: VerificationReport) ->
             report.add(
                 "sale_items_sum_vs_subtotal",
                 f"venta {sale_id}: suma de sale_items={lines_sum} sales.subtotal={subtotal}",
+            )
+
+
+def _verify_price_lists(conn: sqlite3.Connection, report: VerificationReport) -> None:
+    listas = _count(conn, "SELECT COUNT(*) FROM listas_precio")
+    price_lists = _count(conn, "SELECT COUNT(*) FROM price_lists")
+    if listas != price_lists:
+        report.add("count_listas_precio", f"listas_precio={listas} price_lists={price_lists}")
+
+    items_viejos = _count(conn, "SELECT COUNT(*) FROM lista_precio_items")
+    item_prices = _count(conn, "SELECT COUNT(*) FROM item_prices")
+    if items_viejos != item_prices:
+        report.add(
+            "count_lista_precio_items",
+            f"lista_precio_items={items_viejos} item_prices={item_prices}",
+        )
+
+    old_precios = {
+        (lista_id, producto_id): Decimal(str(precio))
+        for lista_id, producto_id, precio in conn.execute(
+            "SELECT lista_id, producto_id, precio FROM lista_precio_items"
+        ).fetchall()
+    }
+    new_precios = {
+        (price_list_id, item_id): Decimal(str(amount))
+        for price_list_id, item_id, amount in conn.execute(
+            "SELECT price_list_id, item_id, amount FROM item_prices "
+            "WHERE branch_id IS NULL AND min_quantity IS NULL"
+        ).fetchall()
+    }
+    for key, old_amount in old_precios.items():
+        new_amount = new_precios.get(key)
+        if new_amount != old_amount:
+            lista_id, producto_id = key
+            report.add(
+                "precio_lista",
+                f"lista_id={lista_id} producto_id={producto_id}: "
+                f"lista_precio_items={old_amount} item_prices={new_amount}",
             )

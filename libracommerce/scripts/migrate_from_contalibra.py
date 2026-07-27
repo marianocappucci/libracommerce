@@ -47,6 +47,13 @@ from libracommerce.domain.catalog import CatalogItemType
 # `clients.id`.
 PROVEEDOR_ID_OFFSET = 100_000
 
+# `lista_precio_items` de Contalibra es un modelo "flat" (un precio por
+# producto por lista, sin vigencia). `item_prices.valid_from` es NOT NULL,
+# asi que cada fila migrada necesita un valor -- este sentinel documenta
+# "sin restriccion de fecha de inicio", consistente con que el modelo de
+# origen nunca tuvo nocion de vigencia.
+PRICE_SIN_VIGENCIA = "2000-01-01T00:00:00"
+
 
 @dataclass
 class MigrationReport:
@@ -63,7 +70,10 @@ class MigrationReport:
     sales: int = 0
     sale_items: int = 0
     venta_links: int = 0
+    price_lists: int = 0
+    item_prices: int = 0
     skipped_sale_items: list[str] = field(default_factory=list)
+    price_list_default_conflicts: list[str] = field(default_factory=list)
 
 
 def _migrate_units(conn: sqlite3.Connection, target: sqlite3.Connection, items) -> None:
@@ -164,6 +174,54 @@ def _migrate_item_codes(source: sqlite3.Connection, target: sqlite3.Connection) 
         target.execute(
             "INSERT INTO item_codes (item_id, code_type, code, is_primary) VALUES (?, 'internal', ?, 1)",
             (item_id, codigo),
+        )
+    return len(rows)
+
+
+def _migrate_price_lists(source: sqlite3.Connection, target: sqlite3.Connection,
+                         report: MigrationReport) -> int:
+    """`listas_precio` -> `price_lists`. A diferencia de LibraCommerce,
+    Contalibra nunca enforceo "como mucho una lista default" a nivel de
+    esquema (`es_default` nunca se gestiono desde ninguna API real -- no
+    hay endpoint "set-default" para listas de precio, a diferencia de
+    depositos). Si la base real tuviera mas de una fila con `es_default=1`
+    (nunca visto en los datos ya revisados, pero no hay garantia de
+    esquema), la segunda violaria el indice unico parcial de
+    `price_lists`. Se resuelve quedandose con la primera por id y
+    dejando constancia en el reporte en vez de que la migracion explote.
+    """
+    rows = source.execute(
+        "SELECT id, nombre, descripcion, es_default, activa FROM listas_precio ORDER BY id"
+    ).fetchall()
+    ya_hay_default = False
+    for row_id, nombre, descripcion, es_default, activa in rows:
+        es_default_final = es_default
+        if es_default and ya_hay_default:
+            report.price_list_default_conflicts.append(
+                f"listas_precio.id={row_id} ({nombre!r}) tambien tenia es_default=1; "
+                "se migro con is_default=0 para no violar el indice unico de price_lists"
+            )
+            es_default_final = 0
+        elif es_default:
+            ya_hay_default = True
+        target.execute(
+            "INSERT INTO price_lists (id, name, description, active, is_default) VALUES (?,?,?,?,?)",
+            (row_id, nombre, descripcion, activa, es_default_final),
+        )
+    return len(rows)
+
+
+def _migrate_item_prices(source: sqlite3.Connection, target: sqlite3.Connection) -> int:
+    """`lista_precio_items` -> `item_prices`, con vigencia abierta (ver
+    `PRICE_SIN_VIGENCIA`) y sin quiebre de cantidad ni sucursal -- el
+    modelo de Contalibra nunca tuvo ninguno de los dos."""
+    rows = source.execute(
+        "SELECT lista_id, producto_id, precio FROM lista_precio_items"
+    ).fetchall()
+    for lista_id, producto_id, precio in rows:
+        target.execute(
+            "INSERT INTO item_prices (item_id, price_list_id, amount, valid_from) VALUES (?,?,?,?)",
+            (producto_id, lista_id, precio, PRICE_SIN_VIGENCIA),
         )
     return len(rows)
 
@@ -361,6 +419,7 @@ _SEQUENCE_HEREDADA = {
     "stock_movements": "movimientos_stock",
     "locations": "depositos",
     "categories": "categorias_producto",
+    "price_lists": "listas_precio",
 }
 
 
@@ -434,6 +493,8 @@ def migrate(conn: sqlite3.Connection) -> MigrationReport:
     report.stock_movements = _migrate_stock_movements(conn, conn, stock_movements)
     _migrate_sales_and_items(conn, conn, sales, report)
     report.venta_links = _migrate_venta_links(conn)
+    report.price_lists = _migrate_price_lists(conn, conn, report)
+    report.item_prices = _migrate_item_prices(conn, conn)
     _repoint_ventas_pagos_fk(conn)
     _repoint_lista_precio_items_fk(conn)
     _preservar_sqlite_sequence(conn)
