@@ -6,7 +6,7 @@ import pytest
 from libracommerce.domain.catalog import CatalogItem, CatalogItemType, ItemPrice, ItemVariant, Unit
 from libracommerce.domain.entities import Party, PartyRole, PartyType
 from libracommerce.domain.inventory import Location, StockMovement, StockMovementType
-from libracommerce.domain.sales import Sale, SaleItem, SaleStatus
+from libracommerce.domain.sales import Sale, SaleItem, SaleStatus, SalePayment
 
 
 def test_party_and_catalog_item_are_product_agnostic():
@@ -115,3 +115,69 @@ def test_sale_item_with_variant_requires_item_id():
             quantity=Decimal("1"),
             unit_price=Decimal("100"),
         )
+
+
+# --- cobro de la venta (pago mixto + vuelto) ----------------------------
+
+
+def test_payment_rejects_zero_or_negative_amount():
+    with pytest.raises(ValueError):
+        SalePayment(method="efectivo", amount=Decimal("0"))
+    with pytest.raises(ValueError):
+        SalePayment(method="efectivo", amount=Decimal("-100"))
+
+
+def test_payment_rejects_received_less_than_amount():
+    """Recibir menos que el monto del pago no es un vuelto negativo: es un
+    dato mal cargado."""
+    with pytest.raises(ValueError):
+        SalePayment(method="efectivo", amount=Decimal("1000"), received_amount=Decimal("900"))
+
+
+def test_change_is_what_was_received_minus_the_payment():
+    pago = SalePayment(method="efectivo", amount=Decimal("12450"), received_amount=Decimal("15000"))
+    assert pago.change == Decimal("2550")
+
+
+def test_change_is_zero_for_methods_without_received_amount():
+    assert SalePayment(method="tarjeta_debito", amount=Decimal("5000")).change == Decimal("0")
+
+
+def _venta_con_pagos(*pagos, total="10000"):
+    linea = SaleItem(
+        kind=CatalogItemType.PRODUCT, item_id=1, description_snapshot="X",
+        quantity=Decimal("1"), unit_price=Decimal(total),
+    )
+    return Sale(None, "V-1", (linea,), total=Decimal(total), payments=tuple(pagos))
+
+
+def test_paid_total_ignores_the_change():
+    """Lo que el cliente entrego de mas no es plata de la venta: 15.000
+    entregados sobre 10.000 siguen siendo 10.000 cobrados."""
+    venta = _venta_con_pagos(
+        SalePayment(method="efectivo", amount=Decimal("10000"), received_amount=Decimal("15000")),
+    )
+    assert venta.paid_total() == Decimal("10000")
+    assert venta.change_due() == Decimal("5000")
+    assert venta.is_fully_paid()
+
+
+def test_mixed_payment_adds_up():
+    venta = _venta_con_pagos(
+        SalePayment(method="efectivo", amount=Decimal("4000"), received_amount=Decimal("5000")),
+        SalePayment(method="tarjeta_debito", amount=Decimal("6000")),
+    )
+    assert venta.paid_total() == Decimal("10000")
+    assert venta.change_due() == Decimal("1000")
+    assert venta.is_fully_paid()
+
+
+def test_partial_payment_is_not_fully_paid():
+    venta = _venta_con_pagos(SalePayment(method="efectivo", amount=Decimal("6000")))
+    assert not venta.is_fully_paid()
+
+
+def test_sale_without_payments_is_not_fully_paid_even_if_total_is_zero():
+    """Una venta en cero sin cobro registrado no esta paga: esta sin cobrar."""
+    venta = Sale(None, "V-1", ())
+    assert not venta.is_fully_paid()

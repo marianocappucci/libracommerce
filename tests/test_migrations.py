@@ -184,3 +184,42 @@ def test_init_schema_on_a_fresh_database_records_migration_as_applied():
     init_schema(conn)
     applied = conn.execute("SELECT version, name FROM schema_migrations").fetchall()
     assert applied == [(version, name) for version, name, _ in _MIGRATIONS]
+
+
+def test_migration_0008_creates_sale_payments_on_an_old_database():
+    """Una base creada antes del cobro mixto no tiene `sale_payments`. Es el
+    mismo escenario que tumbo ventalibra-dev en la v0.1.5: la tabla nueva
+    tiene que aparecer en la base vieja, no solo en una fresca."""
+    conn = _old_schema_conn()
+    assert conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='sale_payments'"
+    ).fetchone() is None
+
+    init_schema(conn)
+
+    assert conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='sale_payments'"
+    ).fetchone() is not None
+    assert conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_sale_payments_sale'"
+    ).fetchone() is not None
+
+
+def test_sale_payments_rejects_received_less_than_amount_at_the_database_level():
+    """La regla tambien vive en el CHECK, no solo en el dominio: una escritura
+    directa a la base no puede dejar un cobro incoherente."""
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    conn.execute(
+        "INSERT INTO sales (number, status, subtotal, discount_total, tax_total, total) "
+        "VALUES ('V-1', 'draft', 0, 0, 0, 0)"
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO sale_payments (sale_id, method, amount, received_amount) "
+            "VALUES (1, 'efectivo', 1000, 900)"
+        )
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO sale_payments (sale_id, method, amount) VALUES (1, 'efectivo', 0)"
+        )

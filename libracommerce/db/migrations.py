@@ -202,6 +202,19 @@ def _migration_0007_add_price_lists_created_at(conn: sqlite3.Connection) -> None
         conn.execute("ALTER TABLE price_lists ADD COLUMN created_at TEXT")
 
 
+def _migration_0008_add_sale_payments(conn: sqlite3.Connection) -> None:
+    """`sale_payments` (pago mixto + efectivo recibido) es tabla nueva, no
+    una columna: `CREATE TABLE IF NOT EXISTS` en `init_schema()` ya la crea
+    tanto en base fresca como en base vieja, asi que aca solo hace falta el
+    indice para las bases donde la tabla ya se creo sin el.
+
+    Se registra igual como migracion numerada para dejar rastro en
+    `schema_migrations` de en que version aparecio."""
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sale_payments_sale ON sale_payments(sale_id)"
+    )
+
+
 # Orden fijo: agregar al final, nunca reordenar ni reusar un numero ya
 # asignado (aunque la migracion se haya borrado despues).
 _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
@@ -213,6 +226,7 @@ _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (5, "add_stock_movements_created_at", _migration_0005_add_stock_movements_created_at),
     (6, "add_sales_business_fields", _migration_0006_add_sales_business_fields),
     (7, "add_price_lists_created_at", _migration_0007_add_price_lists_created_at),
+    (8, "add_sale_payments", _migration_0008_add_sale_payments),
 ]
 
 

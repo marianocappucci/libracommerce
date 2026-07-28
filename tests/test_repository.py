@@ -27,7 +27,7 @@ from libracommerce.domain.purchasing import (
     PurchaseReceiptItem,
     PurchaseReceiptStatus,
 )
-from libracommerce.domain.sales import Sale, SaleItem, SaleStatus
+from libracommerce.domain.sales import Sale, SaleItem, SaleStatus, SalePayment
 
 
 @pytest.fixture
@@ -516,3 +516,88 @@ def test_list_purchase_receipts_returns_newest_first(repo: SqliteCommerceReposit
     receipts = repo.list_purchase_receipts()
 
     assert [r.id for r in receipts] == [second.id, first.id]
+
+
+# --- cobro persistido (pago mixto + efectivo recibido) ------------------
+
+
+def _venta_simple(repo, total="10000"):
+    item = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Yerba", _kg()))
+    linea = SaleItem(
+        kind=CatalogItemType.PRODUCT, item_id=item.id, description_snapshot="Yerba",
+        quantity=Decimal("1"), unit_price=Decimal(total),
+    )
+    return Sale(None, "V-9001", (linea,), total=Decimal(total))
+
+
+def test_save_sale_persists_payments_with_received_amount(repo: SqliteCommerceRepository):
+    venta = replace(
+        _venta_simple(repo),
+        payments=(
+            SalePayment(method="efectivo", amount=Decimal("4000"), received_amount=Decimal("5000")),
+            SalePayment(method="tarjeta_debito", amount=Decimal("6000"), reference="lote 42"),
+        ),
+    )
+
+    guardada = repo.save_sale(venta)
+    leida = repo.get_sale(guardada.id)
+
+    assert len(leida.payments) == 2
+    assert leida.payments[0].method == "efectivo"
+    assert leida.payments[0].received_amount == Decimal("5000")
+    assert leida.payments[0].change == Decimal("1000")
+    assert leida.payments[1].received_amount is None
+    assert leida.payments[1].reference == "lote 42"
+    assert leida.paid_total() == Decimal("10000")
+    assert leida.is_fully_paid()
+
+
+def test_sale_without_payments_reads_back_empty(repo: SqliteCommerceRepository):
+    guardada = repo.save_sale(_venta_simple(repo))
+    assert repo.get_sale(guardada.id).payments == ()
+
+
+def test_saving_again_replaces_payments_instead_of_duplicating(repo: SqliteCommerceRepository):
+    """save_sale reemplaza los pagos enteros, igual que las lineas: guardar
+    dos veces no deja el cobro duplicado."""
+    venta = replace(
+        _venta_simple(repo),
+        payments=(SalePayment(method="efectivo", amount=Decimal("10000")),),
+    )
+    guardada = repo.save_sale(venta)
+
+    reguardada = repo.save_sale(guardada)
+    leida = repo.get_sale(reguardada.id)
+
+    assert len(leida.payments) == 1
+    assert leida.paid_total() == Decimal("10000")
+
+
+def test_removing_a_payment_deletes_it_from_the_database(repo: SqliteCommerceRepository):
+    venta = replace(
+        _venta_simple(repo),
+        payments=(
+            SalePayment(method="efectivo", amount=Decimal("4000")),
+            SalePayment(method="tarjeta_debito", amount=Decimal("6000")),
+        ),
+    )
+    guardada = repo.save_sale(venta)
+
+    sin_tarjeta = repo.save_sale(replace(guardada, payments=guardada.payments[:1]))
+    leida = repo.get_sale(sin_tarjeta.id)
+
+    assert len(leida.payments) == 1
+    assert leida.payments[0].method == "efectivo"
+
+
+def test_payments_keep_their_order(repo: SqliteCommerceRepository):
+    venta = replace(
+        _venta_simple(repo, total="9000"),
+        payments=(
+            SalePayment(method="efectivo", amount=Decimal("1000")),
+            SalePayment(method="tarjeta_credito", amount=Decimal("3000")),
+            SalePayment(method="transferencia", amount=Decimal("5000")),
+        ),
+    )
+    leida = repo.get_sale(repo.save_sale(venta).id)
+    assert [p.method for p in leida.payments] == ["efectivo", "tarjeta_credito", "transferencia"]

@@ -25,7 +25,7 @@ from libracommerce.domain.purchasing import (
     PurchaseReceiptItem,
     PurchaseReceiptStatus,
 )
-from libracommerce.domain.sales import Sale, SaleItem, SaleStatus
+from libracommerce.domain.sales import Sale, SaleItem, SalePayment, SaleStatus
 
 
 def _to_bool(value: int) -> bool:
@@ -751,6 +751,23 @@ class SqliteCommerceRepository:
                     str(line.unit_cost_snapshot) if line.unit_cost_snapshot is not None else None,
                 ),
             )
+        # Mismo criterio que sale_items: se reemplazan enteros en cada
+        # guardado, asi que sacar un pago del objeto lo borra de la base.
+        cur.execute("DELETE FROM sale_payments WHERE sale_id = ?", (sale_id,))
+        for payment in sale.payments:
+            cur.execute(
+                """
+                INSERT INTO sale_payments (sale_id, method, amount, received_amount, reference)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    sale_id,
+                    payment.method,
+                    str(payment.amount),
+                    str(payment.received_amount) if payment.received_amount is not None else None,
+                    payment.reference,
+                ),
+            )
         if commit:
             self._conn.commit()
         return replace(sale, id=sale_id)
@@ -791,10 +808,30 @@ class SqliteCommerceRepository:
             )
             for item_row in item_rows
         )
+        payment_rows = self._conn.execute(
+            """
+            SELECT method, amount, received_amount, reference
+            FROM sale_payments WHERE sale_id = ?
+            ORDER BY id
+            """,
+            (sale_id,),
+        ).fetchall()
+        payments = tuple(
+            SalePayment(
+                method=payment_row[0],
+                amount=_to_decimal(payment_row[1]),
+                received_amount=(
+                    _to_decimal(payment_row[2]) if payment_row[2] is not None else None
+                ),
+                reference=payment_row[3],
+            )
+            for payment_row in payment_rows
+        )
         return Sale(
             id=row[0],
             number=row[1],
             items=items,
+            payments=payments,
             status=SaleStatus(row[2]),
             customer_party_id=row[3],
             branch_id=row[4],

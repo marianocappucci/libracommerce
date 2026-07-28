@@ -183,6 +183,21 @@ def init_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_sale_items_sale
             ON sale_items(sale_id);
 
+        CREATE TABLE IF NOT EXISTS sale_payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sale_id INTEGER NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
+            method TEXT NOT NULL,
+            amount NUMERIC NOT NULL,
+            received_amount NUMERIC,
+            reference TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            CHECK (amount > 0),
+            CHECK (received_amount IS NULL OR received_amount >= amount)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sale_payments_sale
+            ON sale_payments(sale_id);
+
         CREATE TABLE IF NOT EXISTS purchase_orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             number TEXT NOT NULL UNIQUE,
