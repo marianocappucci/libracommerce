@@ -21,10 +21,54 @@ jobs:
 
       # libraedge (dependencia privada del extra offline-server, agregada
       # cuando la sync se migro ahi) es inalcanzable con el GITHUB_TOKEN
-      # por defecto. LIBRA_PAT es un PAT fine-grained con acceso de
-      # lectura a libraedge -- mismo patron que ventalibra/gestiolibra/medlibra.
-      - name: Configure git for private Libra dependencies
-        run: git config --global url."https://${{ secrets.LIBRA_PAT }}@github.com/".insteadOf "https://github.com/"
+      # por defecto. Se accede con una deploy key SSH de solo lectura
+      # registrada en libraedge, cuya clave privada vive en el secret
+      # LIBRAEDGE_DEPLOY_KEY de este repo.
+      #
+      # Por que deploy key y no un PAT: un PAT vence sin aviso y, al estar
+      # compartido, tumba el CI de todos los repos a la vez (y en el VPS
+      # tumbo un deploy real: incidente Restolibra del 2026-07-25). Las
+      # deploy keys no vencen. Mismo mecanismo que ya usa el VPS.
+      #
+      # El alias `github-<repo>` con IdentitiesOnly se mantiene aunque aca
+      # haya una sola dependencia: cuando un repo necesita mas de una, SSH
+      # ofrece las claves en orden y GitHub autentica con la primera que
+      # acepta, que puede no ser la del repo que se clona. Mismo patron en
+      # los cinco repos para que no diverjan.
+      - name: Configure SSH access to private Libra dependencies
+        env:
+          LIBRAEDGE_DEPLOY_KEY: ${{ secrets.LIBRAEDGE_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          configurar() {
+            repo=$1; clave=$2
+            if [ -z "$clave" ]; then
+              echo "::error::Falta el secret con la deploy key de $repo en este repositorio."
+              exit 1
+            fi
+            printf '%s\n' "$clave" > ~/.ssh/id_"$repo"
+            chmod 600 ~/.ssh/id_"$repo"
+            printf 'Host github-%s\n  HostName github.com\n  User git\n  IdentityFile ~/.ssh/id_%s\n  IdentitiesOnly yes\n' \
+              "$repo" "$repo" >> ~/.ssh/config
+            git config --global \
+              url."git@github-$repo:marianocappucci/$repo".insteadOf \
+              "https://github.com/marianocappucci/$repo"
+          }
+          configurar libraedge "$LIBRAEDGE_DEPLOY_KEY"
+
+      # Confirma que la clave autentica contra SU repo y no contra otro, para
+      # que ese error no se manifieste recien dentro del pip install.
+      - name: Verify each deploy key resolves to its own repo
+        run: |
+          for repo in libraedge; do
+            saludo=$(ssh -o StrictHostKeyChecking=yes -T "git@github-$repo" 2>&1 || true)
+            echo "$repo -> $saludo"
+            case "$saludo" in
+              *"marianocappucci/$repo"*) ;;
+              *) echo "::error::La deploy key de $repo no resuelve a marianocappucci/$repo."; exit 1 ;;
+            esac
+          done
 
       - name: Install package + dev deps
         run: pip install -e ".[dev,offline-server]"
