@@ -247,6 +247,19 @@ def init_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_purchase_receipt_items_receipt
             ON purchase_receipt_items(receipt_id);
+
+        -- Preferencias del comercio que no son datos de negocio: como esta
+        -- configurada la balanza, que impresora usa el mostrador, etc. Van
+        -- en la base y no en variables de entorno porque las cambia el
+        -- dueño del local desde la pantalla de configuracion, sin redeploy.
+        -- Clave/valor a proposito: cada producto guarda lo suyo sin que el
+        -- motor tenga que conocer de antemano todas las preferencias
+        -- posibles.
+        CREATE TABLE IF NOT EXISTS commerce_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         """
     )
     run_migrations(conn)

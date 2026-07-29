@@ -302,9 +302,24 @@ class SqliteCommerceRepository:
             for row in rows
         ]
 
-    def find_item_by_code(self, code: str) -> CatalogItem | None:
+    def find_item_by_code(
+        self, code: str, *, code_type: ItemCodeType | None = None
+    ) -> CatalogItem | None:
+        """Busca por codigo, opcionalmente restringiendo el tipo.
+
+        Restringir importa para los codigos de balanza: son numeros cortos
+        que elige el comercio (7, 12, 103) y pueden coincidir con el codigo
+        interno de un producto totalmente distinto. El `UNIQUE` de
+        `item_codes` es por (tipo, codigo), asi que esa colision entre tipos
+        es legitima y hay que desambiguarla al buscar.
+        """
+        clausula = "WHERE ic.code = ?"
+        params: tuple = (code,)
+        if code_type is not None:
+            clausula += " AND ic.code_type = ?"
+            params = (code, code_type.value)
         row = self._conn.execute(
-            """
+            f"""
             SELECT ci.id, ci.item_type, ci.name, ci.description, ci.category_id, ci.active,
                    ci.sellable, ci.purchasable, ci.tax_profile, ci.metadata_json,
                    ci.default_sale_price, ci.default_cost, ci.min_stock,
@@ -312,11 +327,30 @@ class SqliteCommerceRepository:
             FROM item_codes ic
             JOIN catalog_items ci ON ci.id = ic.item_id
             JOIN units u ON u.code = ci.unit_code
-            WHERE ic.code = ?
+            {clausula}
             """,
-            (code,),
+            params,
         ).fetchone()
         return self._catalog_item_from_row(row)
+
+    # preferencias del comercio (clave/valor)
+
+    def get_setting(self, key: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT value FROM commerce_settings WHERE key = ?", (key,)
+        ).fetchone()
+        return None if row is None else row[0]
+
+    def set_setting(self, key: str, value: str) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO commerce_settings (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE
+                SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+            """,
+            (key, value),
+        )
+        self._conn.commit()
 
     # item variants
 

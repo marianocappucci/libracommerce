@@ -112,6 +112,38 @@ def test_find_item_by_code_returns_none_for_unknown_code(repo: SqliteCommerceRep
     assert repo.find_item_by_code("nope") is None
 
 
+def test_find_item_by_code_puede_restringir_el_tipo(repo: SqliteCommerceRepository):
+    # Caso real de balanza: el codigo de balanza del queso es "7" y "7" es
+    # tambien el codigo interno de otro producto. Sin restringir el tipo, la
+    # busqueda devuelve cualquiera de los dos segun el orden de la tabla.
+    queso = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Queso", _kg()))
+    fosforos = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Fosforos", _kg()))
+    repo.save_item_code(ItemCode(None, queso.id, ItemCodeType.SCALE, "7"))
+    repo.save_item_code(ItemCode(None, fosforos.id, ItemCodeType.INTERNAL, "7"))
+
+    assert repo.find_item_by_code("7", code_type=ItemCodeType.SCALE).id == queso.id
+    assert repo.find_item_by_code("7", code_type=ItemCodeType.INTERNAL).id == fosforos.id
+
+
+def test_find_item_by_code_con_tipo_no_cae_en_otro_tipo(repo: SqliteCommerceRepository):
+    item = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Yerba", _kg()))
+    repo.save_item_code(ItemCode(None, item.id, ItemCodeType.BARCODE, "7791234567890"))
+
+    assert repo.find_item_by_code("7791234567890", code_type=ItemCodeType.SCALE) is None
+
+
+def test_settings_guarda_y_pisa_por_clave(repo: SqliteCommerceRepository):
+    assert repo.get_setting("scale.format") is None
+
+    repo.set_setting("scale.format", '{"prefix": "20"}')
+    assert repo.get_setting("scale.format") == '{"prefix": "20"}'
+
+    repo.set_setting("scale.format", '{"prefix": "21"}')
+    assert repo.get_setting("scale.format") == '{"prefix": "21"}'
+    filas = repo._conn.execute("SELECT COUNT(*) FROM commerce_settings").fetchone()[0]
+    assert filas == 1
+
+
 def test_save_item_code_rejects_duplicate_code_within_same_type(repo: SqliteCommerceRepository):
     item = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Yerba", _kg()))
     other = repo.save_catalog_item(CatalogItem(None, CatalogItemType.PRODUCT, "Azucar", _kg()))

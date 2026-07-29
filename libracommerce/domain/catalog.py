@@ -13,6 +13,10 @@ class ItemCodeType(StrEnum):
     INTERNAL = "internal"
     BARCODE = "barcode"
     SKU = "sku"
+    #: Codigo con el que el producto esta cargado en la balanza de mostrador.
+    #: No es el EAN que imprime la etiqueta -- ese cambia en cada pesada,
+    #: porque lleva el peso adentro (ver `domain/scale.py`).
+    SCALE = "scale"
     OTHER = "other"
 
 

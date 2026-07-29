@@ -215,6 +215,17 @@ def _migration_0008_add_sale_payments(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_0009_add_commerce_settings(conn: sqlite3.Connection) -> None:
+    """`commerce_settings` (preferencias del comercio: formato de la balanza,
+    de aca en mas lo que haga falta) es tabla nueva, no una columna, asi que
+    el `CREATE TABLE IF NOT EXISTS` de `init_schema()` ya la crea tanto en
+    base fresca como en base vieja.
+
+    Va numerada igual, sin cuerpo, para dejar rastro en `schema_migrations`
+    de en que version aparecio -- mismo criterio que la 0008.
+    """
+
+
 # Orden fijo: agregar al final, nunca reordenar ni reusar un numero ya
 # asignado (aunque la migracion se haya borrado despues).
 _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
@@ -227,6 +238,7 @@ _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (6, "add_sales_business_fields", _migration_0006_add_sales_business_fields),
     (7, "add_price_lists_created_at", _migration_0007_add_price_lists_created_at),
     (8, "add_sale_payments", _migration_0008_add_sale_payments),
+    (9, "add_commerce_settings", _migration_0009_add_commerce_settings),
 ]
 
 
