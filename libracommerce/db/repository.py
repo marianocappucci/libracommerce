@@ -682,6 +682,50 @@ class SqliteCommerceRepository:
             for row in rows
         ]
 
+    def list_stock_movements_by_source(
+        self, source_type: str, source_id: int
+    ) -> Sequence[StockMovement]:
+        """Los movimientos que generó un documento (una venta, una recepción).
+
+        Es lo que permite revertir en espejo: al anular se leen los
+        movimientos que la venta descontó de verdad y se invierten, en vez de
+        recalcularlos desde las líneas. La diferencia importa cuando lo que
+        se descontó no fue el producto vendido sino otra cosa — los insumos
+        de una receta en gastronomía — porque el ledger ya guarda qué salió y
+        la reversión sale simétrica sin volver a resolver nada.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT id, item_id, variant_id, location_id, movement_type, quantity_delta, occurred_at,
+                   source_type, source_id, unit_cost, lot_code, expires_at,
+                   note, created_by, reason_code
+            FROM stock_movements
+            WHERE source_type = ? AND source_id = ?
+            ORDER BY occurred_at, id
+            """,
+            (source_type, source_id),
+        ).fetchall()
+        return [
+            StockMovement(
+                id=row[0],
+                item_id=row[1],
+                variant_id=row[2],
+                location_id=row[3],
+                movement_type=StockMovementType(row[4]),
+                quantity_delta=_to_decimal(row[5]),
+                occurred_at=datetime.fromisoformat(row[6]),
+                source_type=row[7],
+                source_id=row[8],
+                unit_cost=_to_decimal(row[9]) if row[9] is not None else None,
+                lot_code=row[10],
+                expires_at=datetime.fromisoformat(row[11]) if row[11] else None,
+                note=row[12],
+                created_by=row[13],
+                reason_code=row[14],
+            )
+            for row in rows
+        ]
+
     def current_stock(self, item_id: int, location_id: int, *, variant_id: int | None = None) -> Decimal:
         variant_filter = "variant_id IS NULL" if variant_id is None else "variant_id = ?"
         params = (item_id, location_id) if variant_id is None else (item_id, location_id, variant_id)
