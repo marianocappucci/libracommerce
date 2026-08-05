@@ -260,6 +260,29 @@ def init_schema(conn: sqlite3.Connection) -> None:
             value TEXT NOT NULL,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+
+        -- Quien creo, edito o borro que, y que cambio. La escribe
+        -- `RepositorioAuditado` envolviendo al repositorio -- ver
+        -- `db/auditoria.py`, que explica por que el enganche esta ahi y no en
+        -- un flush como en los productos que corren SQLAlchemy.
+        --
+        -- Mismas columnas que la tabla de `libraauth.auditoria`, a proposito:
+        -- asi la pantalla compartida (`libra-ui/Logs`) y `build_logs_router`
+        -- sirven para los dos mundos sin cambios.
+        CREATE TABLE IF NOT EXISTS actividad_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,
+            usuario TEXT NOT NULL DEFAULT 'Sistema',
+            accion TEXT NOT NULL,
+            entidad TEXT NOT NULL,
+            entidad_id INTEGER,
+            descripcion TEXT NOT NULL DEFAULT '',
+            cambios TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS ix_actividad_log_ts ON actividad_log(ts);
+        CREATE INDEX IF NOT EXISTS ix_actividad_log_accion ON actividad_log(accion);
+        CREATE INDEX IF NOT EXISTS ix_actividad_log_entidad ON actividad_log(entidad);
         """
     )
     run_migrations(conn)
