@@ -226,6 +226,18 @@ def _migration_0009_add_commerce_settings(conn: sqlite3.Connection) -> None:
     """
 
 
+def _migration_0010_add_actividad_log(conn: sqlite3.Connection) -> None:
+    """`actividad_log` (quien creo, edito o borro que, y que cambio) es tabla
+    nueva, no una columna, asi que el `CREATE TABLE IF NOT EXISTS` de
+    `init_schema()` ya la crea tanto en base fresca como en base vieja. Va
+    numerada, sin cuerpo, por el mismo criterio que la 0008 y la 0009.
+
+    **No tiene backfill y no puede tenerlo**: lo que se hizo antes de esta
+    version no quedo registrado en ningun lado. El log arranca vacio y desde el
+    dia que se despliega.
+    """
+
+
 # Orden fijo: agregar al final, nunca reordenar ni reusar un numero ya
 # asignado (aunque la migracion se haya borrado despues).
 _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
@@ -239,6 +251,7 @@ _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (7, "add_price_lists_created_at", _migration_0007_add_price_lists_created_at),
     (8, "add_sale_payments", _migration_0008_add_sale_payments),
     (9, "add_commerce_settings", _migration_0009_add_commerce_settings),
+    (10, "add_actividad_log", _migration_0010_add_actividad_log),
 ]
 
 
