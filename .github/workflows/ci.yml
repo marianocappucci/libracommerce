@@ -21,6 +21,29 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # El schema de este motor tiene que nacer contra PostgreSQL real y no solo
+    # contra SQLite: hasta el 2026-08-09 creaba CERO tablas alla -- moria en su
+    # primera linea, un `PRAGMA foreign_keys = ON` -- y ninguna suite lo veia.
+    # La imagen es la de Debian (`postgres:16`) y no la alpine: el collation
+    # viene de la imagen y tiene que ser el de produccion.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: libracommerce
+          POSTGRES_USER: libracommerce
+          POSTGRES_PASSWORD: libracommerce-ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U libracommerce -d libracommerce"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    env:
+      # La lee la capa de conexion de LibraCore, que es la que este motor
+      # recibe de los productos.
+      LIBRACORE_POSTGRES_URL: postgresql://libracommerce:libracommerce-ci@localhost:5432/libracommerce
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,6 +72,7 @@ jobs:
       - name: Configure SSH access to private Libra dependencies
         env:
           LIBRAEDGE_DEPLOY_KEY: ${{ secrets.LIBRAEDGE_DEPLOY_KEY }}
+          LIBRACORE_DEPLOY_KEY: ${{ secrets.LIBRACORE_DEPLOY_KEY }}
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
@@ -67,12 +91,17 @@ jobs:
               "https://github.com/marianocappucci/$repo"
           }
           configurar libraedge "$LIBRAEDGE_DEPLOY_KEY"
+          # libracore es dependencia SOLO DE TEST (extra `dev`): este motor no
+          # lo importa en runtime. Lo necesita el gate, porque el schema contra
+          # PostgreSQL se levanta con la capa de conexion de LibraCore, que es
+          # la que los productos le pasan.
+          configurar libracore "$LIBRACORE_DEPLOY_KEY"
 
       # Confirma que la clave autentica contra SU repo y no contra otro, para
       # que ese error no se manifieste recien dentro del pip install.
       - name: Verify each deploy key resolves to its own repo
         run: |
-          for repo in libraedge; do
+          for repo in libraedge libracore; do
             saludo=$(ssh -o StrictHostKeyChecking=yes -T "git@github-$repo" 2>&1 || true)
             echo "$repo -> $saludo"
             case "$saludo" in

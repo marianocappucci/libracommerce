@@ -1,0 +1,266 @@
+# motor: postgresql
+
+## tablas (167)
+actividad_log|accion|text|NN|
+actividad_log|cambios|text||
+actividad_log|descripcion|text|NN|''::text
+actividad_log|entidad_id|integer||
+actividad_log|entidad|text|NN|
+actividad_log|id|bigint|NN|nextval('actividad_log_id_seq'::regclass)
+actividad_log|ts|text|NN|
+actividad_log|usuario|text|NN|'Sistema'::text
+catalog_items|active|integer|NN|1
+catalog_items|category_id|integer||
+catalog_items|created_at|text|NN|CURRENT_TIMESTAMP
+catalog_items|default_cost|numeric|NN|0
+catalog_items|default_sale_price|numeric|NN|0
+catalog_items|description|text|NN|''::text
+catalog_items|id|bigint|NN|nextval('catalog_items_id_seq'::regclass)
+catalog_items|item_type|text|NN|
+catalog_items|metadata_json|text|NN|'{}'::text
+catalog_items|min_stock|numeric|NN|0
+catalog_items|name|text|NN|
+catalog_items|purchasable|integer|NN|1
+catalog_items|sellable|integer|NN|1
+catalog_items|tax_profile|text||
+catalog_items|unit_code|text|NN|
+categories|active|integer|NN|1
+categories|id|bigint|NN|nextval('categories_id_seq'::regclass)
+categories|name|text|NN|
+categories|parent_id|integer||
+commerce_settings|key|text|NN|
+commerce_settings|updated_at|text|NN|CURRENT_TIMESTAMP
+commerce_settings|value|text|NN|
+item_codes|code_type|text|NN|
+item_codes|code|text|NN|
+item_codes|id|bigint|NN|nextval('item_codes_id_seq'::regclass)
+item_codes|is_primary|integer|NN|0
+item_codes|item_id|integer|NN|
+item_prices|amount|numeric|NN|
+item_prices|branch_id|integer||
+item_prices|currency|text|NN|'ARS'::text
+item_prices|id|bigint|NN|nextval('item_prices_id_seq'::regclass)
+item_prices|item_id|integer|NN|
+item_prices|min_quantity|numeric||
+item_prices|price_list_id|integer|NN|
+item_prices|valid_from|text|NN|
+item_prices|valid_until|text||
+item_variants|active|integer|NN|1
+item_variants|attributes_json|text|NN|'{}'::text
+item_variants|id|bigint|NN|nextval('item_variants_id_seq'::regclass)
+item_variants|item_id|integer|NN|
+item_variants|name|text|NN|
+item_variants|sku|text|NN|
+locations|active|integer|NN|1
+locations|branch_id|integer||
+locations|created_at|text|NN|CURRENT_TIMESTAMP
+locations|description|text|NN|''::text
+locations|id|bigint|NN|nextval('locations_id_seq'::regclass)
+locations|is_default|integer|NN|0
+locations|location_type|text|NN|'warehouse'::text
+locations|name|text|NN|
+parties|active|integer|NN|1
+parties|created_at|text|NN|CURRENT_TIMESTAMP
+parties|display_name|text|NN|
+parties|email|text||
+parties|id|bigint|NN|nextval('parties_id_seq'::regclass)
+parties|legal_name|text||
+parties|party_type|text|NN|
+parties|phone|text||
+parties|tax_id_type|text||
+parties|tax_id|text||
+price_lists|active|integer|NN|1
+price_lists|created_at|text|NN|CURRENT_TIMESTAMP
+price_lists|description|text|NN|''::text
+price_lists|id|bigint|NN|nextval('price_lists_id_seq'::regclass)
+price_lists|is_default|integer|NN|0
+price_lists|name|text|NN|
+purchase_order_items|id|bigint|NN|nextval('purchase_order_items_id_seq'::regclass)
+purchase_order_items|item_id|integer|NN|
+purchase_order_items|purchase_order_id|integer|NN|
+purchase_order_items|quantity_ordered|numeric|NN|
+purchase_order_items|quantity_received|numeric|NN|0
+purchase_order_items|tax_rate|numeric|NN|0
+purchase_order_items|unit_cost|numeric|NN|
+purchase_orders|branch_id|integer||
+purchase_orders|created_at|text|NN|CURRENT_TIMESTAMP
+purchase_orders|created_by|integer||
+purchase_orders|expected_at|text||
+purchase_orders|id|bigint|NN|nextval('purchase_orders_id_seq'::regclass)
+purchase_orders|notes|text|NN|''::text
+purchase_orders|number|text|NN|
+purchase_orders|ordered_at|text||
+purchase_orders|status|text|NN|'draft'::text
+purchase_orders|supplier_party_id|integer|NN|
+purchase_receipt_items|expires_at|text||
+purchase_receipt_items|id|bigint|NN|nextval('purchase_receipt_items_id_seq'::regclass)
+purchase_receipt_items|item_id|integer|NN|
+purchase_receipt_items|lot_code|text||
+purchase_receipt_items|quantity|numeric|NN|
+purchase_receipt_items|receipt_id|integer|NN|
+purchase_receipt_items|unit_cost|numeric|NN|
+purchase_receipts|created_at|text|NN|CURRENT_TIMESTAMP
+purchase_receipts|created_by|integer||
+purchase_receipts|document_reference|text||
+purchase_receipts|id|bigint|NN|nextval('purchase_receipts_id_seq'::regclass)
+purchase_receipts|purchase_order_id|integer||
+purchase_receipts|received_at|text||
+purchase_receipts|status|text|NN|'draft'::text
+purchase_receipts|supplier_party_id|integer|NN|
+sale_items|description_snapshot|text|NN|
+sale_items|discount_amount|numeric|NN|0
+sale_items|id|bigint|NN|nextval('sale_items_id_seq'::regclass)
+sale_items|item_id|integer||
+sale_items|kind|text|NN|
+sale_items|quantity|numeric|NN|
+sale_items|sale_id|integer|NN|
+sale_items|tax_amount|numeric|NN|0
+sale_items|tax_rate|numeric|NN|0
+sale_items|unit_cost_snapshot|numeric||
+sale_items|unit_price|numeric|NN|
+sale_items|variant_id|integer||
+sale_payments|amount|numeric|NN|
+sale_payments|created_at|text|NN|to_char((CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text), 'YYYY-MM-DD HH24:MI:SS'::text)
+sale_payments|id|bigint|NN|nextval('sale_payments_id_seq'::regclass)
+sale_payments|method|text|NN|
+sale_payments|received_amount|numeric||
+sale_payments|reference|text|NN|''::text
+sale_payments|sale_id|integer|NN|
+sales|branch_id|integer||
+sales|confirmed_at|text||
+sales|created_at|text|NN|CURRENT_TIMESTAMP
+sales|created_by|integer||
+sales|customer_name_snapshot|text|NN|''::text
+sales|customer_party_id|integer||
+sales|discount_total|numeric|NN|0
+sales|id|bigint|NN|nextval('sales_id_seq'::regclass)
+sales|notes|text|NN|''::text
+sales|number|text|NN|
+sales|occurred_on|text||
+sales|register_id|integer||
+sales|source_id|integer||
+sales|source_type|text|NN|'pos'::text
+sales|status_detail|text||
+sales|status|text|NN|'draft'::text
+sales|subtotal|numeric|NN|0
+sales|tax_total|numeric|NN|0
+sales|total|numeric|NN|0
+schema_migrations|applied_at|text|NN|CURRENT_TIMESTAMP
+schema_migrations|name|text|NN|
+schema_migrations|version|integer|NN|
+stock_movements|created_at|text|NN|CURRENT_TIMESTAMP
+stock_movements|created_by|integer||
+stock_movements|expires_at|text||
+stock_movements|id|bigint|NN|nextval('stock_movements_id_seq'::regclass)
+stock_movements|item_id|integer|NN|
+stock_movements|location_id|integer|NN|
+stock_movements|lot_code|text||
+stock_movements|movement_type|text|NN|
+stock_movements|note|text|NN|''::text
+stock_movements|occurred_at|text|NN|
+stock_movements|quantity_delta|numeric|NN|
+stock_movements|reason_code|text||
+stock_movements|source_id|integer||
+stock_movements|source_type|text||
+stock_movements|unit_cost|numeric||
+stock_movements|variant_id|integer||
+units|allows_fraction|integer|NN|0
+units|code|text|NN|
+units|decimal_scale|integer|NN|0
+units|name|text|NN|
+
+## claves primarias (20)
+actividad_log|PRIMARY KEY (id)
+catalog_items|PRIMARY KEY (id)
+categories|PRIMARY KEY (id)
+commerce_settings|PRIMARY KEY (key)
+item_codes|PRIMARY KEY (id)
+item_prices|PRIMARY KEY (id)
+item_variants|PRIMARY KEY (id)
+locations|PRIMARY KEY (id)
+parties|PRIMARY KEY (id)
+price_lists|PRIMARY KEY (id)
+purchase_order_items|PRIMARY KEY (id)
+purchase_orders|PRIMARY KEY (id)
+purchase_receipt_items|PRIMARY KEY (id)
+purchase_receipts|PRIMARY KEY (id)
+sale_items|PRIMARY KEY (id)
+sale_payments|PRIMARY KEY (id)
+sales|PRIMARY KEY (id)
+schema_migrations|PRIMARY KEY (version)
+stock_movements|PRIMARY KEY (id)
+units|PRIMARY KEY (code)
+
+## claves foráneas (22)
+catalog_items|catalog_items_category_id_fkey|FOREIGN KEY (category_id) REFERENCES categories(id)
+catalog_items|catalog_items_unit_code_fkey|FOREIGN KEY (unit_code) REFERENCES units(code)
+categories|categories_parent_id_fkey|FOREIGN KEY (parent_id) REFERENCES categories(id)
+item_codes|item_codes_item_id_fkey|FOREIGN KEY (item_id) REFERENCES catalog_items(id)
+item_prices|item_prices_item_id_fkey|FOREIGN KEY (item_id) REFERENCES catalog_items(id)
+item_prices|item_prices_price_list_id_fkey|FOREIGN KEY (price_list_id) REFERENCES price_lists(id)
+item_variants|item_variants_item_id_fkey|FOREIGN KEY (item_id) REFERENCES catalog_items(id)
+purchase_order_items|purchase_order_items_item_id_fkey|FOREIGN KEY (item_id) REFERENCES catalog_items(id)
+purchase_order_items|purchase_order_items_purchase_order_id_fkey|FOREIGN KEY (purchase_order_id) REFERENCES purchase_orders(id)
+purchase_orders|purchase_orders_supplier_party_id_fkey|FOREIGN KEY (supplier_party_id) REFERENCES parties(id)
+purchase_receipt_items|purchase_receipt_items_item_id_fkey|FOREIGN KEY (item_id) REFERENCES catalog_items(id)
+purchase_receipt_items|purchase_receipt_items_receipt_id_fkey|FOREIGN KEY (receipt_id) REFERENCES purchase_receipts(id)
+purchase_receipts|purchase_receipts_purchase_order_id_fkey|FOREIGN KEY (purchase_order_id) REFERENCES purchase_orders(id)
+purchase_receipts|purchase_receipts_supplier_party_id_fkey|FOREIGN KEY (supplier_party_id) REFERENCES parties(id)
+sale_items|sale_items_item_id_fkey|FOREIGN KEY (item_id) REFERENCES catalog_items(id)
+sale_items|sale_items_sale_id_fkey|FOREIGN KEY (sale_id) REFERENCES sales(id)
+sale_items|sale_items_variant_id_fkey|FOREIGN KEY (variant_id) REFERENCES item_variants(id)
+sale_payments|sale_payments_sale_id_fkey|FOREIGN KEY (sale_id) REFERENCES sales(id) ON DELETE CASCADE
+sales|sales_customer_party_id_fkey|FOREIGN KEY (customer_party_id) REFERENCES parties(id)
+stock_movements|stock_movements_item_id_fkey|FOREIGN KEY (item_id) REFERENCES catalog_items(id)
+stock_movements|stock_movements_location_id_fkey|FOREIGN KEY (location_id) REFERENCES locations(id)
+stock_movements|stock_movements_variant_id_fkey|FOREIGN KEY (variant_id) REFERENCES item_variants(id)
+
+## índices (40)
+actividad_log|actividad_log_pkey|CREATE UNIQUE INDEX actividad_log_pkey ON public.actividad_log USING btree (id)
+actividad_log|ix_actividad_log_accion|CREATE INDEX ix_actividad_log_accion ON public.actividad_log USING btree (accion)
+actividad_log|ix_actividad_log_entidad|CREATE INDEX ix_actividad_log_entidad ON public.actividad_log USING btree (entidad)
+actividad_log|ix_actividad_log_ts|CREATE INDEX ix_actividad_log_ts ON public.actividad_log USING btree (ts)
+catalog_items|catalog_items_pkey|CREATE UNIQUE INDEX catalog_items_pkey ON public.catalog_items USING btree (id)
+categories|categories_parent_id_name_key|CREATE UNIQUE INDEX categories_parent_id_name_key ON public.categories USING btree (parent_id, name)
+categories|categories_pkey|CREATE UNIQUE INDEX categories_pkey ON public.categories USING btree (id)
+commerce_settings|commerce_settings_pkey|CREATE UNIQUE INDEX commerce_settings_pkey ON public.commerce_settings USING btree (key)
+item_codes|idx_item_codes_item|CREATE INDEX idx_item_codes_item ON public.item_codes USING btree (item_id)
+item_codes|idx_item_codes_one_primary_per_item|CREATE UNIQUE INDEX idx_item_codes_one_primary_per_item ON public.item_codes USING btree (item_id) WHERE (is_primary = 1)
+item_codes|item_codes_code_type_code_key|CREATE UNIQUE INDEX item_codes_code_type_code_key ON public.item_codes USING btree (code_type, code)
+item_codes|item_codes_pkey|CREATE UNIQUE INDEX item_codes_pkey ON public.item_codes USING btree (id)
+item_prices|idx_item_prices_item_list|CREATE INDEX idx_item_prices_item_list ON public.item_prices USING btree (item_id, price_list_id)
+item_prices|item_prices_pkey|CREATE UNIQUE INDEX item_prices_pkey ON public.item_prices USING btree (id)
+item_variants|idx_item_variants_item|CREATE INDEX idx_item_variants_item ON public.item_variants USING btree (item_id)
+item_variants|item_variants_pkey|CREATE UNIQUE INDEX item_variants_pkey ON public.item_variants USING btree (id)
+item_variants|item_variants_sku_key|CREATE UNIQUE INDEX item_variants_sku_key ON public.item_variants USING btree (sku)
+locations|idx_locations_one_default|CREATE UNIQUE INDEX idx_locations_one_default ON public.locations USING btree (is_default) WHERE (is_default = 1)
+locations|locations_pkey|CREATE UNIQUE INDEX locations_pkey ON public.locations USING btree (id)
+parties|parties_pkey|CREATE UNIQUE INDEX parties_pkey ON public.parties USING btree (id)
+price_lists|idx_price_lists_one_default|CREATE UNIQUE INDEX idx_price_lists_one_default ON public.price_lists USING btree (is_default) WHERE (is_default = 1)
+price_lists|price_lists_pkey|CREATE UNIQUE INDEX price_lists_pkey ON public.price_lists USING btree (id)
+purchase_order_items|idx_purchase_order_items_order|CREATE INDEX idx_purchase_order_items_order ON public.purchase_order_items USING btree (purchase_order_id)
+purchase_order_items|purchase_order_items_pkey|CREATE UNIQUE INDEX purchase_order_items_pkey ON public.purchase_order_items USING btree (id)
+purchase_orders|purchase_orders_number_key|CREATE UNIQUE INDEX purchase_orders_number_key ON public.purchase_orders USING btree (number)
+purchase_orders|purchase_orders_pkey|CREATE UNIQUE INDEX purchase_orders_pkey ON public.purchase_orders USING btree (id)
+purchase_receipt_items|idx_purchase_receipt_items_receipt|CREATE INDEX idx_purchase_receipt_items_receipt ON public.purchase_receipt_items USING btree (receipt_id)
+purchase_receipt_items|purchase_receipt_items_pkey|CREATE UNIQUE INDEX purchase_receipt_items_pkey ON public.purchase_receipt_items USING btree (id)
+purchase_receipts|purchase_receipts_pkey|CREATE UNIQUE INDEX purchase_receipts_pkey ON public.purchase_receipts USING btree (id)
+sale_items|idx_sale_items_sale|CREATE INDEX idx_sale_items_sale ON public.sale_items USING btree (sale_id)
+sale_items|sale_items_pkey|CREATE UNIQUE INDEX sale_items_pkey ON public.sale_items USING btree (id)
+sale_payments|idx_sale_payments_sale|CREATE INDEX idx_sale_payments_sale ON public.sale_payments USING btree (sale_id)
+sale_payments|sale_payments_pkey|CREATE UNIQUE INDEX sale_payments_pkey ON public.sale_payments USING btree (id)
+sales|sales_number_key|CREATE UNIQUE INDEX sales_number_key ON public.sales USING btree (number)
+sales|sales_pkey|CREATE UNIQUE INDEX sales_pkey ON public.sales USING btree (id)
+schema_migrations|schema_migrations_pkey|CREATE UNIQUE INDEX schema_migrations_pkey ON public.schema_migrations USING btree (version)
+stock_movements|idx_stock_item_location|CREATE INDEX idx_stock_item_location ON public.stock_movements USING btree (item_id, location_id)
+stock_movements|idx_stock_item_variant_location|CREATE INDEX idx_stock_item_variant_location ON public.stock_movements USING btree (item_id, variant_id, location_id)
+stock_movements|stock_movements_pkey|CREATE UNIQUE INDEX stock_movements_pkey ON public.stock_movements USING btree (id)
+units|units_pkey|CREATE UNIQUE INDEX units_pkey ON public.units USING btree (code)
+
+## checks (6)
+item_prices|item_prices_check|CHECK (((valid_until IS NULL) OR (valid_until > valid_from)))
+sale_items|sale_items_check1|CHECK (((variant_id IS NULL) OR (item_id IS NOT NULL)))
+sale_items|sale_items_check|CHECK (((kind <> 'product'::text) OR (item_id IS NOT NULL)))
+sale_payments|sale_payments_amount_check|CHECK ((amount > (0)::numeric))
+sale_payments|sale_payments_check|CHECK (((received_amount IS NULL) OR (received_amount >= amount)))
+stock_movements|stock_movements_quantity_delta_check|CHECK ((quantity_delta <> (0)::numeric))
