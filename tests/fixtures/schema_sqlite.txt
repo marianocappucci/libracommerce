@@ -1,0 +1,242 @@
+# motor: sqlite
+
+## tablas (167)
+actividad_log|accion|TEXT|NN|
+actividad_log|cambios|TEXT||
+actividad_log|descripcion|TEXT|NN|''
+actividad_log|entidad_id|INTEGER||
+actividad_log|entidad|TEXT|NN|
+actividad_log|id|INTEGER||
+actividad_log|ts|TEXT|NN|
+actividad_log|usuario|TEXT|NN|'Sistema'
+catalog_items|active|INTEGER|NN|1
+catalog_items|category_id|INTEGER||
+catalog_items|created_at|TEXT|NN|CURRENT_TIMESTAMP
+catalog_items|default_cost|NUMERIC|NN|0
+catalog_items|default_sale_price|NUMERIC|NN|0
+catalog_items|description|TEXT|NN|''
+catalog_items|id|INTEGER||
+catalog_items|item_type|TEXT|NN|
+catalog_items|metadata_json|TEXT|NN|'{}'
+catalog_items|min_stock|NUMERIC|NN|0
+catalog_items|name|TEXT|NN|
+catalog_items|purchasable|INTEGER|NN|1
+catalog_items|sellable|INTEGER|NN|1
+catalog_items|tax_profile|TEXT||
+catalog_items|unit_code|TEXT|NN|
+categories|active|INTEGER|NN|1
+categories|id|INTEGER||
+categories|name|TEXT|NN|
+categories|parent_id|INTEGER||
+commerce_settings|key|TEXT||
+commerce_settings|updated_at|TEXT|NN|CURRENT_TIMESTAMP
+commerce_settings|value|TEXT|NN|
+item_codes|code_type|TEXT|NN|
+item_codes|code|TEXT|NN|
+item_codes|id|INTEGER||
+item_codes|is_primary|INTEGER|NN|0
+item_codes|item_id|INTEGER|NN|
+item_prices|amount|NUMERIC|NN|
+item_prices|branch_id|INTEGER||
+item_prices|currency|TEXT|NN|'ARS'
+item_prices|id|INTEGER||
+item_prices|item_id|INTEGER|NN|
+item_prices|min_quantity|NUMERIC||
+item_prices|price_list_id|INTEGER|NN|
+item_prices|valid_from|TEXT|NN|
+item_prices|valid_until|TEXT||
+item_variants|active|INTEGER|NN|1
+item_variants|attributes_json|TEXT|NN|'{}'
+item_variants|id|INTEGER||
+item_variants|item_id|INTEGER|NN|
+item_variants|name|TEXT|NN|
+item_variants|sku|TEXT|NN|
+locations|active|INTEGER|NN|1
+locations|branch_id|INTEGER||
+locations|created_at|TEXT|NN|CURRENT_TIMESTAMP
+locations|description|TEXT|NN|''
+locations|id|INTEGER||
+locations|is_default|INTEGER|NN|0
+locations|location_type|TEXT|NN|'warehouse'
+locations|name|TEXT|NN|
+parties|active|INTEGER|NN|1
+parties|created_at|TEXT|NN|CURRENT_TIMESTAMP
+parties|display_name|TEXT|NN|
+parties|email|TEXT||
+parties|id|INTEGER||
+parties|legal_name|TEXT||
+parties|party_type|TEXT|NN|
+parties|phone|TEXT||
+parties|tax_id_type|TEXT||
+parties|tax_id|TEXT||
+price_lists|active|INTEGER|NN|1
+price_lists|created_at|TEXT|NN|CURRENT_TIMESTAMP
+price_lists|description|TEXT|NN|''
+price_lists|id|INTEGER||
+price_lists|is_default|INTEGER|NN|0
+price_lists|name|TEXT|NN|
+purchase_order_items|id|INTEGER||
+purchase_order_items|item_id|INTEGER|NN|
+purchase_order_items|purchase_order_id|INTEGER|NN|
+purchase_order_items|quantity_ordered|NUMERIC|NN|
+purchase_order_items|quantity_received|NUMERIC|NN|0
+purchase_order_items|tax_rate|NUMERIC|NN|0
+purchase_order_items|unit_cost|NUMERIC|NN|
+purchase_orders|branch_id|INTEGER||
+purchase_orders|created_at|TEXT|NN|CURRENT_TIMESTAMP
+purchase_orders|created_by|INTEGER||
+purchase_orders|expected_at|TEXT||
+purchase_orders|id|INTEGER||
+purchase_orders|notes|TEXT|NN|''
+purchase_orders|number|TEXT|NN|
+purchase_orders|ordered_at|TEXT||
+purchase_orders|status|TEXT|NN|'draft'
+purchase_orders|supplier_party_id|INTEGER|NN|
+purchase_receipt_items|expires_at|TEXT||
+purchase_receipt_items|id|INTEGER||
+purchase_receipt_items|item_id|INTEGER|NN|
+purchase_receipt_items|lot_code|TEXT||
+purchase_receipt_items|quantity|NUMERIC|NN|
+purchase_receipt_items|receipt_id|INTEGER|NN|
+purchase_receipt_items|unit_cost|NUMERIC|NN|
+purchase_receipts|created_at|TEXT|NN|CURRENT_TIMESTAMP
+purchase_receipts|created_by|INTEGER||
+purchase_receipts|document_reference|TEXT||
+purchase_receipts|id|INTEGER||
+purchase_receipts|purchase_order_id|INTEGER||
+purchase_receipts|received_at|TEXT||
+purchase_receipts|status|TEXT|NN|'draft'
+purchase_receipts|supplier_party_id|INTEGER|NN|
+sale_items|description_snapshot|TEXT|NN|
+sale_items|discount_amount|NUMERIC|NN|0
+sale_items|id|INTEGER||
+sale_items|item_id|INTEGER||
+sale_items|kind|TEXT|NN|
+sale_items|quantity|NUMERIC|NN|
+sale_items|sale_id|INTEGER|NN|
+sale_items|tax_amount|NUMERIC|NN|0
+sale_items|tax_rate|NUMERIC|NN|0
+sale_items|unit_cost_snapshot|NUMERIC||
+sale_items|unit_price|NUMERIC|NN|
+sale_items|variant_id|INTEGER||
+sale_payments|amount|NUMERIC|NN|
+sale_payments|created_at|TEXT|NN|datetime('now')
+sale_payments|id|INTEGER||
+sale_payments|method|TEXT|NN|
+sale_payments|received_amount|NUMERIC||
+sale_payments|reference|TEXT|NN|''
+sale_payments|sale_id|INTEGER|NN|
+sales|branch_id|INTEGER||
+sales|confirmed_at|TEXT||
+sales|created_at|TEXT|NN|CURRENT_TIMESTAMP
+sales|created_by|INTEGER||
+sales|customer_name_snapshot|TEXT|NN|''
+sales|customer_party_id|INTEGER||
+sales|discount_total|NUMERIC|NN|0
+sales|id|INTEGER||
+sales|notes|TEXT|NN|''
+sales|number|TEXT|NN|
+sales|occurred_on|TEXT||
+sales|register_id|INTEGER||
+sales|source_id|INTEGER||
+sales|source_type|TEXT|NN|'pos'
+sales|status_detail|TEXT||
+sales|status|TEXT|NN|'draft'
+sales|subtotal|NUMERIC|NN|0
+sales|tax_total|NUMERIC|NN|0
+sales|total|NUMERIC|NN|0
+schema_migrations|applied_at|TEXT|NN|CURRENT_TIMESTAMP
+schema_migrations|name|TEXT|NN|
+schema_migrations|version|INTEGER||
+stock_movements|created_at|TEXT|NN|CURRENT_TIMESTAMP
+stock_movements|created_by|INTEGER||
+stock_movements|expires_at|TEXT||
+stock_movements|id|INTEGER||
+stock_movements|item_id|INTEGER|NN|
+stock_movements|location_id|INTEGER|NN|
+stock_movements|lot_code|TEXT||
+stock_movements|movement_type|TEXT|NN|
+stock_movements|note|TEXT|NN|''
+stock_movements|occurred_at|TEXT|NN|
+stock_movements|quantity_delta|NUMERIC|NN|
+stock_movements|reason_code|TEXT||
+stock_movements|source_id|INTEGER||
+stock_movements|source_type|TEXT||
+stock_movements|unit_cost|NUMERIC||
+stock_movements|variant_id|INTEGER||
+units|allows_fraction|INTEGER|NN|0
+units|code|TEXT||
+units|decimal_scale|INTEGER|NN|0
+units|name|TEXT|NN|
+
+## claves primarias (20)
+actividad_log|id
+catalog_items|id
+categories|id
+commerce_settings|key
+item_codes|id
+item_prices|id
+item_variants|id
+locations|id
+parties|id
+price_lists|id
+purchase_order_items|id
+purchase_orders|id
+purchase_receipt_items|id
+purchase_receipts|id
+sale_items|id
+sale_payments|id
+sales|id
+schema_migrations|version
+stock_movements|id
+units|code
+
+## claves foráneas (22)
+catalog_items|category_id|categories|id|NO ACTION|NO ACTION
+catalog_items|unit_code|units|code|NO ACTION|NO ACTION
+categories|parent_id|categories|id|NO ACTION|NO ACTION
+item_codes|item_id|catalog_items|id|NO ACTION|NO ACTION
+item_prices|item_id|catalog_items|id|NO ACTION|NO ACTION
+item_prices|price_list_id|price_lists|id|NO ACTION|NO ACTION
+item_variants|item_id|catalog_items|id|NO ACTION|NO ACTION
+purchase_order_items|item_id|catalog_items|id|NO ACTION|NO ACTION
+purchase_order_items|purchase_order_id|purchase_orders|id|NO ACTION|NO ACTION
+purchase_orders|supplier_party_id|parties|id|NO ACTION|NO ACTION
+purchase_receipt_items|item_id|catalog_items|id|NO ACTION|NO ACTION
+purchase_receipt_items|receipt_id|purchase_receipts|id|NO ACTION|NO ACTION
+purchase_receipts|purchase_order_id|purchase_orders|id|NO ACTION|NO ACTION
+purchase_receipts|supplier_party_id|parties|id|NO ACTION|NO ACTION
+sale_items|item_id|catalog_items|id|NO ACTION|NO ACTION
+sale_items|sale_id|sales|id|NO ACTION|NO ACTION
+sale_items|variant_id|item_variants|id|NO ACTION|NO ACTION
+sale_payments|sale_id|sales|id|CASCADE|NO ACTION
+sales|customer_party_id|parties|id|NO ACTION|NO ACTION
+stock_movements|item_id|catalog_items|id|NO ACTION|NO ACTION
+stock_movements|location_id|locations|id|NO ACTION|NO ACTION
+stock_movements|variant_id|item_variants|id|NO ACTION|NO ACTION
+
+## índices (22)
+actividad_log|ix_actividad_log_accion|CREATE INDEX ix_actividad_log_accion ON actividad_log(accion)
+actividad_log|ix_actividad_log_entidad|CREATE INDEX ix_actividad_log_entidad ON actividad_log(entidad)
+actividad_log|ix_actividad_log_ts|CREATE INDEX ix_actividad_log_ts ON actividad_log(ts)
+categories|sqlite_autoindex_categories_1|UNIQUE implícito (parent_id,name)
+commerce_settings|sqlite_autoindex_commerce_settings_1|UNIQUE implícito (key)
+item_codes|idx_item_codes_item|CREATE INDEX idx_item_codes_item ON item_codes(item_id)
+item_codes|idx_item_codes_one_primary_per_item|CREATE UNIQUE INDEX idx_item_codes_one_primary_per_item ON item_codes(item_id) WHERE is_primary = 1
+item_codes|sqlite_autoindex_item_codes_1|UNIQUE implícito (code_type,code)
+item_prices|idx_item_prices_item_list|CREATE INDEX idx_item_prices_item_list ON item_prices(item_id, price_list_id)
+item_variants|idx_item_variants_item|CREATE INDEX idx_item_variants_item ON item_variants(item_id)
+item_variants|sqlite_autoindex_item_variants_1|UNIQUE implícito (sku)
+locations|idx_locations_one_default|CREATE UNIQUE INDEX idx_locations_one_default ON locations(is_default) WHERE is_default = 1
+price_lists|idx_price_lists_one_default|CREATE UNIQUE INDEX idx_price_lists_one_default ON price_lists(is_default) WHERE is_default = 1
+purchase_order_items|idx_purchase_order_items_order|CREATE INDEX idx_purchase_order_items_order ON purchase_order_items(purchase_order_id)
+purchase_orders|sqlite_autoindex_purchase_orders_1|UNIQUE implícito (number)
+purchase_receipt_items|idx_purchase_receipt_items_receipt|CREATE INDEX idx_purchase_receipt_items_receipt ON purchase_receipt_items(receipt_id)
+sale_items|idx_sale_items_sale|CREATE INDEX idx_sale_items_sale ON sale_items(sale_id)
+sale_payments|idx_sale_payments_sale|CREATE INDEX idx_sale_payments_sale ON sale_payments(sale_id)
+sales|sqlite_autoindex_sales_1|UNIQUE implícito (number)
+stock_movements|idx_stock_item_location|CREATE INDEX idx_stock_item_location ON stock_movements(item_id, location_id)
+stock_movements|idx_stock_item_variant_location|CREATE INDEX idx_stock_item_variant_location ON stock_movements(item_id, variant_id, location_id)
+units|sqlite_autoindex_units_1|UNIQUE implícito (code)
+
+## checks (0)

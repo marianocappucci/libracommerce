@@ -14,7 +14,15 @@ dependencies = []
 [project.optional-dependencies]
 dev = [
     "pytest-cov>=6",
-    "ruff>=0.13","pytest>=8.0"]
+    "ruff>=0.13","pytest>=8.0",
+    # SOLO PARA TESTS. Este motor no importa libracore en runtime y sigue
+    # teniendo `dependencies = []` a proposito. Pero contra PostgreSQL su
+    # schema se levanta con la capa de conexion de LibraCore -- que es la que
+    # los productos le pasan, porque las tablas de los dos motores conviven en
+    # la misma base -- y el volcado del gate sale de ahi tambien. Sin esto el
+    # gate solo podria mirar SQLite, que es justo la mitad que ya funcionaba.
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@develop",
+]
 offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@develop"]
 offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@develop"]
 
