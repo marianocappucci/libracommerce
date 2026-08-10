@@ -1,10 +1,18 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "libracommerce"
-version = "0.4.0"
+# 🔴 La version se DERIVA DEL TAG, como en el resto de la familia. Antes era un
+# literal y se desfaso: el tag `v0.5.0` publicaba un paquete que decia `0.4.0`,
+# porque nadie toco esta linea al taguear. Lo agarro el 2026-08-10 el guard de
+# CI de Contalibra y Restolibra, que compara el pin con lo instalado -- sus
+# pines pedian 0.5.0 y recibian 0.4.0.
+#
+# Un literal esta bien solo mientras alguien se acuerde de moverlo. Derivarlo
+# del tag saca la posibilidad de olvidarse.
+dynamic = ["version"]
 description = "Motor comercial reutilizable de la familia Libra"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -14,9 +22,26 @@ dependencies = []
 [project.optional-dependencies]
 dev = [
     "pytest-cov>=6",
-    "ruff>=0.13","pytest>=8.0"]
+    "ruff>=0.13","pytest>=8.0",
+    # SOLO PARA TESTS. Este motor no importa libracore en runtime y sigue
+    # teniendo `dependencies = []` a proposito. Pero contra PostgreSQL su
+    # schema se levanta con la capa de conexion de LibraCore -- que es la que
+    # los productos le pasan, porque las tablas de los dos motores conviven en
+    # la misma base -- y el volcado del gate sale de ahi tambien. Sin esto el
+    # gate solo podria mirar SQLite, que es justo la mitad que ya funcionaba.
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.20.0",
+]
 offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@develop"]
 offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@develop"]
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+# Tags sin 'v' inicial en el numero de version (v0.6.0 -> 0.6.0), y un esquema
+# simple para que un commit sin tag no rompa el build. Identico al de libracore
+# y libraauth: los tres motores derivan igual.
+local_scheme = "no-local-version"
 
 [tool.hatch.metadata]
 allow-direct-references = true
