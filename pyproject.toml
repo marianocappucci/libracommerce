@@ -21,7 +21,7 @@ dev = [
     # los productos le pasan, porque las tablas de los dos motores conviven en
     # la misma base -- y el volcado del gate sale de ahi tambien. Sin esto el
     # gate solo podria mirar SQLite, que es justo la mitad que ya funcionaba.
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@develop",
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.20.0",
 ]
 offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@develop"]
 offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@develop"]
