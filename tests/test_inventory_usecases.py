@@ -3,6 +3,12 @@
 Las dos piezas que el motor no tenia y cada consumidor resolvia por su
 cuenta. Los tests que importan de verdad son los tres de atomicidad: son la
 diferencia entre esto y la version de Contalibra que se subio.
+
+**Todo esto corre contra los dos motores** (ver `conftest.repo`). No es
+ceremonia: el `transaction()` termina en el `rollback()` de `sqlite3` o en el
+del `ConnectionWrapper` de psycopg segun donde corra, y PostgreSQL es el
+motor de produccion. Probar la atomicidad solo en SQLite prueba la mitad que
+no se usa.
 """
 
 import sqlite3
@@ -12,8 +18,6 @@ from decimal import Decimal
 
 import pytest
 
-from libracommerce.db.repository import SqliteCommerceRepository
-from libracommerce.db.schema import init_schema
 from libracommerce.domain.catalog import CatalogItem, CatalogItemType, Unit
 from libracommerce.domain.inventory import Location, StockMovement, StockMovementType
 from libracommerce.domain.sales import Sale, SaleItem
@@ -25,13 +29,6 @@ from libracommerce.usecases.inventory import (
 from libracommerce.usecases.sales import confirm_sale
 
 WHEN = datetime(2026, 8, 11, 10, 0, 0)
-
-
-@pytest.fixture
-def repo() -> SqliteCommerceRepository:
-    conn = sqlite3.connect(":memory:")
-    init_schema(conn)
-    return SqliteCommerceRepository(conn)
 
 
 def _producto(repo) -> CatalogItem:
@@ -254,12 +251,12 @@ def test_si_falla_la_segunda_escritura_no_queda_la_primera(repo, monkeypatch):
     def falla_en_la_entrada(movement):
         llamadas["n"] += 1
         if llamadas["n"] == 2:
-            raise sqlite3.OperationalError("disco lleno")
+            raise RuntimeError("fallo simulado entre las dos patas")
         return original(movement)
 
     monkeypatch.setattr(repo, "append_stock_movement", falla_en_la_entrada)
 
-    with pytest.raises(sqlite3.OperationalError):
+    with pytest.raises(RuntimeError):
         transfer_stock(
             repo,
             item_id=item.id,
@@ -296,12 +293,12 @@ def test_control_sin_transaccion_la_mercaderia_se_pierde(repo, monkeypatch):
     def falla_en_la_entrada(movement):
         llamadas["n"] += 1
         if llamadas["n"] == 2:
-            raise sqlite3.OperationalError("disco lleno")
+            raise RuntimeError("fallo simulado entre las dos patas")
         return original(movement)
 
     monkeypatch.setattr(repo, "append_stock_movement", falla_en_la_entrada)
 
-    with pytest.raises(sqlite3.OperationalError):
+    with pytest.raises(RuntimeError):
         transfer_stock(
             repo,
             item_id=item.id,
