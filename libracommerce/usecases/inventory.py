@@ -80,6 +80,8 @@ def transfer_stock(
     variant_id: int | None = None,
     note: str = "",
     created_by: int | None = None,
+    reason_code_salida: str | None = None,
+    reason_code_entrada: str | None = None,
     permitir_negativo: bool = False,
 ) -> tuple[StockMovement, StockMovement]:
     """Mueve `quantity` de un deposito a otro como una sola operacion.
@@ -94,6 +96,14 @@ def transfer_stock(
     contraparte. La salida no puede apuntar a la entrada porque se escribe
     primero y los movimientos son inmutables -- que es justamente la propiedad
     que hace confiable a `current_stock`.
+
+    **Los `reason_code` son dos y no uno** porque cada pata de la
+    transferencia es un evento distinto para quien lee el ledger. Existen para
+    que un consumidor conserve su propio vocabulario: Contalibra escribe
+    `transferencia_salida`/`transferencia_entrada` ahi y su pantalla de
+    actividad los muestra tal cual, con un `COALESCE(reason_code,
+    movement_type)` sin mapa. Sin este parametro, adoptar este caso de uso le
+    degradaria esa pantalla a `transfer_out` sin que ningun test lo note.
 
     `permitir_negativo` existe para el ajuste de un inventario que ya estaba
     mal cargado, donde la realidad fisica manda sobre la proyeccion. No es el
@@ -126,6 +136,7 @@ def transfer_stock(
                 source_id=None,
                 note=note,
                 created_by=created_by,
+                reason_code=reason_code_salida,
             )
         )
         entrada = repo.append_stock_movement(
@@ -141,6 +152,7 @@ def transfer_stock(
                 source_id=salida.id,
                 note=note,
                 created_by=created_by,
+                reason_code=reason_code_entrada,
             )
         )
 
