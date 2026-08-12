@@ -5,12 +5,8 @@ Si alguno de esos se pone en rojo, lo que cambio no es un detalle sino la
 decision de producto.
 """
 
-import sqlite3
-
 import pytest
 
-from libracommerce.db.repository import SqliteCommerceRepository
-from libracommerce.db.schema import init_schema
 from libracommerce.domain.catalog import CatalogItem, CatalogItemType, ItemVariant, Unit
 from libracommerce.domain.presets import (
     PRESETS,
@@ -26,13 +22,6 @@ from libracommerce.usecases.presets import (
     fijar_rubro,
     leer_rubro,
 )
-
-
-@pytest.fixture
-def repo() -> SqliteCommerceRepository:
-    conn = sqlite3.connect(":memory:")
-    init_schema(conn)
-    return SqliteCommerceRepository(conn)
 
 
 # ── La promesa: sugieren, no validan ─────────────────────────────────────
