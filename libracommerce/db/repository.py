@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
@@ -41,6 +42,48 @@ class SqliteCommerceRepository:
 
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
+        self._en_transaccion = False
+
+    # transacciones
+
+    @contextmanager
+    def transaction(self):
+        """Agrupa varias escrituras en un solo commit, con rollback ante error.
+
+        Hasta ahora **todos** los metodos de escritura de este repositorio
+        commiteaban solos, asi que una operacion de dos pasos no existia: la
+        mitad podia quedar grabada. Para una transferencia de stock eso es
+        perdida de mercaderia silenciosa --sale del origen y no llega al
+        destino-- y es el defecto que tiene hoy `transferir_stock` de
+        Contalibra, que llama dos veces a un `add_movimiento_stock` que abre
+        su propia conexion cada vez.
+
+        Adentro del bloque `_commit()` es un no-op: el unico commit lo hace la
+        salida del contexto, y cualquier excepcion revierte **todo** lo
+        escrito adentro.
+
+        No admite anidamiento: un `transaction()` dentro de otro dejaria que
+        el interno decida el destino de lo que escribio el externo.
+        """
+        if self._en_transaccion:
+            raise RuntimeError("transaction() no admite anidamiento")
+        self._en_transaccion = True
+        try:
+            yield self
+        except BaseException:
+            self._conn.rollback()
+            raise
+        else:
+            # Commit directo, no `_commit()`: adentro del contexto ese seria
+            # un no-op y nada se grabaria.
+            self._conn.commit()
+        finally:
+            self._en_transaccion = False
+
+    def _commit(self) -> None:
+        """Commit real, salvo que estemos dentro de `transaction()`."""
+        if not self._en_transaccion:
+            self._conn.commit()
 
     # parties
 
@@ -64,7 +107,7 @@ class SqliteCommerceRepository:
                     int(party.active),
                 ),
             )
-            self._conn.commit()
+            self._commit()
             return replace(party, id=cur.lastrowid)
         cur.execute(
             """
@@ -85,7 +128,7 @@ class SqliteCommerceRepository:
                 party.id,
             ),
         )
-        self._conn.commit()
+        self._commit()
         return party
 
     def get_party(self, party_id: int) -> Party | None:
@@ -154,7 +197,7 @@ class SqliteCommerceRepository:
                     str(item.min_stock),
                 ),
             )
-            self._conn.commit()
+            self._commit()
             return replace(item, id=cur.lastrowid)
         cur.execute(
             """
@@ -181,7 +224,7 @@ class SqliteCommerceRepository:
                 item.id,
             ),
         )
-        self._conn.commit()
+        self._commit()
         return item
 
     def get_catalog_item(self, item_id: int) -> CatalogItem | None:
@@ -270,7 +313,7 @@ class SqliteCommerceRepository:
                 """,
                 (item_code.item_id, item_code.code_type, item_code.code, int(item_code.is_primary)),
             )
-            self._conn.commit()
+            self._commit()
             return replace(item_code, id=cur.lastrowid)
         cur.execute(
             """
@@ -279,7 +322,7 @@ class SqliteCommerceRepository:
             """,
             (item_code.item_id, item_code.code_type, item_code.code, int(item_code.is_primary), item_code.id),
         )
-        self._conn.commit()
+        self._commit()
         return item_code
 
     def list_item_codes(self, item_id: int) -> Sequence[ItemCode]:
@@ -350,7 +393,7 @@ class SqliteCommerceRepository:
             """,
             (key, value),
         )
-        self._conn.commit()
+        self._commit()
 
     # item variants
 
@@ -365,7 +408,7 @@ class SqliteCommerceRepository:
                 """,
                 (variant.item_id, variant.sku, variant.name, attributes_json, int(variant.active)),
             )
-            self._conn.commit()
+            self._commit()
             return replace(variant, id=cur.lastrowid)
         cur.execute(
             """
@@ -374,7 +417,7 @@ class SqliteCommerceRepository:
             """,
             (variant.item_id, variant.sku, variant.name, attributes_json, int(variant.active), variant.id),
         )
-        self._conn.commit()
+        self._commit()
         return variant
 
     def _item_variant_from_row(self, row) -> ItemVariant | None:
@@ -419,7 +462,7 @@ class SqliteCommerceRepository:
                 """,
                 (price_list.name, price_list.description, int(price_list.active), int(price_list.is_default)),
             )
-            self._conn.commit()
+            self._commit()
             return replace(price_list, id=cur.lastrowid)
         cur.execute(
             """
@@ -431,7 +474,7 @@ class SqliteCommerceRepository:
                 int(price_list.is_default), price_list.id,
             ),
         )
-        self._conn.commit()
+        self._commit()
         return price_list
 
     def get_price_list(self, price_list_id: int) -> PriceList | None:
@@ -467,7 +510,7 @@ class SqliteCommerceRepository:
                 """,
                 values,
             )
-            self._conn.commit()
+            self._commit()
             return replace(item_price, id=cur.lastrowid)
         cur.execute(
             """
@@ -478,7 +521,7 @@ class SqliteCommerceRepository:
             """,
             values + (item_price.id,),
         )
-        self._conn.commit()
+        self._commit()
         return item_price
 
     def _item_price_from_row(self, row) -> ItemPrice:
@@ -571,7 +614,7 @@ class SqliteCommerceRepository:
                     location.description, int(location.is_default),
                 ),
             )
-            self._conn.commit()
+            self._commit()
             return replace(location, id=cur.lastrowid)
         cur.execute(
             """
@@ -584,7 +627,7 @@ class SqliteCommerceRepository:
                 location.description, int(location.is_default), location.id,
             ),
         )
-        self._conn.commit()
+        self._commit()
         return location
 
     def get_location(self, location_id: int) -> Location | None:
@@ -642,7 +685,7 @@ class SqliteCommerceRepository:
                 movement.reason_code,
             ),
         )
-        self._conn.commit()
+        self._commit()
         return replace(movement, id=cur.lastrowid)
 
     def list_stock_movements(
@@ -847,7 +890,7 @@ class SqliteCommerceRepository:
                 ),
             )
         if commit:
-            self._conn.commit()
+            self._commit()
         return replace(sale, id=sale_id)
 
     def get_sale(self, sale_id: int) -> Sale | None:
@@ -992,7 +1035,7 @@ class SqliteCommerceRepository:
                     str(line.tax_rate),
                 ),
             )
-        self._conn.commit()
+        self._commit()
         return replace(order, id=order_id)
 
     def get_purchase_order(self, order_id: int) -> PurchaseOrder | None:
@@ -1108,7 +1151,7 @@ class SqliteCommerceRepository:
                     line.expires_at.isoformat() if line.expires_at else None,
                 ),
             )
-        self._conn.commit()
+        self._commit()
         return replace(receipt, id=receipt_id)
 
     def get_purchase_receipt(self, receipt_id: int) -> PurchaseReceipt | None:
