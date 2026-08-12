@@ -94,6 +94,57 @@ def test_la_entrada_apunta_a_la_salida_y_el_par_se_puede_recuperar(repo):
     assert [m.id for m in contraparte] == [entrada.id]
 
 
+def test_cada_pata_lleva_su_propio_reason_code(repo):
+    """Un consumidor tiene que poder conservar su vocabulario.
+
+    Contalibra muestra `COALESCE(reason_code, movement_type)` **sin mapa** en
+    su pantalla de actividad: sin esto, adoptar este caso de uso le cambiaria
+    'transferencia_salida' por 'transfer_out' en una pantalla que el cliente
+    usa, y ningun test suyo lo notaria.
+    """
+    item, central, camioneta = _producto(repo), _deposito(repo, "Central"), _deposito(repo, "Kangoo")
+    _cargar(repo, item, central, 50)
+
+    salida, entrada = transfer_stock(
+        repo,
+        item_id=item.id,
+        from_location_id=central.id,
+        to_location_id=camioneta.id,
+        quantity=Decimal("5"),
+        occurred_at=WHEN,
+        reason_code_salida="transferencia_salida",
+        reason_code_entrada="transferencia_entrada",
+    )
+
+    assert salida.reason_code == "transferencia_salida"
+    assert entrada.reason_code == "transferencia_entrada"
+    # Y persistido, no solo en el objeto que devuelve la funcion.
+    persistidos = list(repo.list_stock_movements(item.id, central.id)) + list(
+        repo.list_stock_movements(item.id, camioneta.id)
+    )
+    guardados = {m.movement_type: m.reason_code for m in persistidos}
+    assert guardados[StockMovementType.TRANSFER_OUT] == "transferencia_salida"
+    assert guardados[StockMovementType.TRANSFER_IN] == "transferencia_entrada"
+
+
+def test_sin_reason_code_las_dos_patas_quedan_en_none(repo):
+    """El default no inventa un vocabulario propio del motor."""
+    item, central, camioneta = _producto(repo), _deposito(repo, "Central"), _deposito(repo, "Kangoo")
+    _cargar(repo, item, central, 50)
+
+    salida, entrada = transfer_stock(
+        repo,
+        item_id=item.id,
+        from_location_id=central.id,
+        to_location_id=camioneta.id,
+        quantity=Decimal("5"),
+        occurred_at=WHEN,
+    )
+
+    assert salida.reason_code is None
+    assert entrada.reason_code is None
+
+
 # ── Transferencia, lo que tiene que rechazar ─────────────────────────────
 
 
