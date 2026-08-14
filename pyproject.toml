@@ -29,7 +29,22 @@ dev = [
     # los productos le pasan, porque las tablas de los dos motores conviven en
     # la misma base -- y el volcado del gate sale de ahi tambien. Sin esto el
     # gate solo podria mirar SQLite, que es justo la mitad que ya funcionaba.
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.20.0",
+    #
+    # v1.20.0 -> v1.37.0 (2026-08-14). **Esto NO le llega a ningun producto**:
+    # es una dependencia de tests, y este motor sigue con `dependencies = []` en
+    # runtime. Lo que cambia es contra que version de la capa de conexion de
+    # LibraCore se levanta el schema en la suite.
+    #
+    # Y ese es justamente el motivo del bump: con `v1.20.0` el gate de schema
+    # se estaba midiendo contra un motor que **ya no corre en ningun lado** --
+    # los seis productos estan en v1.33.0 o mas arriba, y los cuatro que
+    # despliegan comprobantes pasaron a v1.37.0 este mismo dia. Un banco de
+    # pruebas que no se parece a produccion no prueba produccion.
+    #
+    # El salto toca justo la capa que estos tests usan (`db/_postgres.py`,
+    # `db/clients.py`, `db/schema.py`), asi que se corrio la suite completa en
+    # las dos patas --SQLite y postgres:16-- antes de subir el pin.
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.37.0",
 ]
 offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@develop"]
 offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@develop"]
