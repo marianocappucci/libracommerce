@@ -1207,3 +1207,52 @@ class SqliteCommerceRepository:
             """,
         ).fetchall()
         return [self._purchase_receipt_from_row(row) for row in rows]
+
+    # resumen para el panel del cliente
+
+    def resumen_comercio(self, desde: str, hasta: str) -> dict:
+        """El bloque de comercio del resumen: ventas del periodo y stock bajo minimo.
+
+        Es lo que este motor le aporta al panel del cliente
+        (wiki/analyses/panel-del-dueno-multisucursal.md). El nucleo
+        —facturacion y caja— lo trae LibraCore, que lo tienen los seis
+        productos; este bloque **solo lo tienen los cuatro que montan
+        LibraCommerce**, y el producto que no lo tiene simplemente no lo manda:
+        un bloque ausente no es un bloque en cero.
+
+        Devuelve numeros y no objetos de dominio a proposito: el panel suma
+        cinco sucursales, y para eso necesita agregados.
+        """
+        ventas_cant, ventas_monto = self._conn.execute(
+            """
+            SELECT COUNT(*), COALESCE(SUM(total), 0)
+            FROM sales
+            WHERE status != 'cancelled' AND occurred_on BETWEEN ? AND ?
+            """,
+            (desde, hasta),
+        ).fetchone()
+
+        # Bajo minimo, no sin stock: el minimo lo configura el negocio, y
+        # `min_stock = 0` significa "no me avises", no "avisame siempre". Sin
+        # ese filtro, todo producto sin minimo configurado entraria en la
+        # alerta y el numero no diria nada.
+        bajo_minimo = self._conn.execute(
+            """
+            SELECT COUNT(*) FROM (
+                SELECT i.id
+                FROM catalog_items i
+                LEFT JOIN stock_movements m ON m.item_id = i.id
+                WHERE i.active = 1 AND i.min_stock > 0
+                GROUP BY i.id, i.min_stock
+                HAVING COALESCE(SUM(m.quantity_delta), 0) <= i.min_stock
+            ) AS bajos
+            """,
+        ).fetchone()[0]
+
+        return {
+            "ventas": {
+                "cantidad": int(ventas_cant),
+                "monto": float(ventas_monto or 0),
+            },
+            "stock_bajo_minimo": int(bajo_minimo),
+        }
