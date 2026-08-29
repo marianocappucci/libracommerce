@@ -364,7 +364,7 @@ def _repoint_ventas_pagos_fk(conn: sqlite3.Connection) -> None:
                 medio      TEXT NOT NULL,
                 monto      REAL NOT NULL,
                 referencia TEXT DEFAULT '',
-                created_at TEXT DEFAULT (datetime('now'))
+                created_at TEXT DEFAULT (datetime('now','-3 hours'))
             )
             """
         )

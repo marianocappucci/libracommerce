@@ -11,7 +11,7 @@ actividad_log|ts|TEXT|NN|
 actividad_log|usuario|TEXT|NN|'Sistema'
 catalog_items|active|INTEGER|NN|1
 catalog_items|category_id|INTEGER||
-catalog_items|created_at|TEXT|NN|CURRENT_TIMESTAMP
+catalog_items|created_at|TEXT|NN|datetime('now','-3 hours')
 catalog_items|default_cost|NUMERIC|NN|0
 catalog_items|default_sale_price|NUMERIC|NN|0
 catalog_items|description|TEXT|NN|''
@@ -29,7 +29,7 @@ categories|id|INTEGER||
 categories|name|TEXT|NN|
 categories|parent_id|INTEGER||
 commerce_settings|key|TEXT||
-commerce_settings|updated_at|TEXT|NN|CURRENT_TIMESTAMP
+commerce_settings|updated_at|TEXT|NN|datetime('now','-3 hours')
 commerce_settings|value|TEXT|NN|
 item_codes|code_type|TEXT|NN|
 item_codes|code|TEXT|NN|
@@ -53,14 +53,14 @@ item_variants|name|TEXT|NN|
 item_variants|sku|TEXT|NN|
 locations|active|INTEGER|NN|1
 locations|branch_id|INTEGER||
-locations|created_at|TEXT|NN|CURRENT_TIMESTAMP
+locations|created_at|TEXT|NN|datetime('now','-3 hours')
 locations|description|TEXT|NN|''
 locations|id|INTEGER||
 locations|is_default|INTEGER|NN|0
 locations|location_type|TEXT|NN|'warehouse'
 locations|name|TEXT|NN|
 parties|active|INTEGER|NN|1
-parties|created_at|TEXT|NN|CURRENT_TIMESTAMP
+parties|created_at|TEXT|NN|datetime('now','-3 hours')
 parties|display_name|TEXT|NN|
 parties|email|TEXT||
 parties|id|INTEGER||
@@ -70,7 +70,7 @@ parties|phone|TEXT||
 parties|tax_id_type|TEXT||
 parties|tax_id|TEXT||
 price_lists|active|INTEGER|NN|1
-price_lists|created_at|TEXT|NN|CURRENT_TIMESTAMP
+price_lists|created_at|TEXT|NN|datetime('now','-3 hours')
 price_lists|description|TEXT|NN|''
 price_lists|id|INTEGER||
 price_lists|is_default|INTEGER|NN|0
@@ -83,7 +83,7 @@ purchase_order_items|quantity_received|NUMERIC|NN|0
 purchase_order_items|tax_rate|NUMERIC|NN|0
 purchase_order_items|unit_cost|NUMERIC|NN|
 purchase_orders|branch_id|INTEGER||
-purchase_orders|created_at|TEXT|NN|CURRENT_TIMESTAMP
+purchase_orders|created_at|TEXT|NN|datetime('now','-3 hours')
 purchase_orders|created_by|INTEGER||
 purchase_orders|expected_at|TEXT||
 purchase_orders|id|INTEGER||
@@ -99,7 +99,7 @@ purchase_receipt_items|lot_code|TEXT||
 purchase_receipt_items|quantity|NUMERIC|NN|
 purchase_receipt_items|receipt_id|INTEGER|NN|
 purchase_receipt_items|unit_cost|NUMERIC|NN|
-purchase_receipts|created_at|TEXT|NN|CURRENT_TIMESTAMP
+purchase_receipts|created_at|TEXT|NN|datetime('now','-3 hours')
 purchase_receipts|created_by|INTEGER||
 purchase_receipts|document_reference|TEXT||
 purchase_receipts|id|INTEGER||
@@ -120,7 +120,7 @@ sale_items|unit_cost_snapshot|NUMERIC||
 sale_items|unit_price|NUMERIC|NN|
 sale_items|variant_id|INTEGER||
 sale_payments|amount|NUMERIC|NN|
-sale_payments|created_at|TEXT|NN|datetime('now')
+sale_payments|created_at|TEXT|NN|datetime('now','-3 hours')
 sale_payments|id|INTEGER||
 sale_payments|method|TEXT|NN|
 sale_payments|received_amount|NUMERIC||
@@ -128,7 +128,7 @@ sale_payments|reference|TEXT|NN|''
 sale_payments|sale_id|INTEGER|NN|
 sales|branch_id|INTEGER||
 sales|confirmed_at|TEXT||
-sales|created_at|TEXT|NN|CURRENT_TIMESTAMP
+sales|created_at|TEXT|NN|datetime('now','-3 hours')
 sales|created_by|INTEGER||
 sales|customer_name_snapshot|TEXT|NN|''
 sales|customer_party_id|INTEGER||
@@ -145,10 +145,10 @@ sales|status|TEXT|NN|'draft'
 sales|subtotal|NUMERIC|NN|0
 sales|tax_total|NUMERIC|NN|0
 sales|total|NUMERIC|NN|0
-schema_migrations|applied_at|TEXT|NN|CURRENT_TIMESTAMP
+schema_migrations|applied_at|TEXT|NN|datetime('now','-3 hours')
 schema_migrations|name|TEXT|NN|
 schema_migrations|version|INTEGER||
-stock_movements|created_at|TEXT|NN|CURRENT_TIMESTAMP
+stock_movements|created_at|TEXT|NN|datetime('now','-3 hours')
 stock_movements|created_by|INTEGER||
 stock_movements|expires_at|TEXT||
 stock_movements|id|INTEGER||
