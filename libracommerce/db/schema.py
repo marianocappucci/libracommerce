@@ -17,7 +17,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             email TEXT,
             phone TEXT,
             active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT NOT NULL DEFAULT (datetime('now','-3 hours'))
         );
 
         CREATE TABLE IF NOT EXISTS categories (
@@ -50,7 +50,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             default_sale_price NUMERIC NOT NULL DEFAULT 0,
             default_cost NUMERIC NOT NULL DEFAULT 0,
             min_stock NUMERIC NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT NOT NULL DEFAULT (datetime('now','-3 hours'))
         );
 
         CREATE TABLE IF NOT EXISTS item_codes (
@@ -86,7 +86,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             description TEXT NOT NULL DEFAULT '',
             active INTEGER NOT NULL DEFAULT 1,
             is_default INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT NOT NULL DEFAULT (datetime('now','-3 hours'))
         );
 
         CREATE UNIQUE INDEX IF NOT EXISTS idx_price_lists_one_default
@@ -116,7 +116,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             active INTEGER NOT NULL DEFAULT 1,
             description TEXT NOT NULL DEFAULT '',
             is_default INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT NOT NULL DEFAULT (datetime('now','-3 hours'))
         );
 
         CREATE TABLE IF NOT EXISTS stock_movements (
@@ -135,7 +135,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             note TEXT NOT NULL DEFAULT '',
             created_by INTEGER,
             reason_code TEXT,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT NOT NULL DEFAULT (datetime('now','-3 hours'))
         );
 
         CREATE INDEX IF NOT EXISTS idx_stock_item_location
@@ -155,7 +155,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             tax_total NUMERIC NOT NULL DEFAULT 0,
             total NUMERIC NOT NULL DEFAULT 0,
             confirmed_at TEXT,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            created_at TEXT NOT NULL DEFAULT (datetime('now','-3 hours')),
             occurred_on TEXT,
             customer_name_snapshot TEXT NOT NULL DEFAULT '',
             created_by INTEGER,
@@ -190,7 +190,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             amount NUMERIC NOT NULL,
             received_amount NUMERIC,
             reference TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            created_at TEXT NOT NULL DEFAULT (datetime('now','-3 hours')),
             CHECK (amount > 0),
             CHECK (received_amount IS NULL OR received_amount >= amount)
         );
@@ -208,7 +208,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             expected_at TEXT,
             notes TEXT NOT NULL DEFAULT '',
             created_by INTEGER,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT NOT NULL DEFAULT (datetime('now','-3 hours'))
         );
 
         CREATE TABLE IF NOT EXISTS purchase_order_items (
@@ -232,7 +232,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             received_at TEXT,
             document_reference TEXT,
             created_by INTEGER,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT NOT NULL DEFAULT (datetime('now','-3 hours'))
         );
 
         CREATE TABLE IF NOT EXISTS purchase_receipt_items (
@@ -258,7 +258,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS commerce_settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            updated_at TEXT NOT NULL DEFAULT (datetime('now','-3 hours'))
         );
 
         -- Quien creo, edito o borro que, y que cambio. La escribe

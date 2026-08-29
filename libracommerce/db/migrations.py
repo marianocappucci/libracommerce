@@ -240,6 +240,56 @@ def _migration_0010_add_actividad_log(conn: sqlite3.Connection) -> None:
 
 # Orden fijo: agregar al final, nunca reordenar ni reusar un numero ya
 # asignado (aunque la migracion se haya borrado despues).
+#: Las 11 columnas con reloj de este esquema, como estaban al escribir esta
+#: migracion. Una tabla que nazca despues ya viene con el DEFAULT nuevo desde el
+#: `CREATE TABLE`, y la suite lo vigila
+#: (`tests/test_defaults_en_hora_de_argentina.py`).
+_COLUMNAS_CON_RELOJ = (
+    ("parties", "created_at"),
+    ("catalog_items", "created_at"),
+    ("price_lists", "created_at"),
+    ("locations", "created_at"),
+    ("stock_movements", "created_at"),
+    ("sales", "created_at"),
+    ("sale_payments", "created_at"),
+    ("purchase_orders", "created_at"),
+    ("purchase_receipts", "created_at"),
+    ("commerce_settings", "updated_at"),
+    ("schema_migrations", "applied_at"),
+)
+
+
+def _migration_0011_defaults_en_hora_de_argentina(conn: sqlite3.Connection) -> None:
+    """Los DEFAULT de las columnas con reloj pasan a hora de Argentina.
+
+    La mitad de LibraCommerce del arreglo que LibraCore hizo en su revision
+    `0003`. Este esquema tenia dos formas del mismo defecto:
+
+    - `DEFAULT CURRENT_TIMESTAMP`, que en SQLite es UTC y que en PostgreSQL sale
+      de la zona de la sesion **con microsegundos y offset pegados**
+      (`2026-08-20 12:21:51.314616+00`), o sea ni siquiera el mismo texto que
+      guardan las columnas equivalentes del motor;
+    - `datetime('now')` en `sales`, que es UTC en los dos.
+
+    Las dos pasan a `datetime('now','-3 hours')`: mismo offset fijo que
+    `_ar_now()` y mismo formato, byte por byte, que el resto de la familia.
+
+    🔴 **Sobre una base que ya existe el `CREATE TABLE IF NOT EXISTS` no cambia
+    ningun DEFAULT** -- es un no-op silencioso, la razon por la que existe este
+    modulo. Por eso el arreglo del `schema.py` necesita esta migracion al lado.
+
+    En SQLite no hay `ALTER COLUMN ... SET DEFAULT`: alla el helper devuelve
+    lista vacia y el DEFAULT nuevo llega al crear la tabla, no al migrarla.
+
+    ⚠️ No toca las filas ya escritas: quedan 3 h adelantadas y hay una
+    discontinuidad a partir de aca. Decision del humano el 2026-08-29.
+    """
+    from libracore.db.schema import alters_para_hora_ar
+
+    for sentencia in alters_para_hora_ar(conn, _COLUMNAS_CON_RELOJ):
+        conn.execute(sentencia)
+
+
 _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "add_variant_id_to_stock_movements_and_sale_items", _migration_0001_add_variant_id),
     (2, "add_min_stock_and_location_defaults", _migration_0002_add_min_stock_and_location_defaults),
@@ -252,6 +302,7 @@ _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (8, "add_sale_payments", _migration_0008_add_sale_payments),
     (9, "add_commerce_settings", _migration_0009_add_commerce_settings),
     (10, "add_actividad_log", _migration_0010_add_actividad_log),
+    (11, "defaults_en_hora_de_argentina", _migration_0011_defaults_en_hora_de_argentina),
 ]
 
 
@@ -261,7 +312,7 @@ def run_migrations(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS schema_migrations (
             version INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
-            applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            applied_at TEXT NOT NULL DEFAULT (datetime('now','-3 hours'))
         )
         """
     )
