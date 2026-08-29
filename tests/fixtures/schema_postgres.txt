@@ -11,7 +11,7 @@ actividad_log|ts|text|NN|
 actividad_log|usuario|text|NN|'Sistema'::text
 catalog_items|active|integer|NN|1
 catalog_items|category_id|integer||
-catalog_items|created_at|text|NN|CURRENT_TIMESTAMP
+catalog_items|created_at|text|NN|to_char(((CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text) + '-03:00:00'::interval), 'YYYY-MM-DD HH24:MI:SS'::text)
 catalog_items|default_cost|numeric|NN|0
 catalog_items|default_sale_price|numeric|NN|0
 catalog_items|description|text|NN|''::text
@@ -29,7 +29,7 @@ categories|id|bigint|NN|nextval('categories_id_seq'::regclass)
 categories|name|text|NN|
 categories|parent_id|integer||
 commerce_settings|key|text|NN|
-commerce_settings|updated_at|text|NN|CURRENT_TIMESTAMP
+commerce_settings|updated_at|text|NN|to_char(((CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text) + '-03:00:00'::interval), 'YYYY-MM-DD HH24:MI:SS'::text)
 commerce_settings|value|text|NN|
 item_codes|code_type|text|NN|
 item_codes|code|text|NN|
@@ -53,14 +53,14 @@ item_variants|name|text|NN|
 item_variants|sku|text|NN|
 locations|active|integer|NN|1
 locations|branch_id|integer||
-locations|created_at|text|NN|CURRENT_TIMESTAMP
+locations|created_at|text|NN|to_char(((CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text) + '-03:00:00'::interval), 'YYYY-MM-DD HH24:MI:SS'::text)
 locations|description|text|NN|''::text
 locations|id|bigint|NN|nextval('locations_id_seq'::regclass)
 locations|is_default|integer|NN|0
 locations|location_type|text|NN|'warehouse'::text
 locations|name|text|NN|
 parties|active|integer|NN|1
-parties|created_at|text|NN|CURRENT_TIMESTAMP
+parties|created_at|text|NN|to_char(((CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text) + '-03:00:00'::interval), 'YYYY-MM-DD HH24:MI:SS'::text)
 parties|display_name|text|NN|
 parties|email|text||
 parties|id|bigint|NN|nextval('parties_id_seq'::regclass)
@@ -70,7 +70,7 @@ parties|phone|text||
 parties|tax_id_type|text||
 parties|tax_id|text||
 price_lists|active|integer|NN|1
-price_lists|created_at|text|NN|CURRENT_TIMESTAMP
+price_lists|created_at|text|NN|to_char(((CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text) + '-03:00:00'::interval), 'YYYY-MM-DD HH24:MI:SS'::text)
 price_lists|description|text|NN|''::text
 price_lists|id|bigint|NN|nextval('price_lists_id_seq'::regclass)
 price_lists|is_default|integer|NN|0
@@ -83,7 +83,7 @@ purchase_order_items|quantity_received|numeric|NN|0
 purchase_order_items|tax_rate|numeric|NN|0
 purchase_order_items|unit_cost|numeric|NN|
 purchase_orders|branch_id|integer||
-purchase_orders|created_at|text|NN|CURRENT_TIMESTAMP
+purchase_orders|created_at|text|NN|to_char(((CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text) + '-03:00:00'::interval), 'YYYY-MM-DD HH24:MI:SS'::text)
 purchase_orders|created_by|integer||
 purchase_orders|expected_at|text||
 purchase_orders|id|bigint|NN|nextval('purchase_orders_id_seq'::regclass)
@@ -99,7 +99,7 @@ purchase_receipt_items|lot_code|text||
 purchase_receipt_items|quantity|numeric|NN|
 purchase_receipt_items|receipt_id|integer|NN|
 purchase_receipt_items|unit_cost|numeric|NN|
-purchase_receipts|created_at|text|NN|CURRENT_TIMESTAMP
+purchase_receipts|created_at|text|NN|to_char(((CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text) + '-03:00:00'::interval), 'YYYY-MM-DD HH24:MI:SS'::text)
 purchase_receipts|created_by|integer||
 purchase_receipts|document_reference|text||
 purchase_receipts|id|bigint|NN|nextval('purchase_receipts_id_seq'::regclass)
@@ -120,7 +120,7 @@ sale_items|unit_cost_snapshot|numeric||
 sale_items|unit_price|numeric|NN|
 sale_items|variant_id|integer||
 sale_payments|amount|numeric|NN|
-sale_payments|created_at|text|NN|to_char((CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text), 'YYYY-MM-DD HH24:MI:SS'::text)
+sale_payments|created_at|text|NN|to_char(((CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text) + '-03:00:00'::interval), 'YYYY-MM-DD HH24:MI:SS'::text)
 sale_payments|id|bigint|NN|nextval('sale_payments_id_seq'::regclass)
 sale_payments|method|text|NN|
 sale_payments|received_amount|numeric||
@@ -128,7 +128,7 @@ sale_payments|reference|text|NN|''::text
 sale_payments|sale_id|integer|NN|
 sales|branch_id|integer||
 sales|confirmed_at|text||
-sales|created_at|text|NN|CURRENT_TIMESTAMP
+sales|created_at|text|NN|to_char(((CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text) + '-03:00:00'::interval), 'YYYY-MM-DD HH24:MI:SS'::text)
 sales|created_by|integer||
 sales|customer_name_snapshot|text|NN|''::text
 sales|customer_party_id|integer||
@@ -145,10 +145,10 @@ sales|status|text|NN|'draft'::text
 sales|subtotal|numeric|NN|0
 sales|tax_total|numeric|NN|0
 sales|total|numeric|NN|0
-schema_migrations|applied_at|text|NN|CURRENT_TIMESTAMP
+schema_migrations|applied_at|text|NN|to_char(((CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text) + '-03:00:00'::interval), 'YYYY-MM-DD HH24:MI:SS'::text)
 schema_migrations|name|text|NN|
 schema_migrations|version|integer|NN|
-stock_movements|created_at|text|NN|CURRENT_TIMESTAMP
+stock_movements|created_at|text|NN|to_char(((CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text) + '-03:00:00'::interval), 'YYYY-MM-DD HH24:MI:SS'::text)
 stock_movements|created_by|integer||
 stock_movements|expires_at|text||
 stock_movements|id|bigint|NN|nextval('stock_movements_id_seq'::regclass)

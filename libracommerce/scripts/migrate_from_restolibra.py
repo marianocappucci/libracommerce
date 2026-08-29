@@ -84,8 +84,8 @@ def _repoint_recetas_fk(conn: sqlite3.Connection) -> bool:
                 rendimiento_pct REAL NOT NULL DEFAULT 100,
                 activo          INTEGER NOT NULL DEFAULT 1,
                 notas           TEXT DEFAULT '',
-                created_at      TEXT DEFAULT (datetime('now')),
-                updated_at      TEXT DEFAULT (datetime('now'))
+                created_at      TEXT DEFAULT (datetime('now','-3 hours')),
+                updated_at      TEXT DEFAULT (datetime('now','-3 hours'))
             )
             """
         )
@@ -116,7 +116,7 @@ def _repoint_receta_items_fk(conn: sqlite3.Connection) -> bool:
                 receta_id      INTEGER NOT NULL REFERENCES recetas(id) ON DELETE CASCADE,
                 ingrediente_id INTEGER NOT NULL REFERENCES catalog_items(id) ON DELETE CASCADE,
                 cantidad       REAL NOT NULL DEFAULT 0,
-                created_at     TEXT DEFAULT (datetime('now'))
+                created_at     TEXT DEFAULT (datetime('now','-3 hours'))
             )
             """
         )
@@ -156,8 +156,8 @@ def _repoint_pedidos_venta_fk(conn: sqlite3.Connection) -> bool:
                 costo_envio    REAL NOT NULL DEFAULT 0,
                 observaciones  TEXT DEFAULT '',
                 venta_id       INTEGER REFERENCES sales(id) ON DELETE SET NULL,
-                created_at     TEXT DEFAULT (datetime('now')),
-                updated_at     TEXT DEFAULT (datetime('now')),
+                created_at     TEXT DEFAULT (datetime('now','-3 hours')),
+                updated_at     TEXT DEFAULT (datetime('now','-3 hours')),
                 hora_retiro    TEXT DEFAULT ''
             )
             """
@@ -196,8 +196,8 @@ def _repoint_comandas_fk(conn: sqlite3.Connection) -> bool:
                 estacion   TEXT NOT NULL,
                 numero     INTEGER NOT NULL DEFAULT 0,
                 estado     TEXT NOT NULL DEFAULT 'pendiente',
-                created_at TEXT DEFAULT (datetime('now')),
-                updated_at TEXT DEFAULT (datetime('now')),
+                created_at TEXT DEFAULT (datetime('now','-3 hours')),
+                updated_at TEXT DEFAULT (datetime('now','-3 hours')),
                 preparacion_at TEXT,
                 listo_at TEXT,
                 entregado_at TEXT
@@ -244,7 +244,7 @@ def _repoint_pedido_items_fk(conn: sqlite3.Connection) -> bool:
                 estacion    TEXT DEFAULT '',
                 nota        TEXT DEFAULT '',
                 estado      TEXT NOT NULL DEFAULT 'nuevo',
-                created_at  TEXT DEFAULT (datetime('now')),
+                created_at  TEXT DEFAULT (datetime('now','-3 hours')),
                 modificadores TEXT DEFAULT ''
             )
             """
