@@ -67,7 +67,6 @@ from libracommerce.domain.entities import Party, PartyType
 from libracommerce.domain.inventory import Location, StockMovement, StockMovementType
 from libracommerce.domain.sales import Sale, SaleItem, SaleStatus
 
-
 _STOCK_MOVEMENT_TYPE_MAP = {
     "venta": StockMovementType.SALE,
     "anulacion": StockMovementType.RETURN,

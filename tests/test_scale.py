@@ -8,7 +8,6 @@ from libracommerce.domain.scale import (
     parse_scale_barcode,
 )
 
-
 PESO = ScaleFormat()  # 20 + 5 codigo + 5 gramos + checksum
 IMPORTE = ScaleFormat(value_kind=ScaleValueKind.AMOUNT, divisor=100)
 
