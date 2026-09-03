@@ -1,7 +1,8 @@
+from collections.abc import Sequence
 from contextlib import AbstractContextManager
 from datetime import datetime
 from decimal import Decimal
-from typing import Protocol, Sequence
+from typing import Protocol
 
 from libracommerce.domain.catalog import (
     CatalogItem,

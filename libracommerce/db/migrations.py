@@ -24,7 +24,7 @@ Cada migracion:
   vieja real (donde efectivamente altera el esquema).
 """
 import sqlite3
-from typing import Callable
+from collections.abc import Callable
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:

@@ -27,7 +27,7 @@ from libracommerce.domain.purchasing import (
     PurchaseReceiptItem,
     PurchaseReceiptStatus,
 )
-from libracommerce.domain.sales import Sale, SaleItem, SaleStatus, SalePayment
+from libracommerce.domain.sales import Sale, SaleItem, SalePayment, SaleStatus
 
 
 @pytest.fixture
