@@ -21,7 +21,8 @@ en el cutover real de Fase 4.
 import sqlite3
 from decimal import Decimal
 
-from libracommerce.scripts.verify_contalibra_migration import VerificationReport, verify as _verify_base
+from libracommerce.scripts.verify_contalibra_migration import VerificationReport
+from libracommerce.scripts.verify_contalibra_migration import verify as _verify_base
 
 
 def verify(conn: sqlite3.Connection) -> VerificationReport:

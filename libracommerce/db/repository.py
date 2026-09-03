@@ -1,10 +1,10 @@
 import json
 import sqlite3
+from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
-from typing import Sequence
 
 from libracommerce.domain.catalog import (
     CatalogItem,

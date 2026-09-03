@@ -23,7 +23,6 @@ from libracommerce.usecases.presets import (
     leer_rubro,
 )
 
-
 # ── La promesa: sugieren, no validan ─────────────────────────────────────
 
 

@@ -53,6 +53,8 @@ from dataclasses import dataclass
 
 from libracommerce.scripts.migrate_from_contalibra import (
     MigrationReport,
+)
+from libracommerce.scripts.migrate_from_contalibra import (
     migrate as _migrate_base,
 )
 

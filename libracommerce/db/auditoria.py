@@ -37,10 +37,10 @@ producto que migre de uno al otro no cambia ni el frontend ni el endpoint.
 """
 import json
 import sqlite3
+from collections.abc import Callable
 from dataclasses import fields, is_dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Callable
 
 CREAR = "crear"
 EDITAR = "editar"

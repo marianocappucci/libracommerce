@@ -6,7 +6,7 @@ import pytest
 from libracommerce.domain.catalog import CatalogItem, CatalogItemType, ItemPrice, ItemVariant, Unit
 from libracommerce.domain.entities import Party, PartyRole, PartyType
 from libracommerce.domain.inventory import Location, StockMovement, StockMovementType
-from libracommerce.domain.sales import Sale, SaleItem, SaleStatus, SalePayment
+from libracommerce.domain.sales import Sale, SaleItem, SalePayment, SaleStatus
 
 
 def test_party_and_catalog_item_are_product_agnostic():
