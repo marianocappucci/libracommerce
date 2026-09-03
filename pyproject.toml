@@ -115,8 +115,8 @@ omit = ["*/tests/*", "*/migrations/*", "*/.venv/*", "*/__main__.py"]
 show_missing = true
 skip_covered = false
 # Piso de cobertura. Es un TRINQUETE, no una meta: se fijo 2 puntos por
-# debajo de lo que el repo media el 2026-07-31 (91%), asi que hoy pasa
+# debajo de lo que el repo mide (92%, medido el 2026-09-03), asi que hoy pasa
 # holgado y lo unico que puede ponerlo en rojo es una regresion. Cuando la
 # cobertura suba de verdad, subir tambien este numero -- nunca bajarlo para
 # que pase un cambio.
-fail_under = 89
+fail_under = 90
