@@ -1,0 +1,28 @@
+name: Bump de motores
+
+# Llama al workflow reusable de libra-web-kit, que abre un PR de bump por cada
+# motor de la familia cuyo tag publicado sea mas nuevo que el pin de este repo.
+# La logica vive alla, en un solo lugar; aca solo el disparo.
+#
+# F3 (2026-09-05): este repo es un MOTOR que consume otros motores. Hasta hoy
+# libra-bump cubria producto <- motor y no motor <- motor, asi que este repo
+# corria su suite contra una version del motor que ningun producto usaba ya
+# (medido: 23 minors de atraso en libracommerce, 24 en libraedge, 4 en
+# libra-web-kit). Un cambio del motor que lo rompa se veia en el producto, no aca.
+
+on:
+  schedule:
+    # Diario, temprano en Argentina (UTC-3): 06:17 = 09:17 local. El minuto no
+    # es redondo a proposito, para no caer en el pico de schedules de GitHub.
+    - cron: "17 6 * * *"
+  # Para no esperar al cron cuando se acaba de publicar un motor.
+  workflow_dispatch:
+
+jobs:
+  bump:
+    uses: marianocappucci/libra-web-kit/.github/workflows/bump-motores.yml@main
+    permissions:
+      contents: write
+      pull-requests: write
+    # Pasa los secrets de este repo (la clave de la App libra-bump) al reusable.
+    secrets: inherit
