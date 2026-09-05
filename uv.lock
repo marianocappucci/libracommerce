@@ -525,7 +525,7 @@ offline-server = [
 
 [package.metadata]
 requires-dist = [
-    { name = "libracore", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libracore.git?rev=v1.60.1" },
+    { name = "libracore", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libracore.git?rev=v1.84.0" },
     { name = "libraedge", marker = "extra == 'offline'", git = "https://github.com/marianocappucci/libraedge.git?rev=develop" },
     { name = "libraedge", extras = ["server"], marker = "extra == 'offline-server'", git = "https://github.com/marianocappucci/libraedge.git?rev=develop" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
@@ -536,8 +536,8 @@ provides-extras = ["dev", "offline", "offline-server"]
 
 [[package]]
 name = "libracore"
-version = "1.60.1"
-source = { git = "https://github.com/marianocappucci/libracore.git?rev=v1.60.1#57f36afe08b4c83f554c86a7e64cc47627023ccd" }
+version = "1.84.0"
+source = { git = "https://github.com/marianocappucci/libracore.git?rev=v1.84.0#9a60ad14d5962042b200990200efe30acf838641" }
 dependencies = [
     { name = "cryptography" },
     { name = "fastapi" },
@@ -547,6 +547,7 @@ dependencies = [
     { name = "jinja2" },
     { name = "pillow" },
     { name = "psycopg", extra = ["binary"] },
+    { name = "pydantic" },
     { name = "python-multipart" },
     { name = "qrcode" },
     { name = "starlette" },
