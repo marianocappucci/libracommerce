@@ -17,7 +17,8 @@ Reglas de la capa (P9, `wiki/analyses/migracion-p9-capa-comercial-libracommerce.
   `libracommerce.erp.hooks` se puede importar sin el extra para tipar un gancho
   del lado del producto.
 
-M0 deja los contratos; M1..M4 traen los casos de uso.
+M0 dejó los contratos; M1 (2026-09-06) trae `catalogo` y `stock`, con sus
+factories en `libracommerce.web.catalogo_router`.
 """
 
 from .hooks import SIN_GANCHOS, GanchoDeVenta, Hooks, Insumo, ListaDePrecioPara, ResolverReceta

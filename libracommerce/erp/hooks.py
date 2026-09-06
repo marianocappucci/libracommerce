@@ -7,13 +7,11 @@ distingue a un producto del otro en el núcleo comercial entra por uno de estos
 ganchos, con un default que es el comportamiento de Contalibra (el producto
 de referencia, con cliente real).
 
-Los ganchos se fijan acá, antes de que exista el primer caso de uso que los
-llame (M0 del plan), para que M1..M4 los consuman en vez de inventarlos sobre
-la marcha. Cada uno nombra el caso real que lo motiva:
+Cada uno nombra el caso real que lo motiva:
 
 | Gancho | Quién lo necesita hoy | Para qué |
 |---|---|---|
-| `resolver_receta` | Restolibra | descontar los insumos de la receta en vez del plato (`db_stock.descontar_stock_venta`) |
+| `resolver_receta` | Restolibra | descontar los insumos de la receta en vez del plato (`erp.stock.descontar_stock_venta`) |
 | `al_confirmar_venta` / `al_anular_venta` | Restolibra, Contalibra | marcar el pedido cobrado y liberar la mesa; `venta_links`, integraciones, outbox de LibraEdge |
 | `lista_de_precio_para` | Contalibra | la lista mayorista asignada al cliente (`cliente_lista_precio`) |
 | `canales` | Restolibra | mostrador y delivery como canales del reporte de ventas |
@@ -25,13 +23,12 @@ stock, pagos, caja, turno **y lo que el producto enganchó**, juntos. Un gancho
 que abriera su propia conexión rompería eso sin que ningún test lo viera.
 
 `venta` se tipa como `Any` a propósito hasta M3, que es donde el caso de uso de
-venta define qué objeto pasa. Fijar acá una forma que M3 va a cambiar sería la
-abstracción especulativa que la regla de consolidación prohíbe.
+venta define qué objeto pasa.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Protocol
@@ -40,17 +37,21 @@ from typing import Any, Protocol
 @dataclass(frozen=True)
 class Insumo:
     """Una línea de receta resuelta: qué ítem del catálogo se descuenta y cuánto
-    por unidad vendida."""
+    por unidad vendida (con los modificadores del pedido ya aplicados)."""
 
     item_id: int
     cantidad: Decimal
 
 
 class ResolverReceta(Protocol):
-    """Dado un ítem vendido, sus insumos — o `None` si el ítem no tiene receta y
-    se descuenta él mismo. El default devuelve `None` siempre."""
+    """Dado un ítem vendido —su id y la línea de venta entera, que en Restolibra
+    trae los `modificadores` del pedido—, sus insumos; o `None` si el ítem no
+    tiene receta y se descuenta él mismo. El default devuelve `None` siempre.
 
-    def __call__(self, item_id: int) -> Sequence[Insumo] | None: ...
+    M1 (2026-09-06) le agregó la línea al contrato: el gancho de M0 recibía
+    sólo el id y no había forma de aplicar "sin cheddar" / "doble medallón"."""
+
+    def __call__(self, item_id: int, item: Mapping[str, Any]) -> Sequence[Insumo] | None: ...
 
 
 class GanchoDeVenta(Protocol):
@@ -65,7 +66,7 @@ class ListaDePrecioPara(Protocol):
     def __call__(self, conn: Any, cliente_id: int | None) -> int | None: ...
 
 
-def _sin_receta(item_id: int) -> None:
+def _sin_receta(item_id: int, item: Mapping[str, Any]) -> None:
     return None
 
 
