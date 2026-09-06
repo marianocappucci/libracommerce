@@ -20,7 +20,7 @@ from libracommerce.erp import SIN_GANCHOS, Hooks, Insumo
 
 
 def test_los_defaults_no_hacen_nada():
-    assert SIN_GANCHOS.resolver_receta(7) is None
+    assert SIN_GANCHOS.resolver_receta(7, {}) is None
     assert SIN_GANCHOS.al_confirmar_venta("conn", "venta") is None
     assert SIN_GANCHOS.al_anular_venta("conn", "venta") is None
     assert SIN_GANCHOS.lista_de_precio_para("conn", 3) is None
@@ -38,13 +38,15 @@ def test_un_gancho_enganchado_recibe_la_misma_conexion_y_la_venta():
     def al_confirmar(c, v):
         recibido["conn"], recibido["venta"] = c, v
 
-    def receta(item_id):
+    def receta(item_id, item):
+        # La línea entera llega al gancho: es donde viajan los modificadores.
+        assert item == {"modificadores": "doble"}
         return [Insumo(item_id=100 + item_id, cantidad=Decimal("0.250"))]
 
     ganchos = Hooks(al_confirmar_venta=al_confirmar, resolver_receta=receta, canales=("mostrador", "delivery"))
     ganchos.al_confirmar_venta(conn, venta)
     assert recibido["conn"] is conn and recibido["venta"] is venta
-    assert ganchos.resolver_receta(5) == [Insumo(item_id=105, cantidad=Decimal("0.250"))]
+    assert ganchos.resolver_receta(5, {"modificadores": "doble"}) == [Insumo(item_id=105, cantidad=Decimal("0.250"))]
     assert ganchos.canales == ("mostrador", "delivery")
     # Los que no se engancharon siguen con el default.
     assert ganchos.al_anular_venta(conn, venta) is None
