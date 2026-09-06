@@ -35,9 +35,16 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
   (`verificar_disponibilidad`, `transfer_stock`, error `StockInsuficienteError`),
   `purchasing` (`confirm_purchase_receipt`) y `presets`.
 - **`db/`** — un adaptador de persistencia concreto: `repository`
-  (`SqliteCommerceRepository`), `schema` (`init_schema`), `migrations` (cadena de
-  migraciones incrementales `_migration_0001…0009`) y `auditoria`
-  (`RepositorioAuditado`, `ActividadRepository`).
+  (`SqliteCommerceRepository`), `schema` (`init_schema`), `migrations` (la cadena
+  numerada `_migration_0001…0011`, **congelada** desde P9-M0: ver "Migraciones") y
+  `auditoria` (`RepositorioAuditado`, `ActividadRepository`).
+- **`migrations/`** — la cadena de Alembic del motor, adentro del paquete para
+  viajar en el wheel; se aplica con `libracommerce-migrar` (`migrar.py`).
+- **`erp/`** (extra `[erp]`) — los casos de uso comerciales que cruzan a LibraCore
+  en la misma transacción (venta con pagos, caja, turno y cuenta corriente), y
+  `erp.hooks`, los puntos de extensión tipados que un producto engancha.
+- **`web/`** (extra `[web]`) — factories de router FastAPI, `build_<modulo>_router(...)`,
+  que el producto monta con `include_router`.
 - **`adapters/`** e **`integrations/`** — puentes hacia afuera: `adapters/
   contalibra` lee datos del schema legado de Contalibra; `integrations/libraedge`
   traduce una venta confirmada a una operación de sincronización del nodo edge
@@ -76,3 +83,41 @@ migración se corren puntualmente durante una adopción.
 - `README.md`, `docs/` — alcance y documentación del paquete.
 - Wiki: entidad `libracommerce`, `concepts/estandares-desarrollo`, y la auditoría
   `auditoria-estructural-familia-libra-2026-09`.
+
+## Migraciones
+
+Desde P9-M0 (2026-09-06) el schema evoluciona con **Alembic**, como los otros
+motores y los ocho productos. La cadena vive en `libracommerce/migrations/` y
+viaja en el wheel; un consumidor la aplica con:
+
+    libracommerce-migrar upgrade --prefijo <producto>
+
+El destino es la base **del dominio** del producto (`<PREFIJO>_DATABASE_URL` y
+sus nombres históricos vía `url_de_instancia`), que es donde viven las tablas
+de este motor en los cuatro consumidores; nunca la base separada de LibraCore.
+La tabla de versión es **`alembic_version_libracommerce`**, porque en
+Contalibra y Restolibra `alembic_version` a secas ya es de LibraCore en la
+misma base.
+
+La revisión `0001_baseline_commerce` llama a `init_schema()`, que es idempotente
+y corre por dentro la cadena numerada vieja (`db/migrations.py`,
+`schema_migrations`). Esa cadena queda **congelada**: todo cambio de schema
+posterior es una revisión de Alembic nueva, escrita a mano (no hay
+`target_metadata`) y ejecutada con `conexion_libracore(op.get_bind())` para que
+hable los dos motores. Las instancias vivas **se migran, no se estampan**: el
+`upgrade` reaplica lo que ya está, agrega lo que falte y registra la versión.
+
+## Capas ERP y web (P9)
+
+El plan P9 (`wiki/analyses/migracion-p9-capa-comercial-libracommerce.md`) mueve
+a este motor la orquestación comercial que Contalibra y Restolibra tenían
+duplicada. `usecases/` sigue puro; lo que cruza a LibraCore va en `erp/` (extra
+`[erp]`), y la API en `web/` (extra `[web]`) como factories de router. Reglas:
+
+- Un caso de uso de `erp/` recibe la conexión abierta y nunca abre una propia
+  ni decide el commit: la atomicidad es del llamador.
+- La variación entre productos entra por `erp.hooks.Hooks` (`resolver_receta`,
+  `al_confirmar_venta`, `al_anular_venta`, `lista_de_precio_para`, `canales`),
+  con defaults que son el comportamiento de Contalibra. **Sin `if producto`.**
+- Lo financiero (caja, cuenta corriente, tesorería, clientes, logs) sigue en
+  LibraCore; este motor lo llama, no lo reemplaza.
