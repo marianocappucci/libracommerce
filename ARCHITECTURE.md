@@ -40,11 +40,14 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
   `auditoria` (`RepositorioAuditado`, `ActividadRepository`).
 - **`migrations/`** — la cadena de Alembic del motor, adentro del paquete para
   viajar en el wheel; se aplica con `libracommerce-migrar` (`migrar.py`).
-- **`erp/`** (extra `[erp]`) — los casos de uso comerciales que cruzan a LibraCore
-  en la misma transacción (venta con pagos, caja, turno y cuenta corriente), y
-  `erp.hooks`, los puntos de extensión tipados que un producto engancha.
-- **`web/`** (extra `[web]`) — factories de router FastAPI, `build_<modulo>_router(...)`,
-  que el producto monta con `include_router`.
+- **`erp/`** (extra `[erp]`) — los casos de uso comerciales: `catalogo` (productos,
+  categorías, depósitos, transferencias) y `stock` (ledger de movimientos, ajustes,
+  descuento por venta con el gancho de recetas), ambos con la conexión como primer
+  parámetro; y `erp.hooks`, los puntos de extensión tipados que un producto engancha.
+- **`web/`** (extra `[web]`) — factories de router FastAPI que el producto monta con
+  `include_router` y gatea él: `catalogo_router` (`build_productos_router`,
+  `build_depositos_router`, `build_stock_router`, con `OpcionesCatalogo`/`OpcionesStock`
+  para lo que varía por producto).
 - **`adapters/`** e **`integrations/`** — puentes hacia afuera: `adapters/
   contalibra` lee datos del schema legado de Contalibra; `integrations/libraedge`
   traduce una venta confirmada a una operación de sincronización del nodo edge
