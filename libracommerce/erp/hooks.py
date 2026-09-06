@@ -22,8 +22,10 @@ fijó como no negociable: si algo falla, el rollback revierte venta, líneas,
 stock, pagos, caja, turno **y lo que el producto enganchó**, juntos. Un gancho
 que abriera su propia conexión rompería eso sin que ningún test lo viera.
 
-`venta` se tipa como `Any` a propósito hasta M3, que es donde el caso de uso de
-venta define qué objeto pasa.
+`venta` es el dict de `erp.ventas.obtener_venta` (id, numero, estado, items,
+pagos, turno_id, ...), leído con la misma conexión. `al_confirmar_venta` corre
+cuando la venta llega a `cobrada` —al nacer cobrada, o al acreditarse el QR—;
+`al_anular_venta`, después de reponer stock y revertir la caja.
 """
 
 from __future__ import annotations
