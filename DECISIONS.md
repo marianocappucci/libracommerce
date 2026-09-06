@@ -74,3 +74,46 @@ wiki (entidad `libracommerce`).
   visibles (`listar_rubros`, `preset_de`, `fijar_rubro`).
 - Consecuencias: un comercio nuevo arranca con una configuración razonable de su
   rubro; sigue siendo editable.
+
+## ADR-007 — La cadena de schema es de Alembic y viaja en el wheel (P9-M0, 2026-09-06)
+
+**Contexto.** El motor tenía una cadena numerada propia (`db/migrations.py`,
+tabla `schema_migrations`) que corría adentro de `init_schema()` en cada
+arranque. Era el único mecanismo de schema de la familia que no era Alembic
+(F6.2 del plan de septiembre), y nadie podía invocarlo *antes* de levantar la
+app nueva: el `panel_admin.py actualizar` de los consumidores declara
+`migraciones=(...)` como comandos, y este motor no aparecía.
+
+**Decisión.** `libracommerce/migrations/` con Alembic, adentro del paquete
+(espejo de LibraCore `v1.53.0`), console script `libracommerce-migrar`, tabla de
+versión `alembic_version_libracommerce`. La baseline llama a `init_schema()`;
+la cadena numerada queda congelada y sostenida por el gate de
+`test_schema_congelado.py`. El destino se resuelve a la base **del dominio** del
+producto, y un prefijo que no resuelve falla en vez de caer a `DATABASE_URL`.
+
+**Consecuencias.** Un mecanismo de schema por base en vez de tres. Los
+consumidores agregan `("libracommerce-migrar", "upgrade", "--prefijo", "<p>")`
+a `migraciones` y al `command:` de su compose de dev, y pinean el extra
+`[migrations]`. `init_schema()` sigue corriendo en el arranque (es idempotente),
+así que una instancia sin migrar no se rompe: sólo se queda sin la versión
+registrada hasta el primer deploy que corra el comando.
+
+## ADR-008 — Capas `erp` y `web` con extras, y variación por ganchos (P9-M0, 2026-09-06)
+
+**Contexto.** Contalibra y Restolibra escriben en las tablas de este motor
+desde P7/P8, pero cada uno con su propia orquestación (raw SQL), sus routers y
+sus pantallas: unas 4.900 líneas de backend por producto, divergidas por deriva
+y no por dominio. El humano decidió cerrar el fork consolidando acá.
+
+**Decisión.** Dos subpaquetes detrás de extras, para que el núcleo siga con
+`dependencies = []`: `erp/` (depende de LibraCore; casos de uso que cruzan
+motores en la misma transacción) y `web/` (FastAPI; factories de router con el
+patrón de `libracore.facturas_router`). La variación entre productos entra por
+`erp.hooks.Hooks`, tipada y con defaults = Contalibra. Prohibido `if producto`.
+Verificado que LibraCore no importa este motor en runtime, así que el extra
+`[erp]` no crea un ciclo.
+
+**Consecuencias.** El motor va a triplicar su tamaño durante P9 y hay que
+tratarlo como el producto principal mientras dure. Cada módulo (M1..M4) entra
+con tres PR —motor, libra-ui, adopción— y el gate es la suite de cada producto
+sin tocar.

@@ -20,7 +20,38 @@ license = { text = "Proprietary" }
 dependencies = []
 
 [project.optional-dependencies]
+# P9-M0 (2026-09-06): tres extras nuevos, y el motor sigue con `dependencies = []`.
+#
+# - `migrations`: la cadena de Alembic (`libracommerce-migrar`). Trae LibraCore
+#   porque la baseline corre `init_schema()` a traves de su adaptador de
+#   conexion (es la unica forma de que el DDL hable PostgreSQL) y porque el
+#   destino se resuelve con `url_de_instancia`.
+# - `erp`: los casos de uso comerciales que cruzan a LibraCore (venta con
+#   caja, turno y cuenta corriente). Sin ciclo: LibraCore no importa este
+#   motor en runtime (verificado el 2026-09-06).
+# - `web`: las factories de router (FastAPI), mismo patron que
+#   `libracore.facturas_router`.
+#
+# Los tres pinean el MISMO tag de LibraCore que `dev`: dos pines distintos
+# del mismo paquete en extras que se instalan juntos no resuelven.
+migrations = [
+    "alembic>=1.13,<2",
+    "SQLAlchemy>=2.0,<3",
+    "libracore[migrations] @ git+https://github.com/marianocappucci/libracore.git@v1.84.0",
+]
+erp = [
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.84.0",
+]
+web = [
+    "fastapi>=0.115,<1",
+    "pydantic>=2,<3",
+]
 dev = [
+    # Los tres extras entran a la suite: la cadena se ejercita en
+    # tests/test_migraciones_alembic.py, los contratos en test_erp_hooks.py.
+    "libracommerce[migrations,erp,web]",
+    # Para el test que construye el wheel y lo abre (test_migrar_modulo.py).
+    "build>=1.2",
     "pytest-cov>=6",
     "ruff>=0.13","pytest>=8.0",
     # SOLO PARA TESTS. Este motor no importa libracore en runtime y sigue
@@ -57,6 +88,12 @@ dev = [
 ]
 offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@develop"]
 offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@develop"]
+
+[project.scripts]
+# `migrations/` vive ADENTRO de `libracommerce/` para entrar en el wheel: un
+# consumidor instalado con pip aplica la cadena con este comando, sin clonar
+# nada. Hay un test que abre el wheel construido y lo verifica.
+libracommerce-migrar = "libracommerce.migrar:main"
 
 [tool.hatch.version]
 source = "vcs"
