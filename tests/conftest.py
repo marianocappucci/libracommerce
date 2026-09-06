@@ -70,3 +70,63 @@ def repo(request) -> SqliteCommerceRepository:
         conn.close()
         core._db_path = None
         core._database_url = None
+
+
+# ── Para las factories de router (P9): un `conexion()` como el que pasa un producto ──
+
+from libracommerce.db.repository import SqliteCommerceRepository  # noqa: E402
+from libracommerce.domain.inventory import Location  # noqa: E402
+
+USUARIO = {"id": 7, "username": "cajero"}
+
+
+def _usuario():
+    return USUARIO
+
+
+def _deposito_principal(conn):
+    """Los productos nacen con un depósito default (lo siembra su `init_db`);
+    sin él, un movimiento sin depósito explícito no tiene dónde caer."""
+    SqliteCommerceRepository(conn).save_location(Location(id=None, name="Depósito principal", is_default=True))
+
+
+@pytest.fixture(params=["sqlite", "postgres"])
+def abrir(request, tmp_path):
+    """Un `conexion()` como el que pasa un producto: un context manager que
+    commitea al salir, contra una base con el schema del motor."""
+    if request.param == "sqlite":
+        ruta = str(tmp_path / "erp.db")
+        conn = sqlite3.connect(ruta)
+        init_schema(conn)
+        _deposito_principal(conn)
+        conn.commit()
+        conn.close()
+
+        def _abrir():
+            c = sqlite3.connect(ruta)
+            c.row_factory = sqlite3.Row
+            c.execute("PRAGMA foreign_keys = ON")
+            return c
+
+        yield _abrir
+        return
+
+    from libracore.db import core
+
+    url = url_postgres()
+    core.configure(url)
+    conn = core.get_connection()
+    try:
+        conn.execute("DROP SCHEMA public CASCADE")
+        conn.execute("CREATE SCHEMA public")
+        conn.commit()
+        init_schema(conn)
+        _deposito_principal(conn)
+        conn.commit()
+    finally:
+        conn.close()
+    yield core.get_connection
+    core._db_path = None
+    core._database_url = None
+
+
