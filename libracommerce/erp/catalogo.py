@@ -328,8 +328,10 @@ def get_all_productos(conn, solo_activos: bool = False, q: str = "",
         where.append("ci.item_type=?")
         params.append(_validar_tipo(tipo))
     if q:
-        where.append("(ci.name LIKE ? OR ic.code LIKE ? OR cat.name LIKE ?)")
-        params += [f"%{q}%", f"%{q}%", f"%{q}%"]
+        # Sin distinguir mayúsculas en ningún motor: con `LIKE` a secas PostgreSQL
+        # sí las distingue y `yerba` no encontraba `Yerba` (hallazgo de M2).
+        where.append("(LOWER(ci.name) LIKE ? OR LOWER(ic.code) LIKE ? OR LOWER(cat.name) LIKE ?)")
+        params += [f"%{q.lower()}%"] * 3
     sql = _PRODUCTO_SELECT
     if where:
         sql += " WHERE " + " AND ".join(where)
