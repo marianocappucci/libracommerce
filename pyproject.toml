@@ -32,15 +32,20 @@ dependencies = []
 # - `web`: las factories de router (FastAPI), mismo patron que
 #   `libracore.facturas_router`.
 #
-# Los tres pinean el MISMO tag de LibraCore que `dev`: dos pines distintos
-# del mismo paquete en extras que se instalan juntos no resuelven.
+# `migrations` y `erp` piden libracore POR VERSION y sin URL; la URL (el tag
+# exacto) la pone `dev` para la suite de este repo y cada consumidor para la
+# suya. Asi un producto que pinea otro tag no choca con el extra.
 migrations = [
     "alembic>=1.13,<2",
     "SQLAlchemy>=2.0,<3",
-    "libracore[migrations] @ git+https://github.com/marianocappucci/libracore.git@v1.84.0",
+    # SIN URL a proposito: el consumidor ya pinea libracore por tag, y dos refs de
+    # git distintas para el mismo paquete no resuelven (Contalibra en v1.83.0 contra
+    # un extra que pidiera v1.84.0). El piso es lo que la cadena usa de verdad:
+    # `conexion_libracore` (v1.53.0) y `url_de_instancia`.
+    "libracore[migrations]>=1.53,<2",
 ]
 erp = [
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.84.0",
+    "libracore>=1.53,<2",
 ]
 web = [
     "fastapi>=0.115,<1",
