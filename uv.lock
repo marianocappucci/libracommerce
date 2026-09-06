@@ -525,7 +525,7 @@ offline-server = [
 
 [package.metadata]
 requires-dist = [
-    { name = "libracore", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libracore.git?rev=v1.84.0" },
+    { name = "libracore", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libracore.git?rev=v1.85.0" },
     { name = "libraedge", marker = "extra == 'offline'", git = "https://github.com/marianocappucci/libraedge.git?rev=develop" },
     { name = "libraedge", extras = ["server"], marker = "extra == 'offline-server'", git = "https://github.com/marianocappucci/libraedge.git?rev=develop" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
@@ -536,8 +536,8 @@ provides-extras = ["dev", "offline", "offline-server"]
 
 [[package]]
 name = "libracore"
-version = "1.84.0"
-source = { git = "https://github.com/marianocappucci/libracore.git?rev=v1.84.0#9a60ad14d5962042b200990200efe30acf838641" }
+version = "1.85.0"
+source = { git = "https://github.com/marianocappucci/libracore.git?rev=v1.85.0#46e9dc925ca63b4081c80d7883e7d57a9f2602e5" }
 dependencies = [
     { name = "cryptography" },
     { name = "fastapi" },
