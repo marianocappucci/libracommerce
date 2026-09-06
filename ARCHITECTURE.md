@@ -44,14 +44,22 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
   categorías, depósitos, transferencias), `stock` (ledger de movimientos, ajustes,
   descuento por venta con el gancho de recetas) y `listas_precio` (listas, ítems,
   quiebres por cantidad, ajuste porcentual, importación y el autocompletado del punto
-  de venta), todos con la conexión como primer parámetro; y `erp.hooks`, los puntos
-  de extensión tipados que un producto engancha.
+  de venta) y `ventas` (la venta que cruza los dos motores: `sales`/`sale_items`/
+  `stock_movements` de acá y `ventas_pagos`/`caja_movimientos`/`turnos_caja` de
+  LibraCore en una transacción; la acreditación del QR, la anulación simétrica, los
+  vínculos a factura/remito/MercadoPago y el arqueo del turno), todos con la conexión
+  como primer parámetro —salvo `crear_venta_directa`, que recibe la fábrica porque el
+  reintento por número repetido necesita una transacción nueva—; y `erp.hooks`, los
+  puntos de extensión tipados que un producto engancha (`al_confirmar_venta` /
+  `al_anular_venta` corren dentro de esa transacción).
 - **`web/`** (extra `[web]`) — factories de router FastAPI que el producto monta con
   `include_router` y gatea él: `catalogo_router` (`build_productos_router`,
   `build_depositos_router`, `build_stock_router`, con `OpcionesCatalogo`/`OpcionesStock`
   para lo que varía por producto) y `listas_router` (`build_listas_precio_router`,
   `build_quiebres_router` —lo monta quien tenga el add-on mayorista— y
-  `build_buscar_productos_router`, el `GET /productos/buscar` histórico).
+  `build_buscar_productos_router`, el `GET /productos/buscar` histórico) y
+  `ventas_router` (`build_ventas_router` con `OpcionesVentas`: stock, nombre del
+  cliente y los ganchos; el cobro por QR y la factura desde la venta son de LibraCore).
 - **`adapters/`** e **`integrations/`** — puentes hacia afuera: `adapters/
   contalibra` lee datos del schema legado de Contalibra; `integrations/libraedge`
   traduce una venta confirmada a una operación de sincronización del nodo edge

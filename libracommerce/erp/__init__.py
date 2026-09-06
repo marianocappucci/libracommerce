@@ -18,7 +18,10 @@ Reglas de la capa (P9, `wiki/analyses/migracion-p9-capa-comercial-libracommerce.
   del lado del producto.
 
 M0 dejó los contratos; M1 (2026-09-06) trae `catalogo` y `stock`, con sus
-factories en `libracommerce.web.catalogo_router`.
+factories en `libracommerce.web.catalogo_router`; M2 `listas_precio`; M3
+`ventas` —la venta que cruza los dos motores, con la única excepción a la regla
+de la conexión dicha con su nombre: `crear_venta_directa`, que recibe la fábrica
+porque el reintento por número repetido necesita una transacción nueva—.
 """
 
 from .hooks import SIN_GANCHOS, GanchoDeVenta, Hooks, Insumo, ListaDePrecioPara, ResolverReceta
