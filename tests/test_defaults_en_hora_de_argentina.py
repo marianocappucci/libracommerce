@@ -59,7 +59,11 @@ def test_el_barrido_encuentra_el_ddl():
     assert encontradas >= 20, f"el barrido encontro solo {encontradas} columnas con reloj"
 
 
-@pytest.mark.parametrize("archivo", sorted(_fuentes()), ids=lambda f: f.name)
+@pytest.mark.parametrize("archivo", sorted(_fuentes()),
+                         # Por la ruta y no por el nombre: desde P9-M5 hay dos `schema.py`
+                         # (`db/` y `erp/`) y pytest los desambiguaba con un sufijo 0/1 que
+                         # no dice cual de los dos fallo.
+                         ids=lambda f: str(f.relative_to(RAIZ)))
 def test_ninguna_columna_estampa_una_hora_que_no_sea_la_de_argentina(archivo):
     fuera = defaults_fuera_de_hora_ar(archivo.read_text(encoding="utf-8"))
     assert fuera == [], (

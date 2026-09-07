@@ -143,3 +143,6 @@ duplicada. `usecases/` sigue puro; lo que cruza a LibraCore va en `erp/` (extra
   de dónde salen las ventas lo pide como puerto y este motor lo implementa:
   `erp.reportes.puerto_de_reportes` (M4) para `libracore.reportes_router`, y
   `erp.actividad` para las dos partes del log que leen `sales`/`stock_movements`.
+- **`db/schema.py` corre sobre una base vacía, sin LibraCore.** Por eso el DDL de
+  `venta_links` —la única tabla con FKs a los dos motores— vive en `erp/schema.py`
+  (M5) y lo llama el producto después de los dos `init_*_schema`, no `init_schema()`.

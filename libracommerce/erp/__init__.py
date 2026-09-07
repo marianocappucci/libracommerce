@@ -23,7 +23,9 @@ factories en `libracommerce.web.catalogo_router`; M2 `listas_precio`; M3
 de la conexión dicha con su nombre: `crear_venta_directa`, que recibe la fábrica
 porque el reintento por número repetido necesita una transacción nueva—; M4
 `reportes` y `actividad`, lo que LibraCore pide como puerto cuando la lectura
-depende de dónde viven las ventas.
+depende de dónde viven las ventas; y M5 `schema`, el DDL de `venta_links` —la
+única tabla con claves foráneas a los dos motores, que por eso no puede vivir
+en `db/schema.py`—.
 """
 
 from .hooks import SIN_GANCHOS, GanchoDeVenta, Hooks, Insumo, ListaDePrecioPara, ResolverReceta
