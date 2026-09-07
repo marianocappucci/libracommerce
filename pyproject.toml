@@ -45,7 +45,9 @@ migrations = [
     "libracore[migrations]>=1.53,<2",
 ]
 erp = [
-    "libracore>=1.53,<2",
+    # >=1.87: `libracore.db.logs` con partes componibles y `libracore.reportes`
+    # (P9-M4); `erp.actividad` y `erp.reportes` los usan.
+    "libracore>=1.87,<2",
 ]
 web = [
     "fastapi>=0.115,<1",
@@ -91,7 +93,7 @@ dev = [
     # cuenta en cuenta corriente" terminaba en 202,2 mm en una hoja de 210.
     #
     # Es anterior a v1.37.0 y aquel arreglo no lo cubria.
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.84.0",
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.87.0",
 ]
 offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@develop"]
 offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@develop"]

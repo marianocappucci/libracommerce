@@ -47,7 +47,11 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
   de venta) y `ventas` (la venta que cruza los dos motores: `sales`/`sale_items`/
   `stock_movements` de acá y `ventas_pagos`/`caja_movimientos`/`turnos_caja` de
   LibraCore en una transacción; la acreditación del QR, la anulación simétrica, los
-  vínculos a factura/remito/MercadoPago y el arqueo del turno), todos con la conexión
+  vínculos a factura/remito/MercadoPago y el arqueo del turno), `reportes` (ventas por
+  período, medios de pago, productos más vendidos, stock bajo y resumen sobre
+  `sales`/`sale_items`/`catalog_items`: la implementación del `PuertoDeReportes` de
+  LibraCore para un producto que vende con este motor) y `actividad` (las partes
+  de ventas y stock de la línea de tiempo de `libracore.db.logs`), todos con la conexión
   como primer parámetro —salvo `crear_venta_directa`, que recibe la fábrica porque el
   reintento por número repetido necesita una transacción nueva—; y `erp.hooks`, los
   puntos de extensión tipados que un producto engancha (`al_confirmar_venta` /
@@ -135,4 +139,7 @@ duplicada. `usecases/` sigue puro; lo que cruza a LibraCore va en `erp/` (extra
   `al_confirmar_venta`, `al_anular_venta`, `lista_de_precio_para`, `canales`),
   con defaults que son el comportamiento de Contalibra. **Sin `if producto`.**
 - Lo financiero (caja, cuenta corriente, tesorería, clientes, logs) sigue en
-  LibraCore; este motor lo llama, no lo reemplaza.
+  LibraCore; este motor lo llama, no lo reemplaza. Donde LibraCore necesita saber
+  de dónde salen las ventas lo pide como puerto y este motor lo implementa:
+  `erp.reportes.puerto_de_reportes` (M4) para `libracore.reportes_router`, y
+  `erp.actividad` para las dos partes del log que leen `sales`/`stock_movements`.

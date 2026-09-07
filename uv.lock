@@ -632,9 +632,9 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.115,<1" },
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.115,<1" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
-    { name = "libracore", marker = "extra == 'dev'", specifier = ">=1.53,<2" },
-    { name = "libracore", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libracore.git?rev=v1.84.0" },
-    { name = "libracore", marker = "extra == 'erp'", specifier = ">=1.53,<2" },
+    { name = "libracore", marker = "extra == 'dev'", specifier = ">=1.87,<2" },
+    { name = "libracore", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libracore.git?rev=v1.87.0" },
+    { name = "libracore", marker = "extra == 'erp'", specifier = ">=1.87,<2" },
     { name = "libracore", extras = ["migrations"], marker = "extra == 'dev'", specifier = ">=1.53,<2" },
     { name = "libracore", extras = ["migrations"], marker = "extra == 'migrations'", specifier = ">=1.53,<2" },
     { name = "libraedge", marker = "extra == 'offline'", git = "https://github.com/marianocappucci/libraedge.git?rev=develop" },
@@ -651,8 +651,8 @@ provides-extras = ["dev", "erp", "migrations", "offline", "offline-server", "web
 
 [[package]]
 name = "libracore"
-version = "1.84.0"
-source = { git = "https://github.com/marianocappucci/libracore.git?rev=v1.84.0#9a60ad14d5962042b200990200efe30acf838641" }
+version = "1.87.0"
+source = { git = "https://github.com/marianocappucci/libracore.git?rev=v1.87.0#ef2aeffe18e2f7ab239a105c2b259e2a38105fbb" }
 dependencies = [
     { name = "cryptography" },
     { name = "fastapi" },
