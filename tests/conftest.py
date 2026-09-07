@@ -134,32 +134,19 @@ def abrir(request, tmp_path):
 
 # ── Para ventas (P9-M3): los DOS schemas, como los tiene un producto ─────────
 
-#: El DDL de `venta_links` tal cual lo declaran Contalibra y Restolibra en su
-#: `schema_propio`. El motor lo lee y escribe sin declararlo (hasta M5); la
-#: fixture hace de consumidor.
-VENTA_LINKS_DDL = """
-    CREATE TABLE IF NOT EXISTS venta_links (
-        venta_id      INTEGER PRIMARY KEY REFERENCES sales(id) ON DELETE CASCADE,
-        factura_id    INTEGER REFERENCES facturas(id) ON DELETE SET NULL,
-        remito_id     INTEGER REFERENCES remitos(id) ON DELETE SET NULL,
-        turno_id      INTEGER REFERENCES turnos_caja(id) ON DELETE SET NULL,
-        mp_order_id   TEXT DEFAULT '',
-        mp_payment_id TEXT DEFAULT ''
-    )
-"""
-
-
 def _schema_de_producto(conn):
     """Lo que hace el `init_db` de un producto, en el mismo orden: el core de
-    LibraCore, el comercio, la tabla propia de vínculos, la FK de `ventas_pagos`
-    repuntada a `sales`, y las semillas mínimas (usuario, caja, depósito)."""
+    LibraCore, el comercio, `venta_links` (que desde M5 declara el motor, en
+    `erp.schema`, y el producto llama), la FK de `ventas_pagos` repuntada a
+    `sales`, y las semillas mínimas (usuario, caja, depósito)."""
     from libracore.db.schema import init_core_schema
 
+    from libracommerce.erp.schema import crear_venta_links
     from libracommerce.erp.ventas import repuntar_fk_ventas_pagos
 
     init_core_schema(conn)
     init_schema(conn)
-    conn.execute(VENTA_LINKS_DDL)
+    crear_venta_links(conn)
     conn.commit()
     assert repuntar_fk_ventas_pagos(conn) is True
     assert repuntar_fk_ventas_pagos(conn) is False  # idempotente
