@@ -174,6 +174,105 @@ def test_transferencia_sin_stock_es_422_con_el_texto_para_humanos(client):
     assert "Stock insuficiente en depósito origen" in resp.json()["detail"]
 
 
+# Lo que sigue viene de `tests/test_transferencias_deposito.py` de Contalibra y
+# Restolibra, que lo tenian escrito dos veces --byte a byte-- contra estas
+# mismas factories. Son las tres cosas que la delegacion en el motor NO tenia
+# que cambiar, y las tres se degradan en silencio: nada da error, la pantalla
+# simplemente dice otra cosa.
+
+
+def _transferencia_con_stock(client, cantidad=100):
+    """Un producto con `cantidad` unidades en el deposito default y un segundo
+    deposito vacio al que transferir."""
+    p = _crear_producto(client, "Plug RJ45")
+    origen = client.post("/api/depositos", json={"nombre": "Central"}).json()
+    client.post(f"/api/depositos/{origen['id']}/set-default")
+    destino = client.post("/api/depositos", json={"nombre": "Camioneta"}).json()
+    client.post(f"/api/stock/{p['id']}/ajuste", json={"modo": "entrada", "cantidad": cantidad, "referencia": "Carga inicial"})
+    return p, origen, destino
+
+
+def test_el_mensaje_de_stock_insuficiente_dice_cuanto_hay(client):
+    """El 422 lo lee una persona. El error del dominio nombra ids ('el deposito
+    3 para el item 7'), que no le dicen nada a quien mira una pantalla con
+    nombres: por eso se traduce, y la traduccion tiene que decir cuanto hay."""
+    p, origen, destino = _transferencia_con_stock(client)
+    resp = client.post("/api/depositos/transferir", json={
+        "producto_id": p["id"], "origen_id": origen["id"], "destino_id": destino["id"], "cantidad": 101})
+    assert resp.status_code == 422
+    detalle = resp.json()["detail"]
+    assert "Stock insuficiente en depósito origen" in detalle
+    assert "100" in detalle, "el mensaje tiene que decir cuanto hay disponible"
+
+
+def test_la_transferencia_conserva_el_vocabulario_de_los_productos(client, abrir):
+    """La pantalla de actividad de los productos muestra
+    `COALESCE(reason_code, movement_type)` **sin mapa**: si el `reason_code` no
+    viajara, pasaria a decir 'transfer_out' en produccion.
+
+    🔴 **Por eso se mira la fila y no solo el listado.** `/api/stock/movimientos`
+    traduce `transfer_out` de vuelta con `_MOVEMENT_TYPE_A_TIPO` cuando falta el
+    `reason_code`, asi que el listado dice lo mismo con y sin el: se midio, la
+    mutacion que saca el `reason_code` de las dos patas lo dejaba en verde. La
+    pantalla de actividad lee la tabla, no este listado.
+    """
+    p, origen, destino = _transferencia_con_stock(client)
+    client.post("/api/depositos/transferir", json={
+        "producto_id": p["id"], "origen_id": origen["id"], "destino_id": destino["id"], "cantidad": 10})
+    tipos = {m["tipo"] for m in client.get(f"/api/stock/movimientos?producto_id={p['id']}").json()}
+    assert {"transferencia_salida", "transferencia_entrada"} <= tipos
+    assert "transfer_out" not in tipos and "transfer_in" not in tipos
+
+    conn = abrir()
+    try:
+        filas = conn.execute(
+            "SELECT movement_type, reason_code FROM stock_movements "
+            "WHERE movement_type IN ('transfer_out', 'transfer_in')").fetchall()
+    finally:
+        conn.close()
+    assert {(f["movement_type"], f["reason_code"]) for f in filas} == {
+        ("transfer_out", "transferencia_salida"), ("transfer_in", "transferencia_entrada"),
+    }, "el reason_code tiene que quedar escrito en la fila, que es lo que lee la pantalla"
+
+
+def test_la_observacion_de_la_transferencia_queda_en_el_movimiento(client):
+    p, origen, destino = _transferencia_con_stock(client)
+    client.post("/api/depositos/transferir", json={
+        "producto_id": p["id"], "origen_id": origen["id"], "destino_id": destino["id"], "cantidad": 5,
+        "observaciones": "Remito 5054 para Concordia"})
+    referencias = {m.get("referencia") for m in client.get(f"/api/stock/movimientos?producto_id={p['id']}").json()}
+    assert "Remito 5054 para Concordia" in referencias
+    # El control: la carga inicial tambien esta, con la suya. Sin esto, un
+    # listado que devolviera la misma referencia en todas las filas pasaria.
+    assert "Carga inicial" in referencias
+
+
+def test_el_stock_de_cada_deposito_y_el_listado_de_depositos(client):
+    """Las dos lecturas que los productos usan para ver una transferencia, y
+    que hasta el 2026-09-11 solo se ejercitaban desde sus suites:
+    `/api/depositos/{id}/stock` (el stock de un deposito) y `/api/depositos`
+    (el listado, con `total_productos`).
+
+    Se midio al sacar `test_transferencias_deposito.py` de los productos: las
+    doce lineas de estas dos rutas eran las unicas del motor que esos tests
+    recorrian y la suite del motor no.
+    """
+    p, origen, destino = _transferencia_con_stock(client)
+    client.post("/api/depositos/transferir", json={
+        "producto_id": p["id"], "origen_id": origen["id"], "destino_id": destino["id"], "cantidad": 40})
+
+    def stock_en(deposito_id):
+        return {f["id"]: float(f["stock_actual"]) for f in client.get(f"/api/depositos/{deposito_id}/stock").json()}
+
+    assert stock_en(origen["id"])[p["id"]] == 60
+    assert stock_en(destino["id"])[p["id"]] == 40
+    assert client.get("/api/depositos/99999/stock").status_code == 404
+
+    listado = {d["id"]: d for d in client.get("/api/depositos").json()}
+    assert listado[origen["id"]]["total_productos"] == 1
+    assert listado[destino["id"]]["total_productos"] == 1
+
+
 def test_deposito_default_y_borrado(client):
     nuevo = client.post("/api/depositos", json={"nombre": "Galpón", "descripcion": "atrás"}).json()
     assert client.put(f"/api/depositos/{nuevo['id']}", json={"nombre": "Galpón 2", "activo": True}).json()["nombre"] == "Galpón 2"
