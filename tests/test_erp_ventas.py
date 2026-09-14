@@ -723,6 +723,129 @@ def test_anular_venta_devuelta_del_todo_levanta(abrir_ventas):
         assert ventas.obtener_venta(conn, vid)["estado"] == "devuelta"
 
 
+# ── F3: anular no revierte lo que nunca se cobró (pago QR pendiente) ───────
+
+
+def test_anular_con_pago_pendiente_solo_revierte_lo_acreditado(abrir_ventas):
+    """🔑 El defecto: anular una venta con el QR pendiente no puede sacar de
+    la caja plata que nunca entró — sólo se revierte el pago en efectivo, y
+    el pendiente queda en un estado terminal (`vencido`)."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 4, "precio": 100.0, "subtotal": 400.0, "producto_id": pid},
+    ], pagos=[
+        {"medio": "efectivo", "monto": 200.0, "estado": "aprobado"},
+        {"medio": "mercadopago", "monto": 200.0, "estado": "pendiente"},
+    ])
+    with abrir_ventas() as conn:
+        assert ventas.obtener_venta(conn, vid)["estado"] == "parcial"  # sólo entró el efectivo
+        assert ventas.anular_venta(conn, vid, usuario_id=USUARIO["id"]) is True
+        conn.commit()
+        movs = _caja(conn, "V-00001")
+        # Un ingreso (el efectivo, al crear la venta) y UN SOLO egreso: el
+        # del efectivo. El QR pendiente nunca escribió un ingreso, así que no
+        # genera ningún egreso.
+        assert [m["tipo"] for m in movs] == ["ingreso", "egreso"]
+        assert movs[0]["monto"] == 200.0 and movs[0]["medio_pago"] == "efectivo"
+        assert movs[1]["monto"] == 200.0 and movs[1]["medio_pago"] == "efectivo"
+
+        pagos = ventas.obtener_venta(conn, vid)["pagos"]
+        estados = {p["medio"]: p["estado"] for p in pagos}
+        assert estados == {"efectivo": "aprobado", "mercadopago": "vencido"}
+
+        # El pago QR quedó en un estado terminal: acreditarlo después no
+        # revive la venta ni toca la caja de nuevo.
+        assert ventas.acreditar_pago_qr(conn, vid, "555", usuario_id=USUARIO["id"]) is False
+        conn.commit()
+        assert ventas.obtener_venta(conn, vid)["status"] == "cancelled"
+        assert len(_caja(conn, "V-00001")) == 2  # nada nuevo
+
+
+def test_anular_venta_toda_pendiente_no_genera_ningun_egreso(abrir_ventas):
+    """Venta 100% QR sin acreditar: anularla no debe escribir NINGÚN egreso,
+    porque no había ningún ingreso que revertir."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 2, "precio": 100.0, "subtotal": 200.0, "producto_id": pid},
+    ], pagos=[{"medio": "mercadopago", "monto": 200.0, "estado": "pendiente"}])
+    with abrir_ventas() as conn:
+        assert ventas.obtener_venta(conn, vid)["estado"] == "pendiente"
+        assert ventas.anular_venta(conn, vid) is True
+        conn.commit()
+        assert _caja(conn, "V-00001") == []
+        pago = ventas.obtener_venta(conn, vid)["pagos"][0]
+        assert pago["estado"] == "vencido"
+        assert ventas.obtener_venta(conn, vid)["status"] == "cancelled"
+
+
+def test_acreditar_pago_qr_no_revive_una_venta_anulada(abrir_ventas):
+    """🔑 mutación (g): sin el chequeo `venta['status'] == 'cancelled'` en
+    `acreditar_pago_qr`, una fila que siga (o vuelva a estar) `pendiente`
+    pese a que la venta ya está anulada haría que acreditar escriba caja y
+    la venta reviva a `cobrada`."""
+    vid = _venta(abrir_ventas, pagos=[{"medio": "mercadopago", "monto": 200.0, "estado": "pendiente"}])
+    with abrir_ventas() as conn:
+        ventas.anular_venta(conn, vid)
+        # Simula la fila vieja / la carrera: el pago sigue "pendiente" pese a
+        # que la venta ya está anulada (por ejemplo, una fila de antes de
+        # este fix, o el webhook que llega justo entre medio).
+        conn.execute("UPDATE ventas_pagos SET estado='pendiente' WHERE venta_id=?", (vid,))
+        conn.commit()
+        assert ventas.acreditar_pago_qr(conn, vid, "999", usuario_id=USUARIO["id"]) is False
+        conn.commit()
+        v = ventas.obtener_venta(conn, vid)
+        assert v["status"] == "cancelled"
+        assert _caja(conn, v["numero"]) == []
+
+
+def test_anular_venta_cobrada_normal_sigue_como_hoy(abrir_ventas):
+    """Regresión: una venta cobrada normal (todos los pagos acreditados)
+    anula exactamente igual que antes de este fix — un egreso por pago."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 3, "precio": 100.0, "subtotal": 300.0, "producto_id": pid},
+    ], pagos=[
+        {"medio": "efectivo", "monto": 100.0, "estado": "aprobado"},
+        {"medio": "transferencia", "monto": 200.0, "estado": "aprobado"},
+    ])
+    with abrir_ventas() as conn:
+        assert ventas.anular_venta(conn, vid) is True
+        conn.commit()
+        movs = _caja(conn, "V-00001")
+        assert [m["tipo"] for m in movs] == ["ingreso", "ingreso", "egreso", "egreso"]
+        egresos = sorted(float(m["monto"]) for m in movs if m["tipo"] == "egreso")
+        assert egresos == [100.0, 200.0]
+
+
+# ── F3: el detalle expone el id de la línea, para poder devolverla ─────────
+
+
+def test_obtener_venta_expone_el_id_de_cada_linea(abrir_ventas):
+    """Sin el `id` de `sale_items` en el detalle, ningún cliente de la API
+    puede armar el payload de `POST /{vid}/devolver` (que pide
+    `sale_item_id`) sin leer la base directamente."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 2, "precio": 100.0, "subtotal": 200.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        item = ventas.obtener_venta(conn, vid)["items"][0]
+        linea_real = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (vid,)
+        ).fetchone()["id"]
+        assert item["id"] == linea_real
+        # El id sirve tal cual para devolver esa línea.
+        deposito_id = conn.execute(
+            "SELECT location_id FROM stock_movements WHERE source_id=?", (vid,)
+        ).fetchone()["location_id"]
+        resultado = ventas.devolver_items(conn, vid, {item["id"]: 1.0}, deposito_id)
+        assert resultado["importe"] == 100.0
+
+
 def test_devolver_cuenta_la_devolucion_vieja_del_camino_return_sale_items(abrir_ventas):
     """`usecases.sales.return_sale_items` escribe `source_type='sale_return'`
     con `source_id=sale.id` (la venta), no el de otro documento — verificado
