@@ -5,10 +5,13 @@ la anulación simétrica, los ganchos y el arqueo del turno."""
 from __future__ import annotations
 
 import datetime
+import sqlite3
+from decimal import Decimal
 
+import pytest
 from conftest import USUARIO
 
-from libracommerce.erp import Hooks, catalogo, stock, ventas
+from libracommerce.erp import Hooks, Insumo, catalogo, stock, ventas
 
 HOY = datetime.date.today().isoformat()
 
@@ -20,14 +23,15 @@ def _producto(conn, nombre="Yerba", precio=100.0, existencia=10.0):
     return pid
 
 
-def _venta(abrir, *, pagos=None, items=None, stock_habilitado=True, hooks=None, usuario_id=USUARIO["id"]):
+def _venta(abrir, *, pagos=None, items=None, stock_habilitado=True, hooks=None,
+          usuario_id=USUARIO["id"], **opciones):
     items = items or [{"nombre": "Suelto", "qty": 2, "precio": 100.0, "subtotal": 200.0, "producto_id": None}]
     pagos = pagos or [{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}]
     total = round(sum(i["subtotal"] for i in items), 2)
     kw = dict(fecha=HOY, items=items, subtotal=total, descuento=0.0, total=total,
               cliente_id=None, cliente_nombre="", usuario_id=usuario_id, observaciones="",
               estado=ventas.estado_segun_pagos(total, pagos), pagos=pagos,
-              stock_habilitado=stock_habilitado)
+              stock_habilitado=stock_habilitado, **opciones)
     if hooks is not None:
         kw["hooks"] = hooks
     return ventas.crear_venta_directa(abrir, **kw)
@@ -363,3 +367,725 @@ def test_la_fk_de_ventas_pagos_apunta_a_sales_y_conserva_estado(abrir_ventas):
         with pytest.raises(sqlite3.IntegrityError):
             ventas.agregar_pago(conn, 12345, "efectivo", 1.0, estado="aprobado")
         conn.rollback()
+
+
+# ── F1: ganchos nuevos (numerador, turno_para, cliente_cc_de) ────────────
+
+
+def test_numerador_default_es_v_incremental(abrir_ventas):
+    with abrir_ventas() as conn:
+        assert Hooks().numerador(conn) == "V-00001"
+
+
+def test_numerador_enganchado_cambia_el_prefijo(abrir_ventas):
+    """🔑 mutación (e): si `registrar_venta` ignorara `hooks.numerador`, la
+    venta seguiría naciendo `V-00001` y este test da rojo."""
+    ganchos = Hooks(numerador=lambda conn: "POS-000123")
+    vid = _venta(abrir_ventas, hooks=ganchos)
+    with abrir_ventas() as conn:
+        v = ventas.obtener_venta(conn, vid)
+        assert v["numero"] == "POS-000123"
+        # La caja interpola el número en el concepto: sigue el prefijo nuevo.
+        assert _caja(conn, "POS-000123")[0]["concepto"] == "Venta POS-000123 — Efectivo"
+
+
+def test_numerador_enganchado_sobrevive_al_reintento(abrir_ventas):
+    """El reintento por número repetido no depende de qué numerador esté
+    enganchado: si el enganchado siempre choca, `registrar_venta` vuelve a
+    llamarlo en CADA intento (no se cuelga en uno solo) y agota los
+    reintentos, igual que con el numerador default."""
+    llamadas = []
+
+    def _numerador_fijo(conn):
+        llamadas.append(1)
+        return "POS-000001"
+
+    ganchos = Hooks(numerador=_numerador_fijo)
+    _venta(abrir_ventas, hooks=ganchos)  # ocupa "POS-000001"
+    with pytest.raises(sqlite3.IntegrityError):
+        _venta(abrir_ventas, hooks=ganchos)  # siempre choca: se agotan los reintentos
+    # La primera venta + un intento por cada reintento de la segunda.
+    assert len(llamadas) == 1 + ventas.INTENTOS_POR_NUMERO
+
+
+def test_turno_para_default_es_por_cajero(abrir_ventas):
+    with abrir_ventas() as conn:
+        tid = _turno(conn, 500.0)
+        assert Hooks().turno_para(conn, USUARIO["id"])["id"] == tid
+        assert Hooks().turno_para(conn, None) is None
+
+
+def test_turno_para_enganchado_reemplaza_al_de_cajero(abrir_ventas):
+    """VentaLibra: un turno COMPARTIDO, no uno por usuario."""
+    otro_usuario_id = USUARIO["id"] + 1
+    with abrir_ventas() as conn:
+        conn.execute(
+            "INSERT INTO usuarios (id, username, nombre, password_hash, role) VALUES (?,?,?,?,?)",
+            (otro_usuario_id, "otro", "Otro cajero", "x", "operador"),
+        )
+        conn.commit()
+        # El turno lo abrió USUARIO["id"]; `otro_usuario_id` no tiene turno
+        # propio, y con el turno por-cajero (el default) no se le ataría nada.
+        tid = _turno(conn, 500.0)
+    compartido = Hooks(turno_para=lambda conn, uid: {"id": tid} if uid else None)
+    vid = _venta(abrir_ventas, hooks=compartido, usuario_id=otro_usuario_id)
+    with abrir_ventas() as conn:
+        assert ventas.obtener_venta(conn, vid)["turno_id"] == tid
+
+
+def test_exigir_turno_sin_turno_levanta_y_no_deja_nada(abrir_ventas):
+    with pytest.raises(ventas.SinTurno):
+        _venta(abrir_ventas, exigir_turno=True)
+    with abrir_ventas() as conn:
+        assert ventas.listar_ventas(conn) == []
+        assert _caja(conn) == []
+
+
+def test_exigir_turno_con_turno_registra_normal(abrir_ventas):
+    with abrir_ventas() as conn:
+        _turno(conn, 500.0)
+    vid = _venta(abrir_ventas, exigir_turno=True)
+    with abrir_ventas() as conn:
+        assert ventas.obtener_venta(conn, vid) is not None
+
+
+def test_caja_con_turno_apunta_el_turno_id(abrir_ventas):
+    """🔑 mutación (a): sin pasar `turno_id` a `create_caja_movimiento`, esto
+    da rojo (todos `None`)."""
+    with abrir_ventas() as conn:
+        tid = _turno(conn, 500.0)
+    _venta(abrir_ventas, caja_con_turno=True)
+    with abrir_ventas() as conn:
+        movs = conn.execute("SELECT turno_id FROM caja_movimientos").fetchall()
+        assert [m["turno_id"] for m in movs] == [tid]
+
+
+def test_sin_caja_con_turno_no_apunta_nada(abrir_ventas):
+    """Default `False`: el comportamiento de hoy no cambia."""
+    with abrir_ventas() as conn:
+        _turno(conn, 500.0)
+    _venta(abrir_ventas)
+    with abrir_ventas() as conn:
+        movs = conn.execute("SELECT turno_id FROM caja_movimientos").fetchall()
+        assert [m["turno_id"] for m in movs] == [None]
+
+
+def test_acreditar_pago_qr_con_turno_toma_el_de_venta_links(abrir_ventas):
+    with abrir_ventas() as conn:
+        tid = _turno(conn, 500.0)
+    vid = _venta(abrir_ventas, pagos=[{"medio": "mercadopago", "monto": 200.0, "estado": "pendiente"}])
+    with abrir_ventas() as conn:
+        assert ventas.obtener_venta(conn, vid)["turno_id"] == tid
+        assert ventas.acreditar_pago_qr(conn, vid, "999", caja_con_turno=True) is True
+        conn.commit()
+        row = conn.execute("SELECT turno_id FROM caja_movimientos ORDER BY id DESC LIMIT 1").fetchone()
+        assert row["turno_id"] == tid
+
+
+def test_cliente_cc_de_default_es_cliente_id(abrir_ventas):
+    assert Hooks().cliente_cc_de(None, {"cliente_id": 5}) == 5
+    assert Hooks().cliente_cc_de(None, {"cliente_id": None}) is None
+
+
+def test_cliente_cc_de_enganchado_traduce_el_cliente(abrir_ventas):
+    """VentaLibra: el `cliente_id` de la venta (un `party_id`) no es el
+    `clients.id` real al que se le acredita la cuenta corriente.
+
+    🔑 mutación (c): si `anular_venta` usara `venta["cliente_id"]` (5) en vez
+    de `hooks.cliente_cc_de` (que lo traduce a 55), el crédito cae en el
+    cliente equivocado y este test da rojo."""
+    with abrir_ventas() as conn:
+        conn.execute("INSERT INTO clients (id, name, cuit_dni) VALUES (55, 'Cliente CC', '20111111112')")
+        conn.execute("INSERT INTO parties (id, party_type, display_name) VALUES (5, 'customer', 'Party 5')")
+        conn.commit()
+    ganchos = Hooks(cliente_cc_de=lambda conn, venta: 55 if venta["cliente_id"] == 5 else None)
+    vid = ventas.crear_venta_directa(
+        abrir_ventas, fecha=HOY, items=[{"nombre": "X", "qty": 1, "precio": 100.0, "subtotal": 100.0}],
+        subtotal=100.0, descuento=0.0, total=100.0, cliente_id=5, cliente_nombre="Party 5",
+        usuario_id=USUARIO["id"], observaciones="", estado="cobrada",
+        pagos=[{"medio": "cuenta_corriente", "monto": 100.0, "estado": "aprobado"}],
+        stock_habilitado=False, hooks=ganchos,
+    )
+    with abrir_ventas() as conn:
+        ventas.anular_venta(conn, vid, hooks=ganchos)
+        conn.commit()
+        acreditado_55 = conn.execute("SELECT monto FROM cc_pagos WHERE cliente_id=55").fetchall()
+        assert [float(r["monto"]) for r in acreditado_55] == [100.0]
+        assert conn.execute("SELECT COUNT(*) FROM cc_pagos WHERE cliente_id=5").fetchone()[0] == 0
+
+
+# ── F1: vuelto (recibido) ─────────────────────────────────────────────────
+
+
+def _agregar_columna_recibido(conn):
+    """Sólo para los tests del vuelto: la columna la agrega la migración
+    `0010` de LibraCore (otro trabajo, en paralelo), no este módulo."""
+    conn.execute("ALTER TABLE ventas_pagos ADD COLUMN recibido NUMERIC")
+    conn.commit()
+
+
+def test_recibido_se_guarda_solo_si_viene_un_valor(abrir_ventas):
+    with abrir_ventas() as conn:
+        _agregar_columna_recibido(conn)
+    vid = _venta(abrir_ventas, pagos=[
+        {"medio": "efectivo", "monto": 200.0, "estado": "aprobado", "recibido": 300.0},
+    ])
+    with abrir_ventas() as conn:
+        pago = ventas.obtener_venta(conn, vid)["pagos"][0]
+        assert float(pago["recibido"]) == 300.0
+
+
+def test_recibido_sin_columna_no_rompe_el_insert_de_siempre(abrir_ventas):
+    """Contalibra y Restolibra: sin la migración 0010, ni la columna ni el
+    campo. El INSERT de siempre sigue andando igual."""
+    vid = _venta(abrir_ventas)  # pago sin "recibido", tabla sin la columna
+    with abrir_ventas() as conn:
+        pago = ventas.obtener_venta(conn, vid)["pagos"][0]
+        assert "recibido" not in pago
+
+
+# ── F1: variantes ──────────────────────────────────────────────────────────
+
+
+def test_variante_viaja_a_sale_items_y_al_stock(abrir_ventas):
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+        vidr = conn.execute(
+            "INSERT INTO item_variants (item_id, sku, name) VALUES (?, 'SKU-1', 'Chico')", (pid,)
+        ).lastrowid
+        conn.commit()
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba Chica", "qty": 2, "precio": 100.0, "subtotal": 200.0,
+         "producto_id": pid, "variante_id": vidr},
+    ], pagos=[{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        v = ventas.obtener_venta(conn, vid)
+        assert v["items"][0]["variante_id"] == vidr
+        mov = conn.execute(
+            "SELECT variant_id FROM stock_movements WHERE source_id=?", (vid,)
+        ).fetchone()
+        assert mov["variant_id"] == vidr
+        assert stock.get_stock_actual(conn, pid) == 8.0
+
+
+def test_anulacion_repone_por_la_misma_variante(abrir_ventas):
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+        v1 = conn.execute(
+            "INSERT INTO item_variants (item_id, sku, name) VALUES (?, 'SKU-A', 'A')", (pid,)
+        ).lastrowid
+        v2 = conn.execute(
+            "INSERT INTO item_variants (item_id, sku, name) VALUES (?, 'SKU-B', 'B')", (pid,)
+        ).lastrowid
+        conn.commit()
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "A", "qty": 3, "precio": 50.0, "subtotal": 150.0, "producto_id": pid, "variante_id": v1},
+        {"nombre": "B", "qty": 2, "precio": 50.0, "subtotal": 100.0, "producto_id": pid, "variante_id": v2},
+    ], pagos=[{"medio": "efectivo", "monto": 250.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        ventas.anular_venta(conn, vid)
+        conn.commit()
+        assert stock.get_stock_actual(conn, pid) == 10.0
+        repos = conn.execute(
+            "SELECT variant_id, quantity_delta FROM stock_movements "
+            "WHERE source_id=? AND reason_code='anulacion' ORDER BY variant_id", (vid,)
+        ).fetchall()
+        assert [(r["variant_id"], float(r["quantity_delta"])) for r in repos] == [(v1, 3.0), (v2, 2.0)]
+
+
+# ── F1: anular_venta tolerante a filas viejas de VentaLibra ────────────────
+
+
+def _venta_vieja(conn, *, pid: int, cantidad: float = 4.0, precio: float = 100.0):
+    """Simula lo que escribe HOY `libracommerce.usecases.sales.confirm_sale`
+    —el camino viejo que usa VentaLibra—: `reason_code` NULL,
+    `source_type='sale'`, `movement_type='sale'`. No pasa por `erp.ventas`
+    a propósito: es la forma vieja del ledger, no la nueva."""
+    from libracommerce.erp.catalogo import get_default_deposito_id
+
+    deposito_id = get_default_deposito_id(conn)
+    numero = ventas.siguiente_numero(conn)
+    total = cantidad * precio
+    cur = conn.execute(
+        "INSERT INTO sales (number, occurred_on, status, status_detail, total, subtotal, source_type) "
+        "VALUES (?,?,?,?,?,?,'pos')",
+        (numero, HOY, "confirmed", None, total, total),
+    )
+    vid = cur.lastrowid
+    conn.execute(
+        "INSERT INTO sale_items (sale_id, kind, item_id, description_snapshot, quantity, unit_price) "
+        "VALUES (?, 'product', ?, 'Viejo', ?, ?)",
+        (vid, pid, cantidad, precio),
+    )
+    conn.execute(
+        "INSERT INTO stock_movements (item_id, location_id, movement_type, quantity_delta, "
+        "occurred_at, source_type, source_id) VALUES (?,?,?,?,?,?,?)",
+        (pid, deposito_id, "sale", -cantidad, HOY, "sale", vid),
+    )
+    conn.execute(
+        "INSERT INTO ventas_pagos (venta_id, medio, monto, referencia, estado) VALUES (?,?,?,?,?)",
+        (vid, "efectivo", total, "", "aprobado"),
+    )
+    return vid, deposito_id
+
+
+def test_anular_repone_filas_viejas_de_ventalibra(abrir_ventas):
+    """🔑 mutación (b): si `_COND_VENDIDO` volviera a exigir sólo
+    `reason_code='venta'`, la fila vieja (`reason_code` NULL) no matchea, no
+    se repone nada y este test da rojo."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    with abrir_ventas() as conn:
+        vid, _dep = _venta_vieja(conn, pid=pid, cantidad=4.0, precio=100.0)
+        conn.commit()
+    with abrir_ventas() as conn:
+        assert stock.get_stock_actual(conn, pid) == 6.0
+        assert ventas.anular_venta(conn, vid) is True
+        conn.commit()
+        assert stock.get_stock_actual(conn, pid) == 10.0
+        assert ventas.obtener_venta(conn, vid)["status"] == "cancelled"
+        # No se hizo ningún UPDATE sobre el ledger: sigue habiendo sólo dos
+        # filas por esta venta (la vieja y la reposición nueva).
+        n = conn.execute("SELECT COUNT(*) FROM stock_movements WHERE source_id=?", (vid,)).fetchone()[0]
+        assert n == 2
+
+
+def test_anular_con_devolucion_parcial_levanta_y_no_mueve_nada(abrir_ventas):
+    """🔑 Sin esta guarda, anular una venta con devolución parcial dobla el
+    reintegro: revierte el pago ORIGINAL completo encima de lo que la
+    devolución ya le dio de vuelta al cliente. Mutación: sacar la guarda —
+    ver el reporte para la plata exacta que queda mal."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 4, "precio": 100.0, "subtotal": 400.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 400.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        item_id_linea = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (vid,)
+        ).fetchone()["id"]
+        deposito_id = conn.execute(
+            "SELECT location_id FROM stock_movements WHERE source_id=?", (vid,)
+        ).fetchone()["location_id"]
+        ventas.devolver_items(conn, vid, {item_id_linea: 1.0}, deposito_id)  # $100 ya vueltos
+        conn.commit()
+
+    with abrir_ventas() as conn:
+        n_stock_antes = conn.execute(
+            "SELECT COUNT(*) FROM stock_movements WHERE source_id=?", (vid,)
+        ).fetchone()[0]
+        status_antes = ventas.obtener_venta(conn, vid)["status"]
+
+        levanto = False
+        try:
+            ventas.anular_venta(conn, vid)
+        except ventas.VentaConDevoluciones:
+            levanto = True
+            conn.rollback()
+        else:
+            conn.commit()
+        assert levanto, "anular_venta tiene que rechazar una venta con devolución parcial"
+
+        n_stock_despues = conn.execute(
+            "SELECT COUNT(*) FROM stock_movements WHERE source_id=?", (vid,)
+        ).fetchone()[0]
+        status_despues = ventas.obtener_venta(conn, vid)["status"]
+        assert n_stock_despues == n_stock_antes  # no se repuso stock de nuevo
+        assert status_despues == status_antes  # sigue confirmada, no anulada
+
+        ingresos = float(conn.execute(
+            "SELECT COALESCE(SUM(monto),0) FROM caja_movimientos WHERE tipo='ingreso'"
+        ).fetchone()[0])
+        egresos = float(conn.execute(
+            "SELECT COALESCE(SUM(monto),0) FROM caja_movimientos WHERE tipo='egreso'"
+        ).fetchone()[0])
+        # La única plata devuelta hasta acá es la de la devolución parcial
+        # ($100 de $400 cobrados). Nunca puede superar lo cobrado.
+        assert egresos == 100.0
+        assert egresos <= ingresos
+
+
+def test_anular_venta_devuelta_del_todo_levanta(abrir_ventas):
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 2, "precio": 100.0, "subtotal": 200.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        item_id_linea = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (vid,)
+        ).fetchone()["id"]
+        deposito_id = conn.execute(
+            "SELECT location_id FROM stock_movements WHERE source_id=?", (vid,)
+        ).fetchone()["location_id"]
+        ventas.devolver_items(conn, vid, {item_id_linea: 2.0}, deposito_id)
+        conn.commit()
+        assert ventas.obtener_venta(conn, vid)["estado"] == "devuelta"
+
+
+def test_devolver_cuenta_la_devolucion_vieja_del_camino_return_sale_items(abrir_ventas):
+    """`usecases.sales.return_sale_items` escribe `source_type='sale_return'`
+    con `source_id=sale.id` (la venta), no el de otro documento — verificado
+    en el código de ese caso de uso. `devolver_items` sobre una venta VIEJA
+    (`status='partially_returned'`, el que deja ESE caso de uso) tiene que
+    contar esa devolución para el tope."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    with abrir_ventas() as conn:
+        vid, deposito_id = _venta_vieja(conn, pid=pid, cantidad=5.0, precio=100.0)
+        item_id_linea = conn.execute("SELECT id FROM sale_items WHERE sale_id=?", (vid,)).fetchone()["id"]
+        # 3 ya devueltas por el camino viejo: `reason_code` es la POSICIÓN
+        # de la línea (acá "0"), `source_type='sale_return'`, `source_id=vid`.
+        conn.execute(
+            "INSERT INTO stock_movements (item_id, location_id, movement_type, quantity_delta, "
+            "occurred_at, source_type, source_id, reason_code) VALUES (?,?,?,?,?,?,?,?)",
+            (pid, deposito_id, "return", 3.0, HOY, "sale_return", vid, "0"),
+        )
+        conn.execute("UPDATE sales SET status='partially_returned' WHERE id=?", (vid,))
+        conn.commit()
+        with pytest.raises(ValueError):
+            # Quedaban 2 sin devolver (5 - 3); pedir 3 excede el tope.
+            ventas.devolver_items(conn, vid, {item_id_linea: 3.0}, deposito_id)
+        ventas.devolver_items(conn, vid, {item_id_linea: 2.0}, deposito_id)
+        conn.commit()
+        assert ventas.obtener_venta(conn, vid)["estado"] == "devuelta"
+
+
+# ── F2 (correcciones sobre la revisión): tope por clave y estados admitidos ─
+
+
+def test_tope_de_devolucion_es_por_item_y_variante_no_por_linea(abrir_ventas):
+    """🔑 mutación: comparar `disponible` contra la cantidad de UNA sola línea
+    (en vez de la suma de todas las líneas con esa clave) bloquea una
+    devolución legítima — A y B son el mismo producto en dos líneas
+    distintas (A=2, B=3): devolver los 3 de B no le debe tocar el cupo a A."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba (línea A)", "qty": 2, "precio": 100.0, "subtotal": 200.0, "producto_id": pid},
+        {"nombre": "Yerba (línea B)", "qty": 3, "precio": 100.0, "subtotal": 300.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 500.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        lineas = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=? ORDER BY id", (vid,)
+        ).fetchall()
+        linea_a, linea_b = lineas[0]["id"], lineas[1]["id"]
+        deposito_id = conn.execute(
+            "SELECT location_id FROM stock_movements WHERE source_id=? LIMIT 1", (vid,)
+        ).fetchone()["location_id"]
+        ventas.devolver_items(conn, vid, {linea_b: 3.0}, deposito_id)
+        conn.commit()
+        # A sigue intacta: sus 2 propias tienen que poder devolverse.
+        ventas.devolver_items(conn, vid, {linea_a: 2.0}, deposito_id)
+        conn.commit()
+        assert ventas.obtener_venta(conn, vid)["estado"] == "devuelta"
+
+
+def test_tope_de_devolucion_neteo_dentro_de_la_misma_llamada(abrir_ventas):
+    """🔑 mutación: sin descontar lo pedido DENTRO de esta misma llamada a
+    medida que se procesa cada línea, dos líneas del mismo ítem pedidas
+    juntas se comparan cada una contra el mismo acumulado (`ya_devuelto`, que
+    no cambia durante el `for`) y pueden sumar más que lo vendido."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba (línea A)", "qty": 2, "precio": 100.0, "subtotal": 200.0, "producto_id": pid},
+        {"nombre": "Yerba (línea B)", "qty": 3, "precio": 100.0, "subtotal": 300.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 500.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        lineas = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=? ORDER BY id", (vid,)
+        ).fetchall()
+        linea_a, linea_b = lineas[0]["id"], lineas[1]["id"]
+        deposito_id = conn.execute(
+            "SELECT location_id FROM stock_movements WHERE source_id=? LIMIT 1", (vid,)
+        ).fetchone()["location_id"]
+        # Vendido total = 5. Pedir A:2 + B:4 en la MISMA llamada excede el
+        # total, aunque cada uno por separado (contra el `ya_devuelto` del
+        # ledger, que arranca en 0) pareciera entrar.
+        with pytest.raises(ValueError):
+            ventas.devolver_items(conn, vid, {linea_a: 2.0, linea_b: 4.0}, deposito_id)
+        conn.rollback()
+        # El total sigue siendo devolvible de a partes, ni más ni menos: 5.
+        ventas.devolver_items(conn, vid, {linea_a: 2.0, linea_b: 3.0}, deposito_id)
+        conn.commit()
+        assert ventas.obtener_venta(conn, vid)["estado"] == "devuelta"
+
+
+def test_devolver_venta_pendiente_levanta(abrir_ventas):
+    """🔴 Punto 3: una venta con el QR sin acreditar no tiene plata adentro
+    todavía. Reintegrar algo ahí sería devolver dinero que nunca entró."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 1, "precio": 100.0, "subtotal": 100.0, "producto_id": pid},
+    ], pagos=[{"medio": "mercadopago", "monto": 100.0, "estado": "pendiente"}])
+    with abrir_ventas() as conn:
+        item_id_linea = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (vid,)
+        ).fetchone()["id"]
+        deposito_id = conn.execute(
+            "SELECT location_id FROM stock_movements WHERE source_id=?", (vid,)
+        ).fetchone()["location_id"]
+        assert ventas.obtener_venta(conn, vid)["estado"] == "pendiente"
+        with pytest.raises(ValueError):
+            ventas.devolver_items(conn, vid, {item_id_linea: 1.0}, deposito_id)
+
+
+def test_devolver_venta_parcial_de_cobranza_levanta(abrir_ventas):
+    """Cobrada a medias (no confundir con `devuelta_parcial`, que es de
+    devolución): la plata que falta cobrar no está en el cajón."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 2, "precio": 100.0, "subtotal": 200.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 100.0, "estado": "aprobado"}])  # cobra la mitad
+    with abrir_ventas() as conn:
+        item_id_linea = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (vid,)
+        ).fetchone()["id"]
+        deposito_id = conn.execute(
+            "SELECT location_id FROM stock_movements WHERE source_id=?", (vid,)
+        ).fetchone()["location_id"]
+        assert ventas.obtener_venta(conn, vid)["estado"] == "parcial"
+        with pytest.raises(ValueError):
+            ventas.devolver_items(conn, vid, {item_id_linea: 1.0}, deposito_id)
+
+
+def test_acreditar_pago_qr_no_toca_una_venta_ya_devuelta(abrir_ventas):
+    """🔴 Punto 4: con el punto 3 en pie, una venta con devolución no puede
+    tener pagos pendientes (era `cobrada`, todo `aprobado`, para poder
+    devolverse), así que `acreditar_pago_qr` no encuentra nada y no pisa el
+    `status_detail` que dejó `devolver_items`. Se fija igual, explícito."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 2, "precio": 100.0, "subtotal": 200.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        item_id_linea = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (vid,)
+        ).fetchone()["id"]
+        deposito_id = conn.execute(
+            "SELECT location_id FROM stock_movements WHERE source_id=?", (vid,)
+        ).fetchone()["location_id"]
+        ventas.devolver_items(conn, vid, {item_id_linea: 1.0}, deposito_id)
+        conn.commit()
+        assert ventas.obtener_venta(conn, vid)["estado"] == "devuelta_parcial"
+        assert ventas.acreditar_pago_qr(conn, vid, "999") is False
+        assert ventas.obtener_venta(conn, vid)["estado"] == "devuelta_parcial"
+        with pytest.raises(ventas.VentaConDevoluciones):
+            ventas.anular_venta(conn, vid)
+        conn.rollback()
+        # No se tocó la caja de nuevo: sigue habiendo el ingreso y el egreso
+        # de la devolución, nada más.
+        assert len(_caja(conn, "V-00001")) == 2
+
+
+def test_anular_venta_vieja_partially_returned_levanta(abrir_ventas):
+    """El viejo `usecases.sales.return_sale_items` deja `sales.status`
+    directo en `partially_returned` — no toca `status_detail`, que es de
+    esta capa. La guarda lo tiene que ver igual."""
+    vid = _venta(abrir_ventas)
+    with abrir_ventas() as conn:
+        conn.execute("UPDATE sales SET status='partially_returned' WHERE id=?", (vid,))
+        conn.commit()
+        with pytest.raises(ventas.VentaConDevoluciones):
+            ventas.anular_venta(conn, vid)
+
+
+def test_anular_venta_vieja_returned_levanta(abrir_ventas):
+    vid = _venta(abrir_ventas)
+    with abrir_ventas() as conn:
+        conn.execute("UPDATE sales SET status='returned' WHERE id=?", (vid,))
+        conn.commit()
+        with pytest.raises(ventas.VentaConDevoluciones):
+            ventas.anular_venta(conn, vid)
+
+
+def test_anular_repone_fila_por_fila_no_agrupa_ni_con_receta(abrir_ventas):
+    """🔑 mutación: si `anular_venta` volviera a agrupar por (ítem, variante,
+    depósito) antes de reponer, dos platos que descuentan el MISMO insumo
+    (Restolibra, vía `resolver_receta`) colapsarían en una sola fila de
+    `anulacion` en vez de dos — le cambiaría el ledger a un producto que hoy
+    no se toca."""
+    with abrir_ventas() as conn:
+        insumo_id = _producto(conn, nombre="Insumo", existencia=20.0)
+        plato_a = _producto(conn, nombre="Plato A", existencia=0.0)
+        plato_b = _producto(conn, nombre="Plato B", existencia=0.0)
+
+    def receta(item_id, item):
+        return [Insumo(item_id=insumo_id, cantidad=Decimal("1"))]
+
+    ganchos = Hooks(resolver_receta=receta)
+    vid = _venta(abrir_ventas, hooks=ganchos, items=[
+        {"nombre": "Plato A", "qty": 2, "precio": 50.0, "subtotal": 100.0, "producto_id": plato_a},
+        {"nombre": "Plato B", "qty": 3, "precio": 50.0, "subtotal": 150.0, "producto_id": plato_b},
+    ], pagos=[{"medio": "efectivo", "monto": 250.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        # Dos movimientos de VENTA sobre el MISMO insumo (uno por plato).
+        n_venta = conn.execute(
+            "SELECT COUNT(*) FROM stock_movements WHERE source_id=? AND reason_code='venta'", (vid,)
+        ).fetchone()[0]
+        assert n_venta == 2
+        ventas.anular_venta(conn, vid)
+        conn.commit()
+        n_anulacion = conn.execute(
+            "SELECT COUNT(*) FROM stock_movements WHERE source_id=? AND reason_code='anulacion'", (vid,)
+        ).fetchone()[0]
+        # Una reposición por CADA movimiento de venta, sin agrupar por insumo.
+        assert n_anulacion == 2
+        assert stock.get_stock_actual(conn, insumo_id) == 20.0  # 20 - 2 - 3 + 2 + 3
+
+
+# ── F1: devolución parcial ──────────────────────────────────────────────
+
+
+def test_devolver_items_reintegra_y_marca_parcial(abrir_ventas):
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 4, "precio": 100.0, "subtotal": 400.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 400.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        item_id_linea = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (vid,)
+        ).fetchone()["id"]
+        deposito_id = conn.execute(
+            "SELECT location_id FROM stock_movements WHERE source_id=?", (vid,)
+        ).fetchone()["location_id"]
+        resultado = ventas.devolver_items(
+            conn, vid, {item_id_linea: 1.0}, deposito_id, usuario_id=USUARIO["id"]
+        )
+        conn.commit()
+        assert resultado["importe"] == 100.0
+        assert resultado["venta"]["estado"] == "devuelta_parcial"
+        assert stock.get_stock_actual(conn, pid) == 7.0  # 10 - 4 + 1
+        egreso = _caja(conn)[-1]
+        assert egreso["tipo"] == "egreso" and float(egreso["monto"]) == 100.0
+
+
+def test_devolver_items_completo_marca_devuelta_y_no_admite_otra(abrir_ventas):
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 2, "precio": 100.0, "subtotal": 200.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        item_id_linea = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (vid,)
+        ).fetchone()["id"]
+        deposito_id = conn.execute(
+            "SELECT location_id FROM stock_movements WHERE source_id=?", (vid,)
+        ).fetchone()["location_id"]
+        resultado = ventas.devolver_items(conn, vid, {item_id_linea: 2.0}, deposito_id)
+        conn.commit()
+        assert resultado["venta"]["estado"] == "devuelta"
+        with pytest.raises(ValueError):
+            ventas.devolver_items(conn, vid, {item_id_linea: 1.0}, deposito_id)
+
+
+def test_devolver_items_topea_lo_ya_devuelto(abrir_ventas):
+    """🔑 mutación (d): sin el chequeo de `disponible`, esto no levanta."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 3, "precio": 100.0, "subtotal": 300.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 300.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        item_id_linea = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (vid,)
+        ).fetchone()["id"]
+        deposito_id = conn.execute(
+            "SELECT location_id FROM stock_movements WHERE source_id=?", (vid,)
+        ).fetchone()["location_id"]
+        ventas.devolver_items(conn, vid, {item_id_linea: 2.0}, deposito_id)
+        conn.commit()
+        with pytest.raises(ValueError):
+            # Quedaba 1 sin devolver; pide 2.
+            ventas.devolver_items(conn, vid, {item_id_linea: 2.0}, deposito_id)
+
+
+def test_devolver_a_cuenta_corriente_exige_cliente(abrir_ventas):
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 1, "precio": 100.0, "subtotal": 100.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 100.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        item_id_linea = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (vid,)
+        ).fetchone()["id"]
+        deposito_id = conn.execute(
+            "SELECT location_id FROM stock_movements WHERE source_id=?", (vid,)
+        ).fetchone()["location_id"]
+        with pytest.raises(ValueError):
+            ventas.devolver_items(
+                conn, vid, {item_id_linea: 1.0}, deposito_id, medio_pago="cuenta_corriente"
+            )
+
+
+def test_devolver_linea_de_servicio_levanta(abrir_ventas):
+    vid = _venta(
+        abrir_ventas,
+        items=[{"nombre": "Envío", "qty": 1, "precio": 50.0, "subtotal": 50.0, "producto_id": None}],
+        pagos=[{"medio": "efectivo", "monto": 50.0, "estado": "aprobado"}],
+        stock_habilitado=False,
+    )
+    with abrir_ventas() as conn:
+        item_id_linea = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (vid,)
+        ).fetchone()["id"]
+        with pytest.raises(ValueError):
+            ventas.devolver_items(conn, vid, {item_id_linea: 1.0}, deposito_id=1)
+
+
+def test_devolver_venta_anulada_levanta(abrir_ventas):
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 1, "precio": 100.0, "subtotal": 100.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 100.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        item_id_linea = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (vid,)
+        ).fetchone()["id"]
+        deposito_id = conn.execute(
+            "SELECT location_id FROM stock_movements WHERE source_id=?", (vid,)
+        ).fetchone()["location_id"]
+        ventas.anular_venta(conn, vid)
+        conn.commit()
+        with pytest.raises(ValueError):
+            ventas.devolver_items(conn, vid, {item_id_linea: 1.0}, deposito_id)
+
+
+def test_devolver_items_descuenta_lo_ya_devuelto_por_el_camino_viejo(abrir_ventas):
+    """El viejo `return_sale_items` de VentaLibra escribía
+    `source_type='sale_return'` con `reason_code` = la POSICIÓN de la línea,
+    no un tipo. Una devolución nueva sobre la misma venta tiene que descontar
+    lo que ya volvió por ese camino."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 5, "precio": 100.0, "subtotal": 500.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 500.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        item_id_linea = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (vid,)
+        ).fetchone()["id"]
+        deposito_id = conn.execute(
+            "SELECT location_id FROM stock_movements WHERE source_id=?", (vid,)
+        ).fetchone()["location_id"]
+        # 3 ya devueltas por el camino viejo.
+        conn.execute(
+            "INSERT INTO stock_movements (item_id, location_id, movement_type, quantity_delta, "
+            "occurred_at, source_type, source_id, reason_code) VALUES (?,?,?,?,?,?,?,?)",
+            (pid, deposito_id, "return", 3.0, HOY, "sale_return", vid, "0"),
+        )
+        conn.commit()
+        with pytest.raises(ValueError):
+            # Quedaban 2 sin devolver; pedir 3 excede el tope.
+            ventas.devolver_items(conn, vid, {item_id_linea: 3.0}, deposito_id)
+        ventas.devolver_items(conn, vid, {item_id_linea: 2.0}, deposito_id)
+        conn.commit()
+        assert ventas.obtener_venta(conn, vid)["estado"] == "devuelta"

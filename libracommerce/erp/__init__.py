@@ -28,13 +28,26 @@ depende de dónde viven las ventas; y M5 `schema`, el DDL de `venta_links` —la
 en `db/schema.py`—.
 """
 
-from .hooks import SIN_GANCHOS, GanchoDeVenta, Hooks, Insumo, ListaDePrecioPara, ResolverReceta
+from .hooks import (
+    SIN_GANCHOS,
+    ClienteCcDe,
+    GanchoDeVenta,
+    Hooks,
+    Insumo,
+    ListaDePrecioPara,
+    Numerador,
+    ResolverReceta,
+    TurnoPara,
+)
 
 __all__ = [
     "SIN_GANCHOS",
+    "ClienteCcDe",
     "GanchoDeVenta",
     "Hooks",
     "Insumo",
     "ListaDePrecioPara",
+    "Numerador",
     "ResolverReceta",
+    "TurnoPara",
 ]

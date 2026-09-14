@@ -15,6 +15,9 @@ Cada uno nombra el caso real que lo motiva:
 | `al_confirmar_venta` / `al_anular_venta` | Restolibra, Contalibra | marcar el pedido cobrado y liberar la mesa; `venta_links`, integraciones, outbox de LibraEdge |
 | `lista_de_precio_para` | Contalibra | la lista mayorista asignada al cliente (`cliente_lista_precio`) |
 | `canales` | Restolibra | mostrador y delivery como canales del reporte de ventas |
+| `numerador` | VentaLibra | numeración propia (`POS-000001` contra su tabla `sequences`) en vez de `V-00001` |
+| `turno_para` | VentaLibra | el turno de caja de un usuario cuando lo lleva un turno **compartido** y no uno por cajero |
+| `cliente_cc_de` | VentaLibra | traducir el `party_id` de una venta al `clients.id` de LibraCore (`external_ref = party-<id>`) para la cuenta corriente |
 
 🔴 **Los ganchos de venta reciben la MISMA conexión** con la que el caso de uso
 está escribiendo la venta, y corren adentro de esa transacción. Es lo que P7
@@ -68,6 +71,38 @@ class ListaDePrecioPara(Protocol):
     def __call__(self, conn: Any, cliente_id: int | None) -> int | None: ...
 
 
+class Numerador(Protocol):
+    """El próximo número de venta. El default es `V-00001` (`erp.ventas.siguiente_numero`);
+    VentaLibra lo cambia por `POS-000001` contra su propia tabla `sequences`.
+
+    Recibe la misma conexión que la transacción de la venta —igual que
+    `siguiente_numero`, calcula el número con el write-lock ya tomado, para no
+    chocar con otro cobro concurrente."""
+
+    def __call__(self, conn: Any) -> str: ...
+
+
+class TurnoPara(Protocol):
+    """El turno de caja abierto para este usuario, o `None` si no hay ninguno
+    (o no hay usuario). El default es el turno **por cajero**
+    (`libracore.db.turnos.get_turno_activo`); VentaLibra tiene un turno
+    **compartido** (`get_turno_activo_any`, ver `services/cuenta_corriente.py`
+    de ese repo) y lo reemplaza acá."""
+
+    def __call__(self, conn: Any, usuario_id: int | None) -> Any | None: ...
+
+
+class ClienteCcDe(Protocol):
+    """El `clients.id` de LibraCore al que se le acredita o debita la cuenta
+    corriente de esta venta, o `None` si la venta no tiene cliente. El default
+    es `venta["cliente_id"]` (`customer_party_id`): en Contalibra el id de
+    `parties` y el de `clients` coinciden. VentaLibra traduce por
+    `external_ref = party-<id>` (ver `services/cuenta_corriente.py::_cliente_cc`
+    de ese repo)."""
+
+    def __call__(self, conn: Any, venta: Any) -> int | None: ...
+
+
 def _sin_receta(item_id: int, item: Mapping[str, Any]) -> None:
     return None
 
@@ -78,6 +113,28 @@ def _nada(conn: Any, venta: Any) -> None:
 
 def _lista_default(conn: Any, cliente_id: int | None) -> None:
     return None
+
+
+def _numerador_default(conn: Any) -> str:
+    # Import diferido: `.ventas` importa `.hooks` a nivel de módulo, así que
+    # traerlo acá arriba cerraría el ciclo. También es lo que hace que un
+    # monkeypatch de `ventas.siguiente_numero` (como en los tests de reintento)
+    # se vea reflejado: el nombre se resuelve recién al llamar, no al importar.
+    from .ventas import siguiente_numero
+
+    return siguiente_numero(conn)
+
+
+def _turno_default(conn: Any, usuario_id: int | None) -> Any | None:
+    if not usuario_id:
+        return None
+    from libracore.db.turnos import get_turno_activo
+
+    return get_turno_activo(usuario_id, conn=conn)
+
+
+def _cliente_cc_default(conn: Any, venta: Any) -> int | None:
+    return venta.get("cliente_id")
 
 
 @dataclass(frozen=True)
@@ -92,6 +149,9 @@ class Hooks:
     #: Canales de venta que el producto agrega al reporte, además de los del
     #: motor. Restolibra: ("mostrador", "delivery").
     canales: tuple[str, ...] = ()
+    numerador: Numerador = _numerador_default
+    turno_para: TurnoPara = _turno_default
+    cliente_cc_de: ClienteCcDe = _cliente_cc_default
 
 
 #: El comportamiento de Contalibra: ningún gancho enganchado.
