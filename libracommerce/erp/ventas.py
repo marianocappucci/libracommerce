@@ -49,6 +49,7 @@ difería y cómo quedó:
 
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 from collections.abc import Callable
@@ -58,6 +59,8 @@ from typing import Any
 
 from .hooks import SIN_GANCHOS, Hooks
 from .stock import add_movimiento_stock, descontar_stock_venta
+
+logger = logging.getLogger(__name__)
 
 #: Una fábrica de conexiones como la que pasa un producto: un context manager
 #: que devuelve la conexión abierta (`libracore.db.core.get_connection`).
@@ -381,12 +384,16 @@ def factura_display(tipo, punto_venta, numero) -> str | None:
 
 def _items_de(conn, venta_id: int) -> list[dict]:
     rows = conn.execute(
-        """SELECT item_id, variant_id, description_snapshot, quantity, unit_price
+        """SELECT id, item_id, variant_id, description_snapshot, quantity, unit_price
            FROM sale_items WHERE sale_id=? ORDER BY id""",
         (venta_id,),
     ).fetchall()
     return [
         {
+            # El id de `sale_items`: sin él, ningún cliente de la API puede
+            # armar el payload de `POST /{vid}/devolver` (que pide
+            # `sale_item_id`) sin leer la base directamente.
+            "id": r["id"],
             "producto_id": r["item_id"], "variante_id": r["variant_id"],
             "nombre": r["description_snapshot"],
             "qty": float(r["quantity"]), "precio": float(r["unit_price"]),
@@ -544,9 +551,22 @@ def anular_venta(conn, vid: int, usuario_id: int | None = None,
     """Anula una venta: repone el stock que se había descontado (los insumos de
     la receta si los hubo — el ledger ya guardó qué se descontó de verdad, así
     que la reversión es simétrica sin volver a resolver nada), revierte con un
-    egreso cada movimiento de caja de sus pagos y, si tenía un pago a cuenta
-    corriente, acredita la deuda del cliente (`hooks.cliente_cc_de`). Después
-    llama a `hooks.al_anular_venta` con la misma conexión.
+    egreso cada movimiento de caja de sus pagos **acreditados** y, si tenía un
+    pago a cuenta corriente, acredita la deuda del cliente
+    (`hooks.cliente_cc_de`). Después llama a `hooks.al_anular_venta` con la
+    misma conexión.
+
+    🔴 **Sólo se revierte lo que entró de verdad.** `libracore.pagos` decide
+    qué pago cuenta (`ACREDITAN`, hoy sólo `aprobado`) — igual que
+    `registrar_venta` decide qué pago escribe caja al declarar. Un pago
+    `pendiente` (el QR que nadie escaneó) nunca escribió un ingreso, así que
+    revertirlo sacaría de la caja plata que nunca entró. Ese pago pasa a
+    `vencido`: es el estado terminal de "se declaró y no llegó a acreditarse"
+    (`EstadoAcreditacion.VENCIDO`, ya usado por LibraClub para el jugador que
+    nunca volvió de MercadoPago) — ni `aprobado` (no entró) ni `rechazado`
+    (MercadoPago no lo rechazó, la venta se cerró antes de que se resolviera).
+    Al quedar en un estado que no es `pendiente`, `acreditar_pago_qr` no lo
+    vuelve a tocar si el cliente paga después: ver esa función.
 
     🔴 **Una venta con devoluciones no se anula** — levanta
     `VentaConDevoluciones` (ver esa clase). El chequeo mira `sales.status`
@@ -571,6 +591,7 @@ def anular_venta(conn, vid: int, usuario_id: int | None = None,
     si se reintenta la acción—. Levanta `ValueError` si no existe. No
     commitea.
     """
+    from libracore import pagos as acreditacion
     from libracore.db.core import _ar_now
     from libracore.db.reversiones import revertir_cobro_venta
 
@@ -602,12 +623,24 @@ def anular_venta(conn, vid: int, usuario_id: int | None = None,
 
     pagos = [
         dict(p) for p in conn.execute(
-            "SELECT id, medio, monto FROM ventas_pagos WHERE venta_id=?", (vid,)
+            "SELECT id, medio, monto, estado FROM ventas_pagos WHERE venta_id=?", (vid,)
         ).fetchall()
     ]
+    acreditados = [p for p in pagos if acreditacion.estado_de(p) in acreditacion.ACREDITAN]
+    pendientes_ids = [
+        p["id"] for p in pagos
+        if acreditacion.estado_de(p) is acreditacion.EstadoAcreditacion.PENDIENTE
+    ]
+    if pendientes_ids:
+        marcadores = ",".join("?" for _ in pendientes_ids)
+        conn.execute(
+            f"UPDATE ventas_pagos SET estado=? WHERE id IN ({marcadores})",
+            (acreditacion.EstadoAcreditacion.VENCIDO.value, *pendientes_ids),
+        )
+
     turno = hooks.turno_para(conn, usuario_id) if caja_con_turno else None
     revertir_cobro_venta(
-        venta_id=vid, numero=venta["numero"], fecha=fecha, pagos=pagos,
+        venta_id=vid, numero=venta["numero"], fecha=fecha, pagos=acreditados,
         cliente_id=hooks.cliente_cc_de(conn, venta), usuario_id=usuario_id, conn=conn,
         turno_id=(turno["id"] if turno else None),
     )
@@ -852,6 +885,13 @@ def acreditar_pago_qr(conn, venta_id: int, payment_id: str,
     siguiente, y la plata es del turno que hizo la venta, no del que la
     encuentra pagada.
 
+    🔴 **Una venta anulada no revive.** Si `venta.status == 'cancelled'` no
+    acredita nada, no toca la caja ni el estado de la venta, y devuelve
+    `False` — aunque el pago siga técnicamente `pendiente` (una fila vieja,
+    de antes de que `anular_venta` empezara a marcarlo `vencido`). Se deja un
+    `logger.warning` con el `venta_id` y el `payment_id`: esa plata sí entró
+    en MercadoPago y a alguien hay que avisarle para que la devuelva a mano.
+
     🔑 **Idempotente por la condición, no por un flag**: sólo toca lo que está
     `PENDIENTE`. El poll de `mp-status` y el webhook pueden llegar los dos, en
     cualquier orden; la segunda pasada no encuentra nada y no escribe nada.
@@ -861,19 +901,26 @@ def acreditar_pago_qr(conn, venta_id: int, payment_id: str,
     from libracore import pagos as acreditacion
     from libracore.db.caja import create_caja_movimiento
 
+    venta = conn.execute(
+        "SELECT number AS numero, occurred_on AS fecha, total, status FROM sales WHERE id=?",
+        (venta_id,),
+    ).fetchone()
+    if venta is None:
+        return False
+    if venta["status"] == "cancelled":
+        logger.warning(
+            "acreditar_pago_qr: venta %s ya está anulada, no se acredita el pago "
+            "%s (la plata entró en MercadoPago: hay que devolverla a mano)",
+            venta_id, payment_id,
+        )
+        return False
+
     pendientes = conn.execute(
         "SELECT id, medio, monto FROM ventas_pagos "
         "WHERE venta_id=? AND estado=? ORDER BY id",
         (venta_id, acreditacion.EstadoAcreditacion.PENDIENTE.value),
     ).fetchall()
     if not pendientes:
-        return False
-
-    venta = conn.execute(
-        "SELECT number AS numero, occurred_on AS fecha, total FROM sales WHERE id=?",
-        (venta_id,),
-    ).fetchone()
-    if venta is None:
         return False
 
     turno_id = None
