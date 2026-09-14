@@ -14,10 +14,11 @@ Cada función recibe la conexión; las formas de los dicts son las históricas.
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 
 from libracommerce.db.repository import SqliteCommerceRepository
-from libracommerce.domain.catalog import PriceList
+from libracommerce.domain.catalog import ItemPrice, PriceList
 
 #: "Sin restricción de fecha de inicio", para todo lo que este módulo escribe.
 _SIN_VIGENCIA = "2000-01-01T00:00:00"
@@ -150,6 +151,78 @@ def resolver_precio_por_cantidad(conn, lista_id: int, producto_id: int, cantidad
         producto_id, price_list_id=lista_id, quantity=Decimal(str(cantidad)),
     )
     return float(precio) if precio is not None else None
+
+
+# ── Vigencia y sucursal (F1 de VentaLibra a LibraCommerce, 2026-09-14) ───
+#
+# `resolve_price` ya resuelve por `valid_from`/`valid_until` y `branch_id`
+# (motor `v0.7.x`); lo que faltaba en esta capa era exponerlo. Aditivo a
+# `resolver_precio_por_cantidad`, que sigue igual y sigue siendo lo que usan
+# los quiebres mayoristas de Contalibra: ésa nunca pasa `at` ni `branch_id`,
+# así que para ella nada cambia. `variante_id`, si se pasa, sólo se valida
+# contra `item_id` -- el dominio no tiene precio por variante (`item_prices`
+# no tiene esa columna); lo que se resuelve siempre es el precio del producto.
+
+
+def _item_price_dict(ip: ItemPrice) -> dict:
+    return {
+        "id": ip.id, "producto_id": ip.item_id, "lista_id": ip.price_list_id,
+        "monto": float(ip.amount), "moneda": ip.currency,
+        "desde": ip.valid_from.isoformat(),
+        "hasta": ip.valid_until.isoformat() if ip.valid_until else None,
+        "cantidad_minima": float(ip.min_quantity) if ip.min_quantity is not None else None,
+        "sucursal_id": ip.branch_id,
+    }
+
+
+def precio_vigente(conn, item_id: int, *, lista_id: int | None = None, cantidad: float = 1,
+                   sucursal_id: int | None = None, en: str = "",
+                   variante_id: int | None = None) -> float | None:
+    """Precio con vigencia (`en`, ISO; vacío = ahora) y por sucursal
+    (`sucursal_id` → `branch_id`), sobre `resolve_price`. Sin `sucursal_id` ni
+    `en` ni `variante_id` resuelve exactamente lo mismo que
+    `resolver_precio_por_cantidad` (misma llamada de fondo, con `branch_id` y
+    `at` en None)."""
+    if variante_id is not None:
+        variante = SqliteCommerceRepository(conn).get_item_variant(variante_id)
+        if variante is None or variante.item_id != item_id:
+            raise ValueError(f"la variante {variante_id} no pertenece al producto {item_id}")
+    momento = datetime.fromisoformat(en) if en else None
+    precio = SqliteCommerceRepository(conn).resolve_price(
+        item_id, price_list_id=lista_id, quantity=Decimal(str(cantidad)),
+        at=momento, branch_id=sucursal_id,
+    )
+    return float(precio) if precio is not None else None
+
+
+def set_precio_vigente(conn, lista_id: int, producto_id: int, monto: float, *,
+                       desde: str = "", hasta: str = "", sucursal_id: int | None = None,
+                       cantidad_minima: float | None = None) -> dict:
+    """Da de alta una fila de `item_prices` con vigencia y/o sucursal real —a
+    diferencia de `_upsert_precio`/`save_lista_precio_items`, que sólo tocan
+    la fila `branch_id IS NULL AND min_quantity IS NULL` del flat de Contalibra
+    y Restolibra y nunca la reemplazan. `desde` vacío es "ahora" (no el
+    sentinel `_SIN_VIGENCIA` del flat, que es un dato distinto: "sin
+    restricción de inicio").
+    """
+    item_price = ItemPrice(
+        id=None, item_id=producto_id, price_list_id=lista_id, amount=Decimal(str(monto)),
+        valid_from=datetime.fromisoformat(desde) if desde else datetime.now(),
+        valid_until=datetime.fromisoformat(hasta) if hasta else None,
+        min_quantity=Decimal(str(cantidad_minima)) if cantidad_minima is not None else None,
+        branch_id=sucursal_id,
+    )
+    saved = SqliteCommerceRepository(conn).save_item_price(item_price)
+    return _item_price_dict(saved)
+
+
+def get_precios_vigentes(conn, producto_id: int, lista_id: int | None = None) -> list[dict]:
+    """Todas las filas de `item_prices` del producto —flat, quiebres, vigencia
+    y sucursal—, para una pantalla de precios como la de VentaLibra."""
+    precios = SqliteCommerceRepository(conn).list_item_prices(producto_id)
+    if lista_id is not None:
+        precios = [p for p in precios if p.price_list_id == lista_id]
+    return [_item_price_dict(p) for p in precios]
 
 
 # ── Escritura del flat ───────────────────────────────────────────────────

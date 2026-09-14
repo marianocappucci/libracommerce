@@ -19,7 +19,9 @@ from conftest import USUARIO, _usuario  # noqa: F401  (y la fixture `abrir`, que
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from libracommerce.domain.scale import ScaleFormat, ScaleValueKind
 from libracommerce.erp import Hooks, Insumo
+from libracommerce.erp import catalogo as erp_catalogo
 from libracommerce.erp import stock as erp_stock
 from libracommerce.web.catalogo_router import (
     MOTIVOS_MERMA_GASTRONOMICOS,
@@ -402,4 +404,195 @@ def test_el_vocabulario_de_tipos_es_la_union():
     assert {"merma", "produccion", "entrada", "salida", "ajuste", "venta"} <= set(erp_stock.TIPOS)
     assert erp_stock._tipo_de_row("waste", None) == "merma"
     assert erp_stock._tipo_de_row("waste", "salida") == "salida"  # el reason_code manda
+
+
+# ── F1 de VentaLibra a LibraCommerce (2026-09-14): variantes ──────────────
+# Réplica de `ventalibra/app/services/catalog.py::CatalogService` y su router
+# (`add_variant`/`list_variants`/`get_variant`), aditivo sobre `item_variants`.
+
+
+def test_listado_de_productos_no_cambia_si_no_se_piden_variantes(client):
+    """El control del punto 2: Contalibra y Restolibra no mandan
+    `incluir_variantes`, así que la respuesta no puede llevar la clave nueva."""
+    p = _crear_producto(client, "Remera")
+    client.post(f"/api/productos/{p['id']}/variantes", json={"sku": "REM-M", "nombre": "Talle M"})
+    encontrado = next(x for x in client.get("/api/productos").json() if x["id"] == p["id"])
+    assert "variantes" not in encontrado
+
+
+def test_listado_de_productos_incluye_variantes_si_se_pide(client):
+    p = _crear_producto(client, "Remera")
+    client.post(f"/api/productos/{p['id']}/variantes",
+                json={"sku": "REM-M", "nombre": "Talle M", "atributos": {"talle": "M"}})
+    encontrado = next(x for x in client.get("/api/productos?incluir_variantes=true").json() if x["id"] == p["id"])
+    assert [v["sku"] for v in encontrado["variantes"]] == ["REM-M"]
+    assert encontrado["variantes"][0]["atributos"] == {"talle": "M"}
+
+
+def test_variantes_crud(client):
+    p = _crear_producto(client, "Zapatilla")
+    otro = _crear_producto(client, "Otro producto")
+
+    r = client.post(f"/api/productos/{p['id']}/variantes", json={"sku": "ZAP-40", "nombre": "Talle 40"})
+    assert r.status_code == 200, r.text
+    vid = r.json()["id"]
+    assert [v["sku"] for v in client.get(f"/api/productos/{p['id']}/variantes").json()] == ["ZAP-40"]
+
+    r = client.put(f"/api/productos/{p['id']}/variantes/{vid}",
+                    json={"sku": "ZAP-40", "nombre": "Talle 40 (agotado)", "activa": False})
+    assert r.status_code == 200, r.text
+    assert r.json()["nombre"] == "Talle 40 (agotado)" and not r.json()["activa"]
+
+    # SKU duplicado: error de datos del cliente, no del server.
+    assert client.post(f"/api/productos/{p['id']}/variantes", json={"sku": "ZAP-40", "nombre": "Otra"}).status_code == 409
+    # La variante es de `p`, no de `otro`.
+    assert client.put(f"/api/productos/{otro['id']}/variantes/{vid}",
+                       json={"sku": "X", "nombre": "Y"}).status_code == 404
+    assert client.get("/api/productos/99999/variantes").status_code == 404
+    assert client.post("/api/productos/99999/variantes", json={"sku": "X", "nombre": "Y"}).status_code == 404
+
+
+# ── F1 de VentaLibra a LibraCommerce: escaneo (balanza y código común) ────
+# Réplica de `ventalibra/app/services/scale.py::ScaleService.scan`.
+
+PESO = ScaleFormat()  # prefijo "20", 5+5 dígitos, peso, igual que test_scale.py
+IMPORTE = ScaleFormat(value_kind=ScaleValueKind.AMOUNT, divisor=100)
+
+
+def test_escanear_codigo_de_barras_comun(client):
+    p = _crear_producto(client, "Fideos", codigo="7791234567890")
+    r = client.get("/api/productos/escanear?code=7791234567890")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["producto"]["id"] == p["id"]
+    assert data["cantidad"] == 1.0
+    assert data["precio_unitario"] is None
+    assert data["de_balanza"] is False
+    assert "variante" not in data
+
+
+def test_escanear_codigo_inexistente_es_404(client):
+    assert client.get("/api/productos/escanear?code=0000000000000").status_code == 404
+
+
+def test_escanear_sku_de_una_variante(client):
+    p = _crear_producto(client, "Remera")
+    client.post(f"/api/productos/{p['id']}/variantes", json={"sku": "REM-M", "nombre": "Talle M"})
+    r = client.get("/api/productos/escanear?code=REM-M")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["producto"]["id"] == p["id"]
+    assert data["variante"]["sku"] == "REM-M"
+
+
+def test_escanear_etiqueta_de_balanza_por_peso(client, abrir):
+    # `permite_fraccion` es del código de unidad ("kg"), no del producto (ver
+    # el comentario en `erp/catalogo.py::_producto_dict`), pero se declara acá
+    # mismo en el alta por HTTP.
+    p = _crear_producto(client, "Jamón cocido", unidad="kg", permite_fraccion=True)
+    with abrir() as conn:
+        erp_catalogo.set_formato_balanza(conn, PESO)
+        erp_catalogo.agregar_codigo_balanza(conn, p["id"], "123")
+        conn.commit()
+
+    # 20 | 00123 | 00750 | 4 -> producto 123, 750 gramos
+    r = client.get("/api/productos/escanear?code=2000123007504")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["producto"]["id"] == p["id"]
+    assert data["cantidad"] == pytest.approx(0.750)
+    assert data["precio_unitario"] is None
+    assert data["de_balanza"] is True
+
+
+def test_escanear_etiqueta_de_balanza_por_importe(client, abrir):
+    p = _crear_producto(client, "Queso", unidad="kg")
+    with abrir() as conn:
+        erp_catalogo.set_formato_balanza(conn, IMPORTE)
+        erp_catalogo.agregar_codigo_balanza(conn, p["id"], "123")
+
+    # mismos dígitos que el de peso, pero con la balanza en modo importe:
+    # 00750 -> $7,50 (divisor 100)
+    r = client.get("/api/productos/escanear?code=2000123007504")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["cantidad"] == 1.0
+    assert data["precio_unitario"] == pytest.approx(7.50)
+    assert data["de_balanza"] is True
+
+
+def test_escanear_etiqueta_de_producto_no_cargado_es_422(client, abrir):
+    """El código se leyó bien -- lo que no existe es el producto 123 en la
+    balanza. Un 404 mandaría a buscar un código mal escaneado que en realidad
+    está bien."""
+    with abrir() as conn:
+        erp_catalogo.set_formato_balanza(conn, PESO)
+    r = client.get("/api/productos/escanear?code=2000123007504")
+    assert r.status_code == 422
+    assert "123" in r.json()["detail"]
+
+
+def test_escanear_peso_sobre_producto_que_no_admite_fraccion_es_422(client, abrir):
+    """Guarda contra el error de carga: un código de balanza cargado en un
+    producto que se vende por unidad, no por peso."""
+    p = _crear_producto(client, "Six pack", unidad="u")  # "u" no admite fracción
+    with abrir() as conn:
+        erp_catalogo.set_formato_balanza(conn, PESO)
+        erp_catalogo.agregar_codigo_balanza(conn, p["id"], "123")
+    r = client.get("/api/productos/escanear?code=2000123007504")
+    assert r.status_code == 422
+    assert "fracciones" in r.json()["detail"]
+
+
+def test_sin_balanza_configurada_todo_se_lee_como_codigo_comun(client):
+    """Sin `set_formato_balanza`, ni siquiera un EAN con la forma de una
+    etiqueta de balanza se interpreta como tal: se busca tal cual entre los
+    códigos de barra, y no matchea nada -> 404 (no 422)."""
+    assert client.get("/api/productos/escanear?code=2000123007504").status_code == 404
+
+
+# ── Corrección de revisión: `permite_fraccion` no se resetea al editar ────
+# `_upsert_unit` (repository.py) reescribe `units.allows_fraction` en CADA
+# `save_catalog_item`; sin esto, cualquier PUT de un producto en "kg" sin
+# mandar el campo apagaría la balanza por peso para TODOS los productos en
+# "kg" (hallazgo del propio F1, corregido acá).
+
+
+def _puede_pesar(client, abrir, pid, codigo_balanza):
+    """True si un código de balanza por peso resuelve para `pid` (o sea, si
+    la unidad de `pid` sigue admitiendo fracciones)."""
+    with abrir() as conn:
+        erp_catalogo.set_formato_balanza(conn, PESO)
+        erp_catalogo.agregar_codigo_balanza(conn, pid, codigo_balanza)
+        conn.commit()
+    codigo = f"20{codigo_balanza.zfill(5)}007504"[:13]
+    r = client.get(f"/api/productos/escanear?code={codigo}")
+    return r.status_code == 200
+
+
+def test_editar_sin_permite_fraccion_no_apaga_la_unidad(client, abrir):
+    p = _crear_producto(client, "Jamón cocido", unidad="kg", permite_fraccion=True)
+    # PUT sin `permite_fraccion` en el payload -- el caso de Contalibra y
+    # Restolibra, que nunca lo mandan.
+    r = client.put(f"/api/productos/{p['id']}", json={
+        "nombre": "Jamón cocido premium", "precio_venta": 2000.0, "precio_costo": 1200.0, "unidad": "kg"})
+    assert r.status_code == 200, r.text
+    assert _puede_pesar(client, abrir, p["id"], "111")
+
+
+def test_editar_con_permite_fraccion_false_explicito_si_apaga(client, abrir):
+    p = _crear_producto(client, "Queso", unidad="kg", permite_fraccion=True)
+    r = client.put(f"/api/productos/{p['id']}", json={
+        "nombre": "Queso", "precio_venta": 100.0, "precio_costo": 60.0, "unidad": "kg",
+        "permite_fraccion": False})
+    assert r.status_code == 200, r.text
+    assert not _puede_pesar(client, abrir, p["id"], "112")
+
+
+def test_crear_sin_permite_fraccion_conserva_lo_que_ya_tenia_la_unidad(client, abrir):
+    """Alta nueva sin declarar el campo: si "kg" ya venía en `True` por otro
+    producto, no se resetea a `False`."""
+    _crear_producto(client, "Primero en kg", unidad="kg", permite_fraccion=True)
+    segundo = _crear_producto(client, "Segundo en kg", unidad="kg")  # sin el campo
+    assert _puede_pesar(client, abrir, segundo["id"], "113")
 

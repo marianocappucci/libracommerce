@@ -33,8 +33,25 @@ prefijo: las recetas y el reporte de costos de Restolibra
 (`/api/productos/{pid}/receta`, `/api/productos/reportes-costos`), y el
 autocompletado `/productos/buscar` de los dos, que depende de listas de precio
 y se mueve en M2.
+
+## F1 de VentaLibra a LibraCommerce (2026-09-14): variantes y balanza
+
+Tres agregados, todos aditivos -- Contalibra y Restolibra no los llaman y no
+cambian de comportamiento:
+
+- **`GET /escanear?code=`**: balanza o código de barras común (o el SKU de una
+  variante), sobre `catalogo.escanear`. Replica
+  `ventalibra/app/services/scale.py::ScaleService.scan` y su endpoint
+  `GET /catalog/items/scan`.
+- **Variantes** (`GET`/`POST /{pid}/variantes`, `PUT /{pid}/variantes/{vid}`):
+  el CRUD que ya tiene VentaLibra por su cuenta
+  (`ventalibra/app/services/catalog.py::CatalogService`), sobre
+  `item_variants`.
+- **`incluir_variantes`** en `GET /api/productos`: opcional, default `False`.
+  Sin él, la respuesta es exactamente la de siempre.
 """
 
+import sqlite3
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
@@ -112,6 +129,11 @@ class ProductoPayload(BaseModel):
     tipo: Literal["producto", "servicio"] = "producto"
     estacion: str = ""
     vendible: bool = True
+    #: `None` (ausente) CONSERVA lo que ya tenga la unidad -- no la resetea.
+    #: Contalibra y Restolibra nunca lo mandan, así que sus unidades (en
+    #: `False` desde siempre) quedan exactamente igual. Ver
+    #: `catalogo._resolver_permite_fraccion`.
+    permite_fraccion: bool | None = None
 
 
 class CategoriaPayload(BaseModel):
@@ -136,6 +158,19 @@ class TransferenciaPayload(BaseModel):
     cantidad: float
     fecha: str = ""
     observaciones: str = ""
+
+
+class VariantePayload(BaseModel):
+    sku: str
+    nombre: str
+    atributos: dict[str, str] = {}
+
+
+class VarianteUpdatePayload(BaseModel):
+    sku: str
+    nombre: str
+    atributos: dict[str, str] = {}
+    activa: bool = True
 
 
 class AjustePayload(BaseModel):
@@ -173,13 +208,32 @@ def build_productos_router(
     router = APIRouter(prefix=prefix, tags=["productos"])
 
     @router.get("")
-    def listar(q: str = ""):
+    def listar(q: str = "", incluir_variantes: bool = False):
         with abrir() as conn:
-            return catalogo.get_all_productos(conn, q=q)
+            productos = catalogo.get_all_productos(conn, q=q)
+            if incluir_variantes:
+                for p in productos:
+                    p["variantes"] = catalogo.get_variantes_producto(conn, p["id"])
+            return productos
 
     @router.get("/unidades")
     def unidades():
         return list(opciones.unidades)
+
+    @router.get("/escanear")
+    def escanear(code: str):
+        """Balanza (`item_codes.code_type='scale'`) o código común (código de
+        barras del producto, o SKU de una variante). 404 si el código no
+        corresponde a nada; 422 si SÍ es de balanza pero apunta a algo que no
+        se puede vender así (ver `catalogo.EtiquetaBalanzaError`)."""
+        with abrir() as conn:
+            try:
+                resultado = catalogo.escanear(conn, code)
+            except catalogo.EtiquetaBalanzaError as e:
+                raise HTTPException(422, str(e)) from e
+            if resultado is None:
+                raise HTTPException(404, "No hay ningún ítem con ese código.")
+            return resultado
 
     @router.get("/categorias")
     def listar_categorias():
@@ -220,6 +274,7 @@ def build_productos_router(
                     stock_minimo=payload.stock_minimo, tipo=payload.tipo,
                     estacion=payload.estacion.strip(),
                     vendible=1 if payload.vendible else 0,
+                    permite_fraccion=payload.permite_fraccion,
                 )
             except Exception as e:
                 raise HTTPException(422, str(e)) from e
@@ -242,6 +297,7 @@ def build_productos_router(
                     activo=1 if payload.activo else 0, stock_minimo=payload.stock_minimo,
                     tipo=payload.tipo, estacion=payload.estacion.strip(),
                     vendible=1 if payload.vendible else 0,
+                    permite_fraccion=payload.permite_fraccion,
                 )
             except Exception as e:
                 raise HTTPException(422, str(e)) from e
@@ -254,6 +310,47 @@ def build_productos_router(
                 raise HTTPException(404, "Producto no encontrado")
             catalogo.delete_producto(conn, pid)
         return {"ok": True}
+
+    # ── Variantes (talle/color, presentaciones) ──────────────────────────
+
+    @router.get("/{pid}/variantes")
+    def listar_variantes(pid: int):
+        with abrir() as conn:
+            if not catalogo.get_producto(conn, pid):
+                raise HTTPException(404, "Producto no encontrado")
+            return catalogo.get_variantes_producto(conn, pid)
+
+    @router.post("/{pid}/variantes")
+    def crear_variante(pid: int, payload: VariantePayload):
+        sku = payload.sku.strip()
+        nombre = payload.nombre.strip()
+        if not sku or not nombre:
+            raise HTTPException(422, "El SKU y el nombre son obligatorios.")
+        with abrir() as conn:
+            if not catalogo.get_producto(conn, pid):
+                raise HTTPException(404, "Producto no encontrado")
+            try:
+                return catalogo.create_variante(conn, pid, sku, nombre, payload.atributos)
+            except sqlite3.IntegrityError as e:
+                # UNIQUE(sku): error de datos del cliente, no del server. Todo
+                # lo demás (una base caída, por ejemplo) tiene que seguir
+                # siendo un 500 -- no se atrapa acá.
+                raise HTTPException(409, str(e)) from e
+
+    @router.put("/{pid}/variantes/{vid}")
+    def actualizar_variante(pid: int, vid: int, payload: VarianteUpdatePayload):
+        sku = payload.sku.strip()
+        nombre = payload.nombre.strip()
+        if not sku or not nombre:
+            raise HTTPException(422, "El SKU y el nombre son obligatorios.")
+        with abrir() as conn:
+            existente = catalogo.get_variante(conn, vid)
+            if not existente or existente["producto_id"] != pid:
+                raise HTTPException(404, "Variante no encontrada")
+            try:
+                return catalogo.update_variante(conn, vid, sku, nombre, payload.atributos, payload.activa)
+            except sqlite3.IntegrityError as e:
+                raise HTTPException(409, str(e)) from e
 
     return router
 
