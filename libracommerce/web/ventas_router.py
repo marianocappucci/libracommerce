@@ -55,6 +55,10 @@ class ItemPayload(BaseModel):
     qty: float
     precio: float
     producto_id: int | None = None
+    #: La variante del catálogo (`item_variants.id`), si el ítem las tiene.
+    #: `None` es "sin variante", que es lo único que mandan Contalibra y
+    #: Restolibra hoy.
+    variante_id: int | None = None
 
 
 class PagoPayload(BaseModel):
@@ -71,6 +75,11 @@ class PagoPayload(BaseModel):
     #: cuenta para el estado de la venta y no toca la caja. Lo acredita el poll
     #: del QR o el webhook, cuando MercadoPago dice que la plata entró.
     cobrar_con_qr: bool = False
+    #: Cuánto entregó el cliente, para el vuelto (D4). `None` (el default) no
+    #: escribe la columna `ventas_pagos.recibido`: es lo que mantiene el
+    #: `INSERT` idéntico al de hoy para Contalibra y Restolibra, que no la
+    #: mandan.
+    recibido: float | None = None
 
     @field_validator("medio")
     @classmethod
@@ -99,6 +108,24 @@ class VentaPayload(BaseModel):
     pagos: list[PagoPayload]
 
 
+class DevolucionLinea(BaseModel):
+    #: El id de `sale_items`, no la posición: acá la línea tiene id estable.
+    sale_item_id: int
+    cantidad: float
+
+
+class DevolucionPayload(BaseModel):
+    lineas: list[DevolucionLinea]
+    deposito_id: int
+    #: Por dónde vuelve la plata; no tiene por qué ser el medio que cobró.
+    medio_pago: str = "efectivo"
+
+    @field_validator("medio_pago")
+    @classmethod
+    def _medio_elegible(cls, medio: str) -> str:
+        return medios_pago.validar(medio)
+
+
 def _nombre_de_cliente_default(cliente_id: int) -> str | None:
     from libracore.db.clients import get_client
 
@@ -117,8 +144,15 @@ class OpcionesVentas:
     #: El nombre con el que se snapshotea un cliente elegido por id. Default:
     #: el registro de clientes de LibraCore.
     nombre_de_cliente: Callable[[int], str | None] = _nombre_de_cliente_default
-    #: Los ganchos del producto (receta, pedido cobrado, ...).
+    #: Los ganchos del producto (receta, pedido cobrado, numerador, turno...).
     hooks: Hooks = field(default=SIN_GANCHOS)
+    #: Sin turno abierto (según `hooks.turno_para`), la venta no se registra:
+    #: `ventas.SinTurno` → 409. Default `False` (el comportamiento de hoy).
+    exigir_turno: bool = False
+    #: Los movimientos de caja de una venta llevan el `turno_id`. Default
+    #: `False` (el comportamiento de hoy); VentaLibra lo prende porque arquea
+    #: sumando `caja_movimientos` por turno, no por `venta_links`.
+    caja_con_turno: bool = False
 
 
 def build_ventas_router(
@@ -157,6 +191,7 @@ def build_ventas_router(
             {
                 "nombre": i.nombre.strip(), "qty": i.qty, "precio": max(0.0, i.precio),
                 "subtotal": round(i.qty * max(0.0, i.precio), 2), "producto_id": i.producto_id,
+                "variante_id": i.variante_id,
             }
             for i in payload.items if i.nombre.strip() and i.qty > 0
         ]
@@ -176,6 +211,7 @@ def build_ventas_router(
                 "medio": p.medio, "monto": p.monto, "referencia": p.referencia,
                 "estado": (acreditacion.EstadoAcreditacion.PENDIENTE if p.cobrar_con_qr
                            else acreditacion.EstadoAcreditacion.APROBADO).value,
+                "recibido": p.recibido,
             }
             for p in payload.pagos if p.monto > 0
         ]
@@ -194,7 +230,10 @@ def build_ventas_router(
                 observaciones=payload.observaciones.strip(),
                 estado=ventas.estado_segun_pagos(total, pagos), pagos=pagos,
                 stock_habilitado=bool(opciones.stock_habilitado()), hooks=opciones.hooks,
+                exigir_turno=opciones.exigir_turno, caja_con_turno=opciones.caja_con_turno,
             )
+        except ventas.SinTurno as exc:
+            raise HTTPException(409, str(exc)) from None
         except (sqlite3.IntegrityError, RuntimeError):
             raise HTTPException(
                 409, "No se pudo registrar la venta (conflicto con otra venta simultánea). Reintentá."
@@ -217,11 +256,39 @@ def build_ventas_router(
             if not ventas.obtener_venta(conn, vid):
                 raise HTTPException(404, "Venta no encontrada")
             try:
-                ventas.anular_venta(conn, vid, usuario_id=user.get("id"), hooks=opciones.hooks)
+                ventas.anular_venta(conn, vid, usuario_id=user.get("id"), hooks=opciones.hooks,
+                                    caja_con_turno=opciones.caja_con_turno)
                 conn.commit()
+            except ventas.VentaConDevoluciones as exc:
+                conn.rollback()
+                raise HTTPException(409, str(exc)) from None
             except Exception:
                 conn.rollback()
                 raise
             return ventas.obtener_venta(conn, vid)
+
+    @router.post("/{vid}/devolver", dependencies=gate_anular)
+    def devolver(vid: int, payload: DevolucionPayload, user: dict = Depends(usuario)):
+        """Devuelve algunas líneas de una venta y reintegra su importe. Mismo
+        gate que `anular`: es plata que sale, no una consulta."""
+        with abrir() as conn:
+            if not ventas.obtener_venta(conn, vid):
+                raise HTTPException(404, "Venta no encontrada")
+            try:
+                resultado = ventas.devolver_items(
+                    conn, vid,
+                    devoluciones={linea.sale_item_id: linea.cantidad for linea in payload.lineas},
+                    deposito_id=payload.deposito_id, medio_pago=payload.medio_pago,
+                    usuario_id=user.get("id"), hooks=opciones.hooks,
+                    caja_con_turno=opciones.caja_con_turno,
+                )
+                conn.commit()
+            except ValueError as exc:
+                conn.rollback()
+                raise HTTPException(422, str(exc)) from None
+            except Exception:
+                conn.rollback()
+                raise
+            return resultado["venta"]
 
     return router

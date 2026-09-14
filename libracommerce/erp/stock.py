@@ -35,6 +35,12 @@ from .hooks import SIN_GANCHOS, Hooks
 _TIPO_A_MOVEMENT_TYPE = {
     "venta": "sale",
     "anulacion": "return",
+    # Reposición por una devolución PARCIAL (`erp.ventas.devolver_items`), no
+    # por la anulación de la venta entera. Mismo `movement_type` que
+    # `anulacion` (las dos son un `return`); lo que las distingue es el
+    # `reason_code`, que es justo lo que `anular_venta` necesita para no
+    # reponer dos veces lo que una devolución ya repuso (ver su docstring).
+    "devolucion": "return",
     "ajuste": "adjustment",
     "entrada": "adjustment",
     "salida": "adjustment",
@@ -66,6 +72,7 @@ TIPO_LABELS = {
     "venta": "Venta",
     "merma": "Merma",
     "produccion": "Producción",
+    "devolucion": "Devolución",
 }
 
 
@@ -77,11 +84,15 @@ def add_movimiento_stock(conn, producto_id: int, tipo: str, cantidad: float,
                          referencia: str = "", fecha: str = "",
                          venta_id: int | None = None,
                          usuario_id: int | None = None,
-                         deposito_id: int | None = None):
+                         deposito_id: int | None = None,
+                         variant_id: int | None = None):
     """Agrega un movimiento. cantidad positiva = entrada, negativa = salida.
 
     Un movimiento de cantidad 0 se ignora: `stock_movements` tiene
     `CHECK (quantity_delta <> 0)` y una fila en cero no aporta nada al ledger.
+
+    `variant_id` viaja al ledger tal cual: `None` (el default, y lo único que
+    manda hoy Contalibra/Restolibra) es "este ítem no tiene variantes".
     """
     if not cantidad:
         return
@@ -94,10 +105,10 @@ def add_movimiento_stock(conn, producto_id: int, tipo: str, cantidad: float,
     _deposito = deposito_id or get_default_deposito_id(conn)
     conn.execute(
         """INSERT INTO stock_movements
-           (item_id, location_id, movement_type, quantity_delta, occurred_at,
+           (item_id, variant_id, location_id, movement_type, quantity_delta, occurred_at,
             source_type, source_id, note, created_by, reason_code)
-           VALUES (?,?,?,?,?,?,?,?,?,?)""",
-        (producto_id, _deposito, _TIPO_A_MOVEMENT_TYPE[tipo], cantidad, _fecha,
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        (producto_id, variant_id, _deposito, _TIPO_A_MOVEMENT_TYPE[tipo], cantidad, _fecha,
          "venta" if venta_id else None, venta_id, referencia, usuario_id, tipo),
     )
 
@@ -232,6 +243,8 @@ def descontar_stock_venta(conn, venta_id: int, items: list, fecha: str = "",
         qty = abs(float(item.get("qty", 0)))
         insumos = hooks.resolver_receta(pid, item)
         if insumos:
+            # La receta se resuelve en OTROS ítems (los insumos): la variante
+            # del plato vendido no tiene sentido acá, así que no viaja.
             for insumo in insumos:
                 add_movimiento_stock(
                     conn, producto_id=insumo.item_id, tipo="venta",
@@ -245,4 +258,5 @@ def descontar_stock_venta(conn, venta_id: int, items: list, fecha: str = "",
                 cantidad=-qty,
                 referencia=f"Venta ID {venta_id}",
                 venta_id=venta_id, usuario_id=usuario_id, fecha=fecha,
+                variant_id=item.get("variante_id"),
             )

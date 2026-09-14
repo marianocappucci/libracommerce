@@ -202,3 +202,130 @@ def test_conflicto_de_numero_es_409(abrir_ventas, monkeypatch):
         "fecha": HOY, "items": [{"nombre": "X", "qty": 1, "precio": 100}], "pagos": [{"medio": "efectivo", "monto": 100}]})
     assert r.status_code == 409
     assert len(client.get("/api/ventas").json()) == 1
+
+
+# ── F1: opciones nuevas (exigir_turno, caja_con_turno, numerador) ─────────
+
+
+def test_exigir_turno_sin_turno_da_409(abrir_ventas):
+    client = _app(abrir_ventas, OpcionesVentas(exigir_turno=True))
+    r = client.post("/api/ventas", json={
+        "fecha": HOY, "items": [{"nombre": "X", "qty": 1, "precio": 100}],
+        "pagos": [{"medio": "efectivo", "monto": 100}]})
+    assert r.status_code == 409
+    assert client.get("/api/ventas").json() == []
+
+
+def test_exigir_turno_falso_por_default_no_bloquea(client):
+    """El comportamiento de hoy: sin la opción, una venta sin turno se
+    registra igual (Contalibra y Restolibra no la prenden)."""
+    venta = _venta(client)
+    assert venta["estado"] == "cobrada"
+
+
+def test_caja_con_turno_pasa_por_las_opciones(abrir_ventas):
+    from libracore.db.turnos import create_turno
+
+    with abrir_ventas() as conn:
+        tid = create_turno(USUARIO["id"], 500.0)
+        conn.commit()
+    client = _app(abrir_ventas, OpcionesVentas(caja_con_turno=True))
+    _venta(client)
+    with abrir_ventas() as conn:
+        row = conn.execute("SELECT turno_id FROM caja_movimientos").fetchone()
+        assert row["turno_id"] == tid
+
+
+def test_numerador_pasa_por_las_opciones(abrir_ventas):
+    ganchos = Hooks(numerador=lambda conn: "POS-000001")
+    client = _app(abrir_ventas, OpcionesVentas(hooks=ganchos))
+    venta = _venta(client)
+    assert venta["numero"] == "POS-000001"
+
+
+# ── F1: variantes y vuelto en el contrato HTTP ────────────────────────────
+
+
+def test_variante_id_viaja_en_el_payload(abrir_ventas):
+    client = _app(abrir_ventas)
+    pid = client.post("/api/productos", json={"nombre": "Yerba", "precio_venta": 100.0, "precio_costo": 60.0}).json()["id"]
+    with abrir_ventas() as conn:
+        vidr = conn.execute(
+            "INSERT INTO item_variants (item_id, sku, name) VALUES (?, 'SKU-1', 'Chica')", (pid,)
+        ).lastrowid
+        conn.commit()
+    venta = _venta(client, items=[
+        {"nombre": "Yerba Chica", "qty": 1, "precio": 100.0, "producto_id": pid, "variante_id": vidr},
+    ], pagos=[{"medio": "efectivo", "monto": 100.0}])
+    assert venta["items"][0]["variante_id"] == vidr
+
+
+def test_recibido_viaja_cuando_la_columna_existe(abrir_ventas):
+    with abrir_ventas() as conn:
+        conn.execute("ALTER TABLE ventas_pagos ADD COLUMN recibido NUMERIC")
+        conn.commit()
+    client = _app(abrir_ventas)
+    venta = _venta(client, pagos=[{"medio": "efectivo", "monto": 200.0, "recibido": 500.0}])
+    assert float(venta["pagos"][0]["recibido"]) == 500.0
+
+
+# ── F1: devolución parcial por HTTP ────────────────────────────────────────
+
+
+def test_devolver_reintegra_y_gatea_como_anular(abrir_ventas):
+    client = _app(abrir_ventas)
+    pid = client.post("/api/productos", json={"nombre": "Yerba", "precio_venta": 100.0, "precio_costo": 60.0}).json()["id"]
+    client.post(f"/api/stock/{pid}/ajuste", json={"modo": "absoluto", "cantidad": 10})
+    venta = _venta(client, items=[{"nombre": "Yerba", "qty": 4, "precio": 100.0, "producto_id": pid}],
+                  pagos=[{"medio": "efectivo", "monto": 400.0}])
+    with abrir_ventas() as conn:
+        item_id_linea = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (venta["id"],)
+        ).fetchone()["id"]
+        deposito_id = conn.execute(
+            "SELECT location_id FROM stock_movements WHERE source_id=?", (venta["id"],)
+        ).fetchone()["location_id"]
+
+    _con_rol("operador")
+    r = client.post(f"/api/ventas/{venta['id']}/devolver", json={
+        "lineas": [{"sale_item_id": item_id_linea, "cantidad": 1}], "deposito_id": deposito_id})
+    assert r.status_code == 403  # mismo gate que anular
+    _con_rol("admin")
+
+    r = client.post(f"/api/ventas/{venta['id']}/devolver", json={
+        "lineas": [{"sale_item_id": item_id_linea, "cantidad": 1}], "deposito_id": deposito_id})
+    assert r.status_code == 200, r.text
+    assert r.json()["estado"] == "devuelta_parcial"
+    assert client.get(f"/api/stock/{pid}").json()["stock_actual"] == 7.0  # 10 - 4 + 1
+
+    # Pasarse del tope es 422, no 500.
+    r = client.post(f"/api/ventas/{venta['id']}/devolver", json={
+        "lineas": [{"sale_item_id": item_id_linea, "cantidad": 10}], "deposito_id": deposito_id})
+    assert r.status_code == 422
+
+    assert client.post("/api/ventas/999/devolver", json={
+        "lineas": [{"sale_item_id": item_id_linea, "cantidad": 1}], "deposito_id": deposito_id}).status_code == 404
+
+
+def test_anular_con_devoluciones_es_409(abrir_ventas):
+    client = _app(abrir_ventas)
+    pid = client.post("/api/productos", json={"nombre": "Yerba", "precio_venta": 100.0, "precio_costo": 60.0}).json()["id"]
+    client.post(f"/api/stock/{pid}/ajuste", json={"modo": "absoluto", "cantidad": 10})
+    venta = _venta(client, items=[{"nombre": "Yerba", "qty": 4, "precio": 100.0, "producto_id": pid}],
+                  pagos=[{"medio": "efectivo", "monto": 400.0}])
+    with abrir_ventas() as conn:
+        item_id_linea = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (venta["id"],)
+        ).fetchone()["id"]
+        deposito_id = conn.execute(
+            "SELECT location_id FROM stock_movements WHERE source_id=?", (venta["id"],)
+        ).fetchone()["location_id"]
+    r = client.post(f"/api/ventas/{venta['id']}/devolver", json={
+        "lineas": [{"sale_item_id": item_id_linea, "cantidad": 1}], "deposito_id": deposito_id})
+    assert r.status_code == 200, r.text
+
+    r = client.post(f"/api/ventas/{venta['id']}/anular")
+    assert r.status_code == 409
+    assert "devoluciones" in r.json()["detail"].lower()
+    # La venta sigue como estaba: no se anuló.
+    assert client.get(f"/api/ventas/{venta['id']}").json()["estado"] == "devuelta_parcial"

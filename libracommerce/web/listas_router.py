@@ -17,6 +17,12 @@ Remitos, que tienen cada uno su gate).
   la ruta histórica). Lo que variaba: Restolibra devuelve sólo vendibles y no
   filtra por `tipo`; Contalibra filtra por `tipo` para Facturas. Acá `tipo` se
   acepta siempre y `solo_vendibles` es opción.
+- `build_precios_vigentes_router` (F1 de VentaLibra, 2026-09-14): alta y
+  lectura de precios con vigencia real y por sucursal. Aditivo y aparte:
+  Contalibra y Restolibra no la montan. `build_listas_precio_router` y
+  `build_quiebres_router` siguen resolviendo exactamente igual que antes;
+  `precio_por_cantidad` (`GET /{lista_id}/precio`) sólo cambia de comportamiento
+  si se le pasan `sucursal_id`, `en` o `variante_id`.
 """
 
 from collections.abc import Callable
@@ -65,6 +71,14 @@ class QuiebrePayload(BaseModel):
 
 class QuiebresPayload(BaseModel):
     quiebres: list[QuiebrePayload]
+
+
+class PrecioVigentePayload(BaseModel):
+    monto: float
+    desde: str = ""  # ISO datetime; vacío = ahora
+    hasta: str = ""  # ISO datetime; vacío = sin fin
+    sucursal_id: int | None = None
+    cantidad_minima: float | None = None
 
 
 def build_listas_precio_router(
@@ -180,10 +194,68 @@ def build_quiebres_router(
             return lp.get_quiebres(conn, lista_id, producto_id)
 
     @router.get("/{lista_id}/precio")
-    def precio_por_cantidad(lista_id: int, producto_id: int, cantidad: float = 1):
-        """`precio: null` si el producto no tiene precio en la lista."""
+    def precio_por_cantidad(
+        lista_id: int, producto_id: int, cantidad: float = 1,
+        sucursal_id: int | None = None, en: str = "", variante_id: int | None = None,
+    ):
+        """`precio: null` si el producto no tiene precio en la lista.
+
+        Sin `sucursal_id`, `en` ni `variante_id` (el caso de Contalibra y
+        Restolibra) la respuesta es EXACTAMENTE la de siempre: la misma
+        llamada a `resolver_precio_por_cantidad` de antes. Con alguno de los
+        tres, resuelve con vigencia y sucursal via `lp.precio_vigente`.
+        """
         with abrir() as conn:
-            return {"precio": lp.resolver_precio_por_cantidad(conn, lista_id, producto_id, cantidad)}
+            if sucursal_id is None and not en and variante_id is None:
+                return {"precio": lp.resolver_precio_por_cantidad(conn, lista_id, producto_id, cantidad)}
+            try:
+                precio = lp.precio_vigente(
+                    conn, producto_id, lista_id=lista_id, cantidad=cantidad,
+                    sucursal_id=sucursal_id, en=en, variante_id=variante_id,
+                )
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
+            return {"precio": precio}
+
+    return router
+
+
+def build_precios_vigentes_router(
+    *,
+    conexion: Conexion | None = None,
+    prefix: str = "/api/listas-precio",
+):
+    """Alta y lectura de precios con vigencia real y por sucursal
+    (`item_prices` completo) -- factory aparte de `build_listas_precio_router`
+    porque Contalibra y Restolibra no la montan: ninguno de los dos carga
+    vigencia ni sucursal, y `save_lista_precio_items`/`_upsert_precio` (los que
+    sí montan) nunca tocan estas filas.
+
+    Reemplaza para VentaLibra a `ventalibra/app/routers/pricing.py`
+    (`POST /pricing/items/{item_id}/prices`, `GET .../resolve`), que hoy
+    llama al repositorio del motor directo sin pasar por esta capa.
+    """
+    abrir, _ = _deps(None, conexion)
+    router = APIRouter(prefix=prefix, tags=["precios_vigentes"])
+
+    @router.post("/{lista_id}/items/{producto_id}/precio-vigente")
+    def guardar(lista_id: int, producto_id: int, payload: PrecioVigentePayload):
+        with abrir() as conn:
+            if lp.get_lista_precio(conn, lista_id) is None:
+                raise HTTPException(404, "Lista de precio no encontrada")
+            try:
+                return lp.set_precio_vigente(
+                    conn, lista_id, producto_id, payload.monto,
+                    desde=payload.desde, hasta=payload.hasta,
+                    sucursal_id=payload.sucursal_id, cantidad_minima=payload.cantidad_minima,
+                )
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
+
+    @router.get("/items/{producto_id}/vigencias")
+    def listar(producto_id: int, lista_id: int | None = None):
+        with abrir() as conn:
+            return lp.get_precios_vigentes(conn, producto_id, lista_id=lista_id)
 
     return router
 

@@ -9,6 +9,8 @@ Ventas, Facturas, Presupuestos y Remitos esperan de `/productos/buscar`.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 from conftest import _usuario  # (la fixture `abrir` la carga pytest desde conftest)
 from fastapi import FastAPI
@@ -19,6 +21,7 @@ from libracommerce.web.catalogo_router import build_productos_router
 from libracommerce.web.listas_router import (
     build_buscar_productos_router,
     build_listas_precio_router,
+    build_precios_vigentes_router,
     build_quiebres_router,
 )
 
@@ -28,6 +31,7 @@ def _app(abrir, *, solo_vendibles=False) -> TestClient:
     app.include_router(build_productos_router(conexion=abrir, usuario_actual=_usuario))
     app.include_router(build_listas_precio_router(conexion=abrir))
     app.include_router(build_quiebres_router(conexion=abrir))
+    app.include_router(build_precios_vigentes_router(conexion=abrir))
     app.include_router(build_buscar_productos_router(conexion=abrir, usuario_actual=_usuario, solo_vendibles=solo_vendibles))
     return TestClient(app)
 
@@ -180,3 +184,89 @@ def test_buscar_tiene_tope(client):
     for i in range(25):
         _producto(client, f"Producto {i:02d}")
     assert len(client.get("/productos/buscar?q=Producto").json()) == 20
+
+
+# ── F1 de VentaLibra a LibraCommerce (2026-09-14): vigencia y sucursal ────
+# `resolve_price` (motor) ya resuelve por `valid_from`/`valid_until`/`branch_id`;
+# esta sección fija que la capa web los expone de forma aditiva sobre
+# `/precio` y el alta nueva de `build_precios_vigentes_router`.
+
+
+def test_precio_sin_parametros_nuevos_no_cambia(client, abrir):
+    """El control del punto 3: sin sucursal_id/en/variante_id, `/precio` sigue
+    resolviendo el flat de siempre (mismo camino que
+    `test_guardar_leer_y_resolver_por_la_api`)."""
+    lid, pid = _lista_con_producto(client, abrir)
+    r = client.get(f"/api/listas-precio/{lid}/precio?producto_id={pid}&cantidad=1")
+    assert r.status_code == 200 and r.json() == {"precio": 90.0}
+
+
+def test_precio_vigente_por_sucursal(client, abrir):
+    p = _producto(client, "Fideos", precio_venta=100)
+    lista = _lista(client)
+    client.put(f"/api/listas-precio/{lista['id']}/items", json={"precios": {str(p['id']): 90}})
+
+    r = client.post(f"/api/listas-precio/{lista['id']}/items/{p['id']}/precio-vigente",
+                    json={"monto": 75, "sucursal_id": 5})
+    assert r.status_code == 200, r.text
+    assert r.json()["sucursal_id"] == 5 and r.json()["monto"] == 75.0
+
+    # Sin sucursal: el flat de siempre no se tocó.
+    assert client.get(f"/api/listas-precio/{lista['id']}/precio?producto_id={p['id']}").json() == {"precio": 90.0}
+    # Con la sucursal 5: el precio especial.
+    assert client.get(
+        f"/api/listas-precio/{lista['id']}/precio?producto_id={p['id']}&sucursal_id=5"
+    ).json() == {"precio": 75.0}
+    # Otra sucursal sin precio propio: sigue en el general.
+    assert client.get(
+        f"/api/listas-precio/{lista['id']}/precio?producto_id={p['id']}&sucursal_id=9"
+    ).json() == {"precio": 90.0}
+
+
+def test_precio_vigente_no_aplica_una_promo_vencida(client, abrir):
+    p = _producto(client, "Fideos", precio_venta=100)
+    lista = _lista(client)
+    client.put(f"/api/listas-precio/{lista['id']}/items", json={"precios": {str(p['id']): 90}})
+    client.post(f"/api/listas-precio/{lista['id']}/items/{p['id']}/precio-vigente",
+                json={"monto": 50, "desde": "2020-01-01T00:00:00", "hasta": "2020-01-31T00:00:00"})
+
+    ahora = datetime.now().isoformat()
+    r_hoy = client.get(f"/api/listas-precio/{lista['id']}/precio?producto_id={p['id']}&en={ahora}")
+    assert r_hoy.json() == {"precio": 90.0}, "la promo vencida en 2020 no puede seguir aplicando hoy"
+
+    r_en_promo = client.get(
+        f"/api/listas-precio/{lista['id']}/precio?producto_id={p['id']}&en=2020-01-15T00:00:00"
+    )
+    assert r_en_promo.json() == {"precio": 50.0}, "consultada DENTRO de su ventana, la promo sí aplica"
+
+
+def test_precio_vigente_valida_valid_until(client, abrir):
+    p = _producto(client, "Fideos")
+    lista = _lista(client)
+    r = client.post(f"/api/listas-precio/{lista['id']}/items/{p['id']}/precio-vigente",
+                    json={"monto": 50, "desde": "2020-02-01T00:00:00", "hasta": "2020-01-01T00:00:00"})
+    assert r.status_code == 422
+
+
+def test_precio_vigente_con_variante_ajena_es_422(client, abrir):
+    p = _producto(client, "Remera")
+    otro = _producto(client, "Pantalón")
+    lista = _lista(client)
+    v = client.post(f"/api/productos/{otro['id']}/variantes", json={"sku": "PAN-M", "nombre": "Talle M"})
+    assert v.status_code == 200, v.text
+    vid = v.json()["id"]
+    r = client.get(f"/api/listas-precio/{lista['id']}/precio?producto_id={p['id']}&variante_id={vid}")
+    assert r.status_code == 422
+
+
+def test_get_precios_vigentes(client, abrir):
+    p = _producto(client, "Fideos", precio_venta=100)
+    lista = _lista(client)
+    client.put(f"/api/listas-precio/{lista['id']}/items", json={"precios": {str(p['id']): 90}})
+    client.post(f"/api/listas-precio/{lista['id']}/items/{p['id']}/precio-vigente",
+                json={"monto": 75, "sucursal_id": 5})
+
+    filas = client.get(f"/api/listas-precio/items/{p['id']}/vigencias").json()
+    assert {f["monto"] for f in filas} == {90.0, 75.0}
+    filas_lista = client.get(f"/api/listas-precio/items/{p['id']}/vigencias?lista_id={lista['id']}").json()
+    assert len(filas_lista) == 2
