@@ -329,3 +329,83 @@ def test_anular_con_devoluciones_es_409(abrir_ventas):
     assert "devoluciones" in r.json()["detail"].lower()
     # La venta sigue como estaba: no se anuló.
     assert client.get(f"/api/ventas/{venta['id']}").json()["estado"] == "devuelta_parcial"
+
+
+# ── Huecos de VentaLibra (v0.16.2) ─────────────────────────────────────────
+
+
+def test_producto_inexistente_da_422_no_409(client):
+    """Punto 1: antes de esto, un `producto_id` inventado se reintentaba 10
+    veces y terminaba en 409 (el mensaje de "otra venta simultánea")."""
+    resp = client.post("/api/ventas", json={
+        "fecha": HOY, "items": [{"nombre": "Fantasma", "qty": 1, "precio": 50, "producto_id": 999999}],
+        "pagos": [{"medio": "efectivo", "monto": 50}]})
+    assert resp.status_code == 422, resp.text
+    assert "999999" in resp.json()["detail"]
+    assert client.get("/api/ventas").json() == []
+
+
+def test_exigir_pago_completo_rechaza_pago_insuficiente(abrir_ventas):
+    client = _app(abrir_ventas, OpcionesVentas(exigir_pago_completo=True))
+    resp = client.post("/api/ventas", json={
+        "fecha": HOY, "items": [{"nombre": "X", "qty": 1, "precio": 100}],
+        "pagos": [{"medio": "efectivo", "monto": 50}]})
+    assert resp.status_code == 422, resp.text
+    assert client.get("/api/ventas").json() == []
+
+
+def test_exigir_pago_completo_acepta_lo_declarado_aunque_sea_qr_pendiente(abrir_ventas):
+    """Lo que cuenta es lo DECLARADO, no lo acreditado: un QR pendiente por
+    el total completo no se rechaza."""
+    client = _app(abrir_ventas, OpcionesVentas(exigir_pago_completo=True))
+    venta = _venta(client, pagos=[{"medio": "mercadopago", "monto": 200.0, "cobrar_con_qr": True}])
+    assert venta["estado"] == "pendiente"
+
+
+def test_exigir_pago_completo_falso_por_default_no_bloquea(client):
+    """El comportamiento de hoy: Contalibra y Restolibra no prenden la opción."""
+    parcial = _venta(client, pagos=[{"medio": "efectivo", "monto": 50.0}])
+    assert parcial["estado"] == "parcial"
+
+
+def test_exigir_cliente_para_fiar_rechaza_cc_sin_cliente(abrir_ventas):
+    client = _app(abrir_ventas, OpcionesVentas(exigir_cliente_para_fiar=True))
+    resp = client.post("/api/ventas", json={
+        "fecha": HOY, "items": [{"nombre": "X", "qty": 1, "precio": 100}],
+        "pagos": [{"medio": "cuenta_corriente", "monto": 100}]})
+    assert resp.status_code == 422, resp.text
+    assert client.get("/api/ventas").json() == []
+
+
+def test_exigir_cliente_para_fiar_acepta_con_cliente(abrir_ventas):
+    client = _app(abrir_ventas, OpcionesVentas(exigir_cliente_para_fiar=True))
+    with abrir_ventas() as conn:
+        conn.execute("INSERT INTO clients (id, name) VALUES (3, 'Cliente')")
+        conn.execute("INSERT INTO parties (id, party_type, display_name) VALUES (3, 'customer', 'Cliente')")
+        conn.commit()
+    venta = _venta(client, cliente_id=3, pagos=[{"medio": "cuenta_corriente", "monto": 200.0}])
+    assert venta["estado"] == "cobrada"
+
+
+def test_exigir_cliente_para_fiar_falso_por_default_permite(client):
+    """El comportamiento de hoy: Contalibra y Restolibra no prenden la opción."""
+    venta = _venta(client, pagos=[{"medio": "cuenta_corriente", "monto": 200.0}])
+    assert venta["estado"] == "cobrada"
+
+
+def test_recibido_menor_que_monto_422(client):
+    """Punto 3, para todos: un vuelto negativo es un dato imposible."""
+    resp = client.post("/api/ventas", json={
+        "fecha": HOY, "items": [{"nombre": "X", "qty": 1, "precio": 100}],
+        "pagos": [{"medio": "efectivo", "monto": 100, "recibido": 50}]})
+    assert resp.status_code == 422
+    assert client.get("/api/ventas").json() == []
+
+
+def test_recibido_igual_o_mayor_que_monto_no_rebota(abrir_ventas):
+    with abrir_ventas() as conn:
+        conn.execute("ALTER TABLE ventas_pagos ADD COLUMN recibido NUMERIC")
+        conn.commit()
+    client = _app(abrir_ventas)
+    venta = _venta(client, pagos=[{"medio": "efectivo", "monto": 200.0, "recibido": 200.0}])
+    assert float(venta["pagos"][0]["recibido"]) == 200.0

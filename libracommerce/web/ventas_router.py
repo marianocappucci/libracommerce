@@ -43,6 +43,7 @@ _fastapi()
 from fastapi import APIRouter, Depends, HTTPException  # noqa: E402
 from libracore import medios_pago  # noqa: E402
 from libracore import pagos as acreditacion  # noqa: E402
+from libracore.db.caja import MEDIO_CUENTA_CORRIENTE  # noqa: E402
 from pydantic import BaseModel, field_validator, model_validator  # noqa: E402
 
 #: El medio con el que cobra el QR de caja. Pasa por `medios_pago.validar` y no
@@ -94,6 +95,18 @@ class PagoPayload(BaseModel):
             raise ValueError(
                 f"`cobrar_con_qr` sólo aplica al medio '{MEDIO_DEL_QR}': el QR "
                 f"de MercadoPago no cobra un pago en '{self.medio}'."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _recibido_no_menor_que_monto(self):
+        """🔴 Para todos: un `recibido` menor que `monto` es un vuelto
+        negativo, un dato imposible. Contalibra y Restolibra nunca mandan
+        `recibido` (queda `None`), así que esta validación no les cambia nada."""
+        if self.recibido is not None and self.recibido < self.monto:
+            raise ValueError(
+                f"`recibido` ({self.recibido}) no puede ser menor que `monto` "
+                f"({self.monto}): el vuelto no puede ser negativo."
             )
         return self
 
@@ -153,6 +166,14 @@ class OpcionesVentas:
     #: `False` (el comportamiento de hoy); VentaLibra lo prende porque arquea
     #: sumando `caja_movimientos` por turno, no por `venta_links`.
     caja_con_turno: bool = False
+    #: Una venta cuyos pagos DECLARADOS (acreditados + pendientes de QR) no
+    #: alcanzan el total se rechaza con 422 antes de escribir nada. Default
+    #: `False` (el comportamiento de hoy: queda `parcial`/`pendiente`).
+    exigir_pago_completo: bool = False
+    #: Un pago en `cuenta_corriente` sin `cliente_id` se rechaza con 422 antes
+    #: de escribir nada — una deuda que no es de nadie no se puede cobrar.
+    #: Default `False` (el comportamiento de hoy).
+    exigir_cliente_para_fiar: bool = False
 
 
 def build_ventas_router(
@@ -218,6 +239,28 @@ def build_ventas_router(
         if not pagos:
             raise HTTPException(422, "Debe registrar al menos un medio de pago.")
 
+        if opciones.exigir_pago_completo:
+            # "Declarado" y no "acreditado": un pago `cobrar_con_qr` todavía
+            # no acreditó nada, pero el mostrador ya dijo cuánto va a entrar
+            # por ahí — es lo que hay que exigir que cubra el total, antes de
+            # escribir nada.
+            declarado = round(sum(p["monto"] for p in pagos), 2)
+            if declarado < total:
+                raise HTTPException(
+                    422,
+                    f"Los pagos declarados (${declarado}) no cubren el total de "
+                    f"la venta (${total})."
+                )
+
+        if opciones.exigir_cliente_para_fiar and not payload.cliente_id and any(
+            p["medio"] == MEDIO_CUENTA_CORRIENTE for p in pagos
+        ):
+            raise HTTPException(
+                422,
+                "No se puede fiar sin cliente: una venta con un pago en "
+                "cuenta corriente necesita `cliente_id`."
+            )
+
         cliente_nombre = payload.cliente_nombre.strip()
         if payload.cliente_id:
             cliente_nombre = opciones.nombre_de_cliente(payload.cliente_id) or cliente_nombre
@@ -234,6 +277,11 @@ def build_ventas_router(
             )
         except ventas.SinTurno as exc:
             raise HTTPException(409, str(exc)) from None
+        except ventas.ProductoInexistente as exc:
+            # 🔴 No es un conflicto con otra venta: es un dato del pedido que
+            # nunca iba a dejar de fallar. Va ANTES del catch-all de abajo,
+            # que si no la atraparía como si lo fuera.
+            raise HTTPException(422, str(exc)) from None
         except (sqlite3.IntegrityError, RuntimeError):
             raise HTTPException(
                 409, "No se pudo registrar la venta (conflicto con otra venta simultánea). Reintentá."
