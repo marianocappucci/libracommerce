@@ -104,6 +104,16 @@ class SinTurno(Exception):
     La venta no se llega a registrar: nada queda escrito a medio camino."""
 
 
+class ProductoInexistente(ValueError):
+    """Un ítem de la venta trae un `producto_id` que no existe en el catálogo
+    (violación de FK en `sale_items.item_id`).
+
+    No es un conflicto de otra venta simultánea —eso es `sales.number`—, así
+    que `crear_venta_directa` no la reintenta: es un dato del pedido que nunca
+    va a dejar de fallar, insistir 10 veces sólo demora el 422 que corresponde
+    de entrada. Ver `_es_conflicto_de_numero`."""
+
+
 def estado_de_row(status: str, status_detail: str | None) -> str:
     return status_detail or _STATUS_A_ESTADO.get(status, status)
 
@@ -287,6 +297,48 @@ def registrar_venta(conn, *, fecha: str, items: list, subtotal: float, descuento
     return venta_id
 
 
+#: Lo que nombra la violación de unicidad de `sales.number` en cada motor —la
+#: ÚNICA que justifica reintentar, porque es la que puede desaparecer sola en
+#: una transacción nueva (otra venta se quedó con ese número). SQLite nombra
+#: la columna a secas (`UNIQUE constraint failed: sales.number`); lo que junta
+#: la traducción de psycopg (`libracore/db/_postgres.py::_errores_como_sqlite3`)
+#: es la clase de la excepción —ahí las dos jerarquías convergen en
+#: `sqlite3.IntegrityError`, perdiendo el nombre concreto de PostgreSQL— y el
+#: `str(e)` original, que sí conserva el nombre del constraint. Una columna
+#: `UNIQUE` sin nombre explícito (como ésta) recibe el default de PostgreSQL:
+#: `<tabla>_<columna>_key`.
+_MARCAS_CONFLICTO_DE_NUMERO = ("sales.number", "sales_number_key")
+
+
+def _es_conflicto_de_numero(exc: sqlite3.IntegrityError) -> bool:
+    """Si esta `IntegrityError` es la unicidad de `sales.number` chocando con
+    otra venta concurrente, y no otra violación de integridad (una FK, por
+    ejemplo) que un reintento nunca va a curar."""
+    msg = str(exc)
+    return any(marca in msg for marca in _MARCAS_CONFLICTO_DE_NUMERO)
+
+
+def _productos_faltantes(conexion: Conexion, items: list[dict]) -> list[int]:
+    """Los `producto_id` de `items` que no existen en `catalog_items`.
+
+    Se pregunta con una conexión NUEVA y no con la que acaba de fallar: en
+    PostgreSQL esa transacción quedó abortada (cualquier `execute` sobre ella
+    muere con *current transaction is aborted*), y en los dos motores el
+    `rollback()` del caller ya la cerró de todos modos.
+    """
+    ids = sorted({it["producto_id"] for it in items if it.get("producto_id") is not None})
+    if not ids:
+        return []
+    marcadores = ",".join("?" for _ in ids)
+    with conexion() as conn:
+        existentes = {
+            r[0] for r in conn.execute(
+                f"SELECT id FROM catalog_items WHERE id IN ({marcadores})", ids
+            ).fetchall()
+        }
+    return [i for i in ids if i not in existentes]
+
+
 def crear_venta_directa(conexion: Conexion, *, fecha: str, items: list, subtotal: float,
                         descuento: float, total: float, cliente_id: int | None,
                         cliente_nombre: str, usuario_id: int | None, observaciones: str,
@@ -320,10 +372,24 @@ def crear_venta_directa(conexion: Conexion, *, fecha: str, items: list, subtotal
                 )
                 conn.commit()
                 return venta_id
-            except sqlite3.IntegrityError:
+            except sqlite3.IntegrityError as e:
                 conn.rollback()
-                if intento < intentos - 1:
-                    continue
+                if _es_conflicto_de_numero(e):
+                    if intento < intentos - 1:
+                        continue
+                    raise
+                # No es el número: no se cura reintentando (una FK que no
+                # existe sigue sin existir). El único caso que hoy puede
+                # llegar acá es `sale_items.item_id` contra un producto
+                # borrado o inventado — se identifica cuál, para que el 422
+                # diga qué producto falta en vez de un 409 genérico.
+                faltantes = _productos_faltantes(conexion, items)
+                if faltantes:
+                    raise ProductoInexistente(
+                        "No existe el producto "
+                        + ", ".join(str(i) for i in faltantes)
+                        + ": revisá el catálogo antes de reintentar la venta."
+                    ) from e
                 raise
             except Exception:
                 conn.rollback()
@@ -931,8 +997,15 @@ def acreditar_pago_qr(conn, venta_id: int, payment_id: str,
         turno_id = fila_turno["turno_id"] if fila_turno else None
 
     for p in pendientes:
+        # 🔴 La referencia sólo se pone si estaba vacía — mismo criterio que
+        # `sellar_referencia_mp`. Antes pisaba SIEMPRE con `MP#<payment_id>`,
+        # borrando una referencia que el mostrador ya hubiera cargado a mano
+        # sobre ese pago (declarado `cobrar_con_qr` y con una referencia
+        # propia). El estado pasa a aprobado igual.
         conn.execute(
-            "UPDATE ventas_pagos SET estado=?, referencia=? WHERE id=?",
+            "UPDATE ventas_pagos SET estado=?, "
+            "referencia=CASE WHEN referencia IS NULL OR referencia='' THEN ? ELSE referencia END "
+            "WHERE id=?",
             (acreditacion.EstadoAcreditacion.APROBADO.value, f"MP#{payment_id}", p["id"]),
         )
         create_caja_movimiento(
