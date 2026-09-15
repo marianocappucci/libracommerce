@@ -12,7 +12,11 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from libracommerce.erp import Hooks, ventas
-from libracommerce.web.catalogo_router import build_productos_router, build_stock_router
+from libracommerce.web.catalogo_router import (
+    build_depositos_router,
+    build_productos_router,
+    build_stock_router,
+)
 from libracommerce.web.ventas_router import OpcionesVentas, build_ventas_router
 
 HOY = datetime.date.today().isoformat()
@@ -27,6 +31,7 @@ def _app(abrir, opciones=None) -> TestClient:
     app = FastAPI()
     app.include_router(build_productos_router(conexion=abrir, usuario_actual=_usuario))
     app.include_router(build_stock_router(conexion=abrir, usuario_actual=_usuario))
+    app.include_router(build_depositos_router(conexion=abrir, usuario_actual=_usuario))
     app.include_router(build_ventas_router(conexion=abrir, usuario_actual=_usuario,
                                            solo_admin=_solo_admin, opciones=opciones))
     return TestClient(app)
@@ -409,3 +414,88 @@ def test_recibido_igual_o_mayor_que_monto_no_rebota(abrir_ventas):
     client = _app(abrir_ventas)
     venta = _venta(client, pagos=[{"medio": "efectivo", "monto": 200.0, "recibido": 200.0}])
     assert float(venta["pagos"][0]["recibido"]) == 200.0
+
+
+# ── F4: `deposito_id` en el payload (VentaLibra multisucursal) ────────────
+
+
+def test_deposito_id_en_el_payload_descuenta_de_ese_deposito(abrir_ventas):
+    client = _app(abrir_ventas)
+    pid = client.post("/api/productos", json={"nombre": "Yerba", "precio_venta": 100.0, "precio_costo": 60.0}).json()["id"]
+    client.post(f"/api/stock/{pid}/ajuste", json={"modo": "absoluto", "cantidad": 10})
+    sucursal_b = client.post("/api/depositos", json={"nombre": "Sucursal B"}).json()["id"]
+
+    _venta(client, items=[{"nombre": "Yerba", "qty": 3, "precio": 100.0, "producto_id": pid}],
+          deposito_id=sucursal_b)
+
+    # El total (todos los depósitos) bajó igual que siempre.
+    assert client.get(f"/api/stock/{pid}").json()["stock_actual"] == 7.0
+    # Pero salió de Sucursal B, no del depósito por defecto.
+    stock_b = client.get(f"/api/depositos/{sucursal_b}/stock").json()
+    assert stock_b[0]["id"] == pid and stock_b[0]["stock_actual"] == -3.0
+
+
+def test_sin_deposito_id_sigue_descontando_del_default(client):
+    """El comportamiento de hoy — Contalibra y Restolibra no mandan
+    `deposito_id` en el payload —: no cambia."""
+    pid = client.post("/api/productos", json={"nombre": "Yerba", "precio_venta": 100.0, "precio_costo": 60.0}).json()["id"]
+    client.post(f"/api/stock/{pid}/ajuste", json={"modo": "absoluto", "cantidad": 10})
+    _venta(client, items=[{"nombre": "Yerba", "qty": 2, "precio": 100.0, "producto_id": pid}])
+    assert client.get(f"/api/stock/{pid}").json()["stock_actual"] == 8.0
+
+
+def test_deposito_id_inexistente_da_422_no_500_ni_409(client):
+    """Mismo criterio que `test_producto_inexistente_da_422_no_409`: un
+    `deposito_id` inventado no es un conflicto con otra venta ni un error de
+    integridad sin manejar — es un dato del pedido, 422 con mensaje claro."""
+    resp = client.post("/api/ventas", json={
+        "fecha": HOY, "items": [{"nombre": "X", "qty": 1, "precio": 100}],
+        "pagos": [{"medio": "efectivo", "monto": 100}], "deposito_id": 999999})
+    assert resp.status_code == 422, resp.text
+    assert "999999" in resp.json()["detail"]
+    assert client.get("/api/ventas").json() == []
+
+
+# ── F4 (corrección sobre la revisión): `deposito_id` también en /devolver ──
+
+
+def test_devolver_a_deposito_inexistente_da_422_no_500(abrir_ventas):
+    """Mismo hallazgo que `test_deposito_id_inexistente_da_422_no_500_ni_409`
+    pero en `/devolver`: antes de este fix, `devolver_items` no validaba su
+    `deposito_id` y un valor inventado reventaba como `IntegrityError` sin
+    manejar (500), no como el 422 que corresponde."""
+    client = _app(abrir_ventas)
+    pid = client.post("/api/productos", json={"nombre": "Yerba", "precio_venta": 100.0, "precio_costo": 60.0}).json()["id"]
+    client.post(f"/api/stock/{pid}/ajuste", json={"modo": "absoluto", "cantidad": 10})
+    venta = _venta(client, items=[{"nombre": "Yerba", "qty": 4, "precio": 100.0, "producto_id": pid}],
+                  pagos=[{"medio": "efectivo", "monto": 400.0}])
+    with abrir_ventas() as conn:
+        item_id_linea = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (venta["id"],)
+        ).fetchone()["id"]
+
+    r = client.post(f"/api/ventas/{venta['id']}/devolver", json={
+        "lineas": [{"sale_item_id": item_id_linea, "cantidad": 1}], "deposito_id": 999999})
+    assert r.status_code == 422, r.text
+    assert "999999" in r.json()["detail"]
+    # Nada quedó escrito: ni el stock, ni el estado de la venta.
+    assert client.get(f"/api/stock/{pid}").json()["stock_actual"] == 6.0
+    assert client.get(f"/api/ventas/{venta['id']}").json()["estado"] == "cobrada"
+
+
+def test_devolver_a_deposito_inactivo_da_422(abrir_ventas):
+    client = _app(abrir_ventas)
+    pid = client.post("/api/productos", json={"nombre": "Yerba", "precio_venta": 100.0, "precio_costo": 60.0}).json()["id"]
+    client.post(f"/api/stock/{pid}/ajuste", json={"modo": "absoluto", "cantidad": 10})
+    venta = _venta(client, items=[{"nombre": "Yerba", "qty": 1, "precio": 100.0, "producto_id": pid}],
+                  pagos=[{"medio": "efectivo", "monto": 100.0}])
+    sucursal_b = client.post("/api/depositos", json={"nombre": "Sucursal B"}).json()["id"]
+    client.put(f"/api/depositos/{sucursal_b}", json={"nombre": "Sucursal B", "activo": False})
+    with abrir_ventas() as conn:
+        item_id_linea = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (venta["id"],)
+        ).fetchone()["id"]
+
+    r = client.post(f"/api/ventas/{venta['id']}/devolver", json={
+        "lineas": [{"sale_item_id": item_id_linea, "cantidad": 1}], "deposito_id": sucursal_b})
+    assert r.status_code == 422, r.text

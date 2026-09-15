@@ -285,6 +285,208 @@ def test_deposito_default_y_borrado(client):
     assert client.delete("/api/depositos/99999").status_code == 404
 
 
+# ── F4 (v0.16.3): un deposito_id inexistente/inactivo en /transferir ──────
+#
+# Mismo hallazgo que en /api/ventas y /devolver: `catalogo.transferir_stock`
+# no validaba `origen_id`/`destino_id` — un `destino_id` inexistente escribía
+# la pata de salida y recién ahí reventaba con la IntegrityError de la FK
+# (500, sin manejar); uno inactivo se aceptaba en silencio; y un `origen_id`
+# inexistente terminaba en el 422 de "Stock insuficiente", engañoso.
+
+
+def test_transferir_a_deposito_inexistente_da_422_no_500(client):
+    p = _crear_producto(client, "Plug RJ45")
+    client.post(f"/api/stock/{p['id']}/ajuste", json={"modo": "absoluto", "cantidad": 10})
+    origen = client.get("/api/depositos").json()[0]
+    resp = client.post("/api/depositos/transferir", json={
+        "producto_id": p["id"], "origen_id": origen["id"], "destino_id": 999999, "cantidad": 1})
+    assert resp.status_code == 422, resp.text
+    assert "999999" in resp.json()["detail"]
+    # Nada se movió: ni la pata de salida quedó escrita.
+    assert _stock_de(client, p["id"]) == 10
+
+
+def test_transferir_desde_deposito_inexistente_da_422_no_stock_insuficiente(client):
+    """El mensaje tiene que nombrar el depósito que no existe, no el genérico
+    de stock insuficiente (que hoy salía porque `current_stock` de un
+    depósito inexistente da 0, indistinguible de "no hay stock")."""
+    p = _crear_producto(client, "Plug RJ45")
+    destino = client.post("/api/depositos", json={"nombre": "Sucursal"}).json()
+    resp = client.post("/api/depositos/transferir", json={
+        "producto_id": p["id"], "origen_id": 999999, "destino_id": destino["id"], "cantidad": 1})
+    assert resp.status_code == 422, resp.text
+    assert "999999" in resp.json()["detail"]
+    assert "Stock insuficiente" not in resp.json()["detail"]
+
+
+def test_transferir_a_deposito_inactivo_da_422(client):
+    p = _crear_producto(client, "Plug RJ45")
+    client.post(f"/api/stock/{p['id']}/ajuste", json={"modo": "absoluto", "cantidad": 10})
+    origen = client.get("/api/depositos").json()[0]
+    destino = client.post("/api/depositos", json={"nombre": "Baja"}).json()
+    client.put(f"/api/depositos/{destino['id']}", json={"nombre": "Baja", "activo": False})
+    resp = client.post("/api/depositos/transferir", json={
+        "producto_id": p["id"], "origen_id": origen["id"], "destino_id": destino["id"], "cantidad": 1})
+    assert resp.status_code == 422, resp.text
+    assert _stock_de(client, p["id"]) == 10  # nada se movió
+
+
+def test_transferir_desde_deposito_inactivo_da_422(client):
+    p = _crear_producto(client, "Plug RJ45")
+    client.post(f"/api/stock/{p['id']}/ajuste", json={"modo": "absoluto", "cantidad": 10})
+    origen = client.get("/api/depositos").json()[0]  # el default original, con el stock
+    otro = client.post("/api/depositos", json={"nombre": "Otro default"}).json()
+    client.post(f"/api/depositos/{otro['id']}/set-default")  # origen deja de ser el default...
+    client.put(f"/api/depositos/{origen['id']}", json={"nombre": origen["nombre"], "activo": False})  # ...y se puede desactivar
+    resp = client.post("/api/depositos/transferir", json={
+        "producto_id": p["id"], "origen_id": origen["id"], "destino_id": otro["id"], "cantidad": 1})
+    assert resp.status_code == 422, resp.text
+
+
+def test_transferir_stock_a_deposito_inexistente_erp_no_escribe_nada(abrir):
+    """A nivel `erp.catalogo` (no HTTP): confirma que `DepositoInexistente`
+    se levanta ANTES de escribir la pata de salida — no una `IntegrityError`
+    de la FK a mitad de camino."""
+    with abrir() as conn:
+        pid = erp_catalogo.create_producto(conn, "Plug", precio_venta=10.0, precio_costo=5.0)
+        origen_id = erp_catalogo.get_default_deposito_id(conn)
+        erp_stock.add_movimiento_stock(conn, producto_id=pid, tipo="entrada", cantidad=10, deposito_id=origen_id)
+        conn.commit()
+    with abrir() as conn:
+        n_antes = conn.execute("SELECT COUNT(*) FROM stock_movements").fetchone()[0]
+        with pytest.raises(erp_catalogo.DepositoInexistente) as exc_info:
+            erp_catalogo.transferir_stock(conn, producto_id=pid, origen_id=origen_id, destino_id=999999, cantidad=1)
+        assert "999999" in str(exc_info.value)
+        n_despues = conn.execute("SELECT COUNT(*) FROM stock_movements").fetchone()[0]
+        assert n_despues == n_antes  # ni la pata de salida quedó escrita
+        assert erp_stock.get_stock_actual(conn, pid) == 10.0
+
+
+def test_transferir_stock_desde_deposito_inexistente_erp_no_stock_insuficiente(abrir):
+    with abrir() as conn:
+        pid = erp_catalogo.create_producto(conn, "Plug", precio_venta=10.0, precio_costo=5.0)
+        destino_id = erp_catalogo.create_deposito(conn, "Sucursal")
+        conn.commit()
+    with abrir() as conn:
+        with pytest.raises(erp_catalogo.DepositoInexistente) as exc_info:
+            erp_catalogo.transferir_stock(conn, producto_id=pid, origen_id=999999, destino_id=destino_id, cantidad=1)
+        assert "999999" in str(exc_info.value)
+        assert "Stock insuficiente" not in str(exc_info.value)
+
+
+def test_transferir_stock_a_deposito_inactivo_erp(abrir):
+    with abrir() as conn:
+        pid = erp_catalogo.create_producto(conn, "Plug", precio_venta=10.0, precio_costo=5.0)
+        origen_id = erp_catalogo.get_default_deposito_id(conn)
+        destino_id = erp_catalogo.create_deposito(conn, "Baja")
+        erp_catalogo.update_deposito(conn, destino_id, "Baja", "", 0)  # inactivo, no default: se puede
+        erp_stock.add_movimiento_stock(conn, producto_id=pid, tipo="entrada", cantidad=10, deposito_id=origen_id)
+        conn.commit()
+    with abrir() as conn:
+        with pytest.raises(erp_catalogo.DepositoInexistente):
+            erp_catalogo.transferir_stock(conn, producto_id=pid, origen_id=origen_id, destino_id=destino_id, cantidad=1)
+        assert erp_stock.get_stock_actual(conn, pid) == 10.0
+
+
+def test_transferir_stock_desde_deposito_inactivo_erp(abrir):
+    with abrir() as conn:
+        pid = erp_catalogo.create_producto(conn, "Plug", precio_venta=10.0, precio_costo=5.0)
+        origen_id = erp_catalogo.create_deposito(conn, "Baja")
+        destino_id = erp_catalogo.create_deposito(conn, "Sucursal")
+        erp_stock.add_movimiento_stock(conn, producto_id=pid, tipo="entrada", cantidad=10, deposito_id=origen_id)
+        erp_catalogo.update_deposito(conn, origen_id, "Baja", "", 0)  # no es default: se puede
+        conn.commit()
+    with abrir() as conn:
+        with pytest.raises(erp_catalogo.DepositoInexistente):
+            erp_catalogo.transferir_stock(conn, producto_id=pid, origen_id=origen_id, destino_id=destino_id, cantidad=1)
+        assert erp_stock.get_stock_actual(conn, pid) == 10.0
+
+
+# ── F4 (v0.16.3): un depósito default inactivo sigue recibiendo stock ─────
+#
+# `get_default_deposito_id` no mira `active`: sin estas guardas, un
+# `update_deposito`/`set_default_deposito` podía dejar el default marcado
+# inactivo, y toda venta/ajuste SIN `deposito_id` explícito le seguía
+# cargando stock en silencio a un depósito que la pantalla mostraba dado de
+# baja. `get_default_deposito_id` en sí NO se toca — la guarda va en quien
+# escribe el estado del depósito, no en quien lo resuelve.
+
+
+def test_no_se_puede_desactivar_el_deposito_default_por_http(client):
+    default_id = client.get("/api/depositos").json()[0]["id"]
+    resp = client.put(f"/api/depositos/{default_id}", json={"nombre": "Depósito principal", "activo": False})
+    assert resp.status_code == 422, resp.text
+    # Sigue activo: el rechazo no aplicó el cambio a medias.
+    assert client.get("/api/depositos").json()[0]["activo"]
+
+
+def test_no_se_puede_marcar_default_un_deposito_inactivo_por_http(client):
+    nuevo = client.post("/api/depositos", json={"nombre": "Sucursal"}).json()
+    client.put(f"/api/depositos/{nuevo['id']}", json={"nombre": "Sucursal", "activo": False})
+    resp = client.post(f"/api/depositos/{nuevo['id']}/set-default")
+    assert resp.status_code == 422, resp.text
+    # El default sigue siendo el de antes, no el inactivo.
+    assert not any(d["id"] == nuevo["id"] and d["es_default"] for d in client.get("/api/depositos").json())
+
+
+def test_desactivar_un_deposito_que_no_es_el_default_sigue_andando(client):
+    """Regresión: el caso válido (desactivar uno que no es default) no cambia."""
+    nuevo = client.post("/api/depositos", json={"nombre": "Sucursal"}).json()
+    resp = client.put(f"/api/depositos/{nuevo['id']}", json={"nombre": "Sucursal", "activo": False})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["activo"] is False or resp.json()["activo"] == 0
+
+
+def test_marcar_default_un_deposito_activo_sigue_andando(client):
+    """Regresión: el caso válido (marcar default uno activo) no cambia."""
+    nuevo = client.post("/api/depositos", json={"nombre": "Sucursal"}).json()
+    resp = client.post(f"/api/depositos/{nuevo['id']}/set-default")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["es_default"]
+
+
+def test_no_se_puede_desactivar_el_deposito_default_erp(abrir):
+    """🔑 mutación: sacar esta guarda de `update_deposito` deja el default
+    marcado inactivo, y este test da rojo."""
+    with abrir() as conn:
+        default_id = erp_catalogo.get_default_deposito_id(conn)
+        with pytest.raises(ValueError):
+            erp_catalogo.update_deposito(conn, default_id, "Depósito principal", "", 0)
+        # No se aplicó nada: sigue activo.
+        assert erp_catalogo.get_deposito(conn, default_id)["activo"]
+
+
+def test_no_se_puede_marcar_default_un_deposito_inactivo_erp(abrir):
+    with abrir() as conn:
+        default_id = erp_catalogo.get_default_deposito_id(conn)
+        nuevo_id = erp_catalogo.create_deposito(conn, "Sucursal")
+        erp_catalogo.update_deposito(conn, nuevo_id, "Sucursal", "", 0)
+        conn.commit()
+    with abrir() as conn:
+        with pytest.raises(ValueError):
+            erp_catalogo.set_default_deposito(conn, nuevo_id)
+        # El default sigue siendo el de siempre.
+        assert erp_catalogo.get_default_deposito_id(conn) == default_id
+
+
+def test_desactivar_un_deposito_que_no_es_default_sigue_andando_erp(abrir):
+    """Regresión: el caso válido no cambia."""
+    with abrir() as conn:
+        nuevo_id = erp_catalogo.create_deposito(conn, "Sucursal")
+        erp_catalogo.update_deposito(conn, nuevo_id, "Sucursal", "", 0)
+        conn.commit()
+        assert not erp_catalogo.get_deposito(conn, nuevo_id)["activo"]
+
+
+def test_marcar_default_un_deposito_activo_sigue_andando_erp(abrir):
+    """Regresión: el caso válido no cambia."""
+    with abrir() as conn:
+        nuevo_id = erp_catalogo.create_deposito(conn, "Sucursal")
+        erp_catalogo.set_default_deposito(conn, nuevo_id)
+        conn.commit()
+        assert erp_catalogo.get_default_deposito_id(conn) == nuevo_id
+
+
 # ── Lo que existía en un solo producto ───────────────────────────────────
 
 

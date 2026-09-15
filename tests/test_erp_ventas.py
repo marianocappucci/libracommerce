@@ -723,6 +723,123 @@ def test_anular_venta_devuelta_del_todo_levanta(abrir_ventas):
         assert ventas.obtener_venta(conn, vid)["estado"] == "devuelta"
 
 
+# ── F4: depósito por venta (VentaLibra multisucursal) ──────────────────────
+
+
+def test_venta_con_deposito_descuenta_de_ese_deposito_no_del_default(abrir_ventas):
+    """🔑 mutación (a): si `registrar_venta`/`descontar_stock_venta` ignorara
+    `deposito_id` (siempre el default), el movimiento de esta venta seguiría
+    cayendo en el depósito principal y este test da rojo."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+        default_id = catalogo.get_default_deposito_id(conn)
+        sucursal_b = catalogo.create_deposito(conn, "Sucursal B")
+        conn.commit()
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 3, "precio": 100.0, "subtotal": 300.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 300.0, "estado": "aprobado"}],
+        deposito_id=sucursal_b)
+    with abrir_ventas() as conn:
+        mov = conn.execute(
+            "SELECT location_id, quantity_delta FROM stock_movements WHERE source_id=?", (vid,)
+        ).fetchone()
+        assert mov["location_id"] == sucursal_b
+        assert float(mov["quantity_delta"]) == -3.0
+        # El total del producto (todos los depósitos) bajó igual que siempre.
+        assert stock.get_stock_actual(conn, pid) == 7.0
+        # Pero el default no vio NINGÚN movimiento de esta venta.
+        en_default = conn.execute(
+            "SELECT COUNT(*) FROM stock_movements WHERE source_id=? AND location_id=?",
+            (vid, default_id),
+        ).fetchone()[0]
+        assert en_default == 0
+        stock_b = catalogo.get_stock_por_deposito(conn, sucursal_b)
+        assert stock_b[0]["id"] == pid and stock_b[0]["stock_actual"] == -3.0
+
+
+def test_venta_sin_deposito_descuenta_del_default(abrir_ventas):
+    """El comportamiento de hoy — Contalibra y Restolibra no mandan
+    `deposito_id` — no cambia. 🔑 mutación (b): si el default se resolviera
+    distinto (por ejemplo, siempre el primero por id en vez de
+    `is_default`/orden), esto da rojo con más de un depósito en danza."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+        default_id = catalogo.get_default_deposito_id(conn)
+        catalogo.create_deposito(conn, "Sucursal B")  # existe, pero nadie la pide
+        conn.commit()
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 2, "precio": 100.0, "subtotal": 200.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        mov = conn.execute(
+            "SELECT location_id FROM stock_movements WHERE source_id=?", (vid,)
+        ).fetchone()
+        assert mov["location_id"] == default_id
+        assert stock.get_stock_actual(conn, pid) == 8.0
+
+
+def test_deposito_inexistente_da_depositoinexistente_sin_reintentar(abrir_ventas):
+    """🔑 mutación (c): sin la validación, un `deposito_id` inventado no
+    rebota acá — o revienta más abajo como `IntegrityError` (la FK de
+    `stock_movements.location_id`), que ningún `except` de
+    `web/ventas_router.py::crear` atrapa como 422."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    with pytest.raises(ventas.DepositoInexistente) as exc_info:
+        _venta(abrir_ventas, items=[
+            {"nombre": "Yerba", "qty": 1, "precio": 100.0, "subtotal": 100.0, "producto_id": pid},
+        ], pagos=[{"medio": "efectivo", "monto": 100.0, "estado": "aprobado"}],
+            deposito_id=999999)
+    assert "999999" in str(exc_info.value)
+    # Nada quedó escrito: ni la venta, ni la caja, ni el stock se tocó.
+    with abrir_ventas() as conn:
+        assert ventas.listar_ventas(conn) == []
+        assert _caja(conn) == []
+        assert stock.get_stock_actual(conn, pid) == 10.0
+
+
+def test_deposito_inactivo_tambien_es_depositoinexistente(abrir_ventas):
+    """"Válido/activo": un depósito que existe pero está desactivado tampoco
+    es un destino aceptable para una venta nueva."""
+    with abrir_ventas() as conn:
+        sucursal_b = catalogo.create_deposito(conn, "Sucursal B")
+        catalogo.update_deposito(conn, sucursal_b, "Sucursal B", "", 0)
+        conn.commit()
+    with pytest.raises(ventas.DepositoInexistente):
+        _venta(abrir_ventas, deposito_id=sucursal_b)
+
+
+def test_anular_venta_con_deposito_repone_en_ese_deposito(abrir_ventas):
+    """`anular_venta` repone fila por fila del ledger (el `location_id` sale
+    de la fila que descontó, no de un parámetro nuevo): confirma que sigue
+    reponiendo en el depósito del que salió, no en el default."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+        default_id = catalogo.get_default_deposito_id(conn)
+        sucursal_b = catalogo.create_deposito(conn, "Sucursal B")
+        conn.commit()
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 4, "precio": 100.0, "subtotal": 400.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 400.0, "estado": "aprobado"}],
+        deposito_id=sucursal_b)
+    with abrir_ventas() as conn:
+        assert catalogo.get_stock_por_deposito(conn, sucursal_b)[0]["stock_actual"] == -4.0
+        assert ventas.anular_venta(conn, vid, usuario_id=USUARIO["id"]) is True
+        conn.commit()
+        repos = conn.execute(
+            "SELECT location_id, quantity_delta FROM stock_movements "
+            "WHERE source_id=? AND reason_code='anulacion'", (vid,)
+        ).fetchall()
+        assert [(r["location_id"], float(r["quantity_delta"])) for r in repos] == [(sucursal_b, 4.0)]
+        # El default nunca se tocó en todo este flujo (venta + anulación).
+        en_default = conn.execute(
+            "SELECT COUNT(*) FROM stock_movements WHERE source_id=? AND location_id=?",
+            (vid, default_id),
+        ).fetchone()[0]
+        assert en_default == 0
+        assert stock.get_stock_actual(conn, pid) == 10.0  # el total volvió al punto de partida
+
+
 # ── Huecos de VentaLibra (v0.16.2): el 409 que confunde y la referencia pisada ──
 
 
@@ -1195,6 +1312,60 @@ def test_devolver_a_cuenta_corriente_exige_cliente(abrir_ventas):
             ventas.devolver_items(
                 conn, vid, {item_id_linea: 1.0}, deposito_id, medio_pago="cuenta_corriente"
             )
+
+
+# ── F4 (correcciones sobre la revisión): deposito_id también en devolver_items ──
+
+
+def test_devolver_a_deposito_inexistente_da_depositoinexistente_sin_escribir_nada(abrir_ventas):
+    """🔑 mutación: sin `_validar_deposito` en `devolver_items`, esto no
+    rebota acá con un error de dominio — o revienta más abajo como
+    `IntegrityError` (la FK de `stock_movements.location_id`), que ningún
+    `except` de `web/ventas_router.py::devolver` atrapaba como 422 antes de
+    este fix (hallazgo del 2026-09-15, tarea F4)."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 4, "precio": 100.0, "subtotal": 400.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 400.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        item_id_linea = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (vid,)
+        ).fetchone()["id"]
+        n_stock_antes = conn.execute(
+            "SELECT COUNT(*) FROM stock_movements WHERE source_id=?", (vid,)
+        ).fetchone()[0]
+        n_caja_antes = len(_caja(conn, "V-00001"))
+        with pytest.raises(ventas.DepositoInexistente) as exc_info:
+            ventas.devolver_items(conn, vid, {item_id_linea: 1.0}, 999999)
+        assert "999999" in str(exc_info.value)
+        # Nada quedó escrito: ni el stock, ni la caja, ni el estado de la venta.
+        n_stock_despues = conn.execute(
+            "SELECT COUNT(*) FROM stock_movements WHERE source_id=?", (vid,)
+        ).fetchone()[0]
+        assert n_stock_despues == n_stock_antes
+        assert len(_caja(conn, "V-00001")) == n_caja_antes
+        assert ventas.obtener_venta(conn, vid)["estado"] == "cobrada"
+        assert stock.get_stock_actual(conn, pid) == 6.0
+
+
+def test_devolver_a_deposito_inactivo_tambien_es_depositoinexistente(abrir_ventas):
+    """"Válido/activo": mismo criterio que en `registrar_venta` — un depósito
+    que existe pero está desactivado tampoco es un destino aceptable."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+        sucursal_b = catalogo.create_deposito(conn, "Sucursal B")
+        catalogo.update_deposito(conn, sucursal_b, "Sucursal B", "", 0)
+        conn.commit()
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 1, "precio": 100.0, "subtotal": 100.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 100.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        item_id_linea = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (vid,)
+        ).fetchone()["id"]
+        with pytest.raises(ventas.DepositoInexistente):
+            ventas.devolver_items(conn, vid, {item_id_linea: 1.0}, sucursal_b)
 
 
 def test_devolver_linea_de_servicio_levanta(abrir_ventas):
