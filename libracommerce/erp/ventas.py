@@ -57,6 +57,7 @@ from contextlib import AbstractContextManager
 from decimal import Decimal
 from typing import Any
 
+from .catalogo import get_deposito
 from .hooks import SIN_GANCHOS, Hooks
 from .stock import add_movimiento_stock, descontar_stock_venta
 
@@ -112,6 +113,42 @@ class ProductoInexistente(ValueError):
     que `crear_venta_directa` no la reintenta: es un dato del pedido que nunca
     va a dejar de fallar, insistir 10 veces sólo demora el 422 que corresponde
     de entrada. Ver `_es_conflicto_de_numero`."""
+
+
+class DepositoInexistente(ValueError):
+    """El `deposito_id` de una venta o una devolución (F4, VentaLibra
+    multisucursal) no existe o no está activo en `locations`.
+
+    Se valida con `_validar_deposito` —una sola función, que `registrar_venta`
+    y `devolver_items` llaman cada una ANTES de escribir nada—, mismo criterio
+    que `SinTurno`/`ProductoInexistente`: un depósito inventado no es un
+    conflicto con otra venta, es un dato del pedido que nunca iba a dejar de
+    fallar. Hereda de `ValueError` para que el 422 en `web/ventas_router.py`
+    sea el mismo mecanismo con el que ya rebota `catalogo.delete_deposito`.
+
+    🔴 **`descontar_stock_venta`/`add_movimiento_stock` NO validan esto por su
+    cuenta** —confiar en la FK de `stock_movements.location_id` dejaría pasar
+    escrituras previas (en `registrar_venta`: `sales`/`sale_items`/pagos/caja;
+    en `devolver_items`: nada, porque ahí es el primer `INSERT` del ítem, pero
+    igual después de leer y validar cantidades) antes de reventar, y el error
+    de FK no lo atrapa ningún `except` de `web/ventas_router.py` (sale como
+    500). Por eso la validación es temprano, en las dos funciones."""
+
+
+def _validar_deposito(conn, deposito_id: int | None) -> None:
+    """Levanta `DepositoInexistente` si `deposito_id` no es `None` y no
+    resuelve a un depósito existente y activo. `None` no se valida — es "no
+    se especificó", el comportamiento de siempre.
+
+    Compartida por `registrar_venta` y `devolver_items`: mismo criterio,
+    un solo lugar donde cambiarlo."""
+    if deposito_id is None:
+        return
+    deposito = get_deposito(conn, deposito_id)
+    if deposito is None or not deposito["activo"]:
+        raise DepositoInexistente(
+            f"El depósito {deposito_id} no existe o no está activo."
+        )
 
 
 def estado_de_row(status: str, status_detail: str | None) -> str:
@@ -235,7 +272,8 @@ def registrar_venta(conn, *, fecha: str, items: list, subtotal: float, descuento
                     usuario_id: int | None, observaciones: str, estado: str,
                     pagos: list[dict], stock_habilitado: bool,
                     hooks: Hooks = SIN_GANCHOS, exigir_turno: bool = False,
-                    caja_con_turno: bool = False) -> int:
+                    caja_con_turno: bool = False,
+                    deposito_id: int | None = None) -> int:
     """Una venta de mostrador completa, dentro de la transacción de `conn`:
     número, encabezado, líneas, pagos, caja, stock, turno y el gancho.
 
@@ -253,12 +291,23 @@ def registrar_venta(conn, *, fecha: str, items: list, subtotal: float, descuento
     que los movimientos de caja de esta venta lleven el `turno_id`: sin esto
     (el default) el arqueo por turno que suma `caja_movimientos` da cero.
 
+    🔴 **`deposito_id` es ADITIVO (F4, VentaLibra multisucursal).** `None` (el
+    default, y lo único que mandan Contalibra y Restolibra hoy) deja el
+    descuento de stock exactamente como está: `descontar_stock_venta` /
+    `add_movimiento_stock` resuelven el depósito por defecto ellos mismos. Con
+    un valor, el descuento de ESTA venta (el ítem o, si tiene receta, sus
+    insumos) sale de ese depósito. Se valida ANTES de escribir nada —levanta
+    `DepositoInexistente` si no existe o no está activo—, con el mismo
+    criterio que `SinTurno`.
+
     No commitea: es del caller (`crear_venta_directa`, o el cobro de un pedido
     en Restolibra, que arma la venta con estas mismas piezas).
     """
     from libracore import medios_pago
     from libracore import pagos as acreditacion
     from libracore.db.caja import create_caja_movimiento
+
+    _validar_deposito(conn, deposito_id)
 
     turno = hooks.turno_para(conn, usuario_id)
     if exigir_turno and turno is None:
@@ -287,7 +336,8 @@ def registrar_venta(conn, *, fecha: str, items: list, subtotal: float, descuento
 
     if stock_habilitado:
         descontar_stock_venta(conn, venta_id, items, fecha=fecha,
-                              usuario_id=usuario_id, hooks=hooks)
+                              usuario_id=usuario_id, hooks=hooks,
+                              deposito_id=deposito_id)
 
     if turno:
         vincular_venta_turno(conn, venta_id, turno["id"])
@@ -345,6 +395,7 @@ def crear_venta_directa(conexion: Conexion, *, fecha: str, items: list, subtotal
                         estado: str, pagos: list[dict], stock_habilitado: bool,
                         hooks: Hooks = SIN_GANCHOS, exigir_turno: bool = False,
                         caja_con_turno: bool = False,
+                        deposito_id: int | None = None,
                         intentos: int = INTENTOS_POR_NUMERO) -> int:
     """`registrar_venta` con su transacción y el reintento por número repetido.
 
@@ -369,6 +420,7 @@ def crear_venta_directa(conexion: Conexion, *, fecha: str, items: list, subtotal
                     usuario_id=usuario_id, observaciones=observaciones, estado=estado,
                     pagos=pagos, stock_habilitado=stock_habilitado, hooks=hooks,
                     exigir_turno=exigir_turno, caja_con_turno=caja_con_turno,
+                    deposito_id=deposito_id,
                 )
                 conn.commit()
                 return venta_id
@@ -737,6 +789,13 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
                    hooks: Hooks = SIN_GANCHOS, *, caja_con_turno: bool = False) -> dict:
     """Devuelve algunas líneas de una venta confirmada y reintegra su importe.
 
+    🔴 **`deposito_id` se valida con `_validar_deposito` ANTES de tocar nada**
+    (F4, VentaLibra multisucursal — mismo criterio y misma función que
+    `registrar_venta`): un depósito inventado levanta `DepositoInexistente`,
+    no la `IntegrityError` de la FK de `stock_movements.location_id` que salía
+    antes de este fix cuando la línea era de tipo 'product' (con una línea de
+    servicio ni se llegaba a usar el depósito, así que no rebotaba nunca).
+
     `devoluciones` mapea el **id de `sale_items`** (no la posición: acá, a
     diferencia del `Sale` del dominio, la línea sí tiene un id estable) a la
     cantidad que vuelve. Una línea de servicio no se devuelve: anular la
@@ -777,6 +836,8 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
     from libracore.db.caja import MEDIO_CUENTA_CORRIENTE
     from libracore.db.core import _ar_now
     from libracore.db.reversiones import reintegrar_devolucion
+
+    _validar_deposito(conn, deposito_id)
 
     venta = obtener_venta(conn, vid)
     if not venta:
