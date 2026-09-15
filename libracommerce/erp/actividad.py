@@ -1,7 +1,7 @@
 """La línea de tiempo de actividad para un producto que vende con este motor
 (P9-M4).
 
-`libracore.db.logs.get_actividad_log` es un `UNION ALL` de siete partes. Dos de
+`libracore.db.logs.get_actividad_log` es un `UNION ALL` de partes. Dos de
 ellas —ventas y stock— leen `ventas` y `movimientos_stock`, que en Contalibra y
 Restolibra dejaron de existir como fuente de verdad: las ventas están en `sales`
 y el stock es el ledger `stock_movements`. Los dos productos tenían copiada la
@@ -9,8 +9,16 @@ función entera (230 líneas, idénticas) para reescribir esas dos partes.
 
 Desde LibraCore v1.87.0 las partes son constantes con nombre y la función acepta
 `partes=`. Acá viven las dos de este motor; `partes_de_comercio()` las combina
-con las cinco de LibraCore (caja, facturas, turnos, remitos, presupuestos) en el
-mismo orden que tenían los productos.
+con `logs.PARTES_CORE` (caja, facturas, turnos, remitos, presupuestos y, desde
+v1.98.0, cierres diarios) en el mismo orden que tenían los productos, tomando
+la tupla completa del `libracore` instalado en vez de copiar sus nombres acá
+—así una parte nueva que el core sume a `PARTES_CORE` (como pasó con los
+cierres diarios) entra sola a la línea de tiempo de este motor, sin tocar
+este archivo—. Ningún nombre de parte del core más allá de `PARTE_CAJA` se
+importa acá a propósito: los consumidores de este motor pinean `libracore`
+por su cuenta, y un `libracore` viejo que todavía no tenga una parte nueva
+(por ejemplo `PARTE_CIERRES_DIARIOS`) tiene que seguir andando igual, sin ese
+import roto.
 
 Las nueve columnas de cada parte, en este orden: `ts, fecha, tipo, descripcion,
 monto, usuario, turno_id, ref_id, ref_tabla`. `fecha` es TEXT en todas —
@@ -67,18 +75,17 @@ PARTE_STOCK_COMERCIO = """
 
 
 def partes_de_comercio() -> tuple[str, ...]:
-    """Las siete partes del UNION para un producto de este motor: ventas y
-    stock de acá, el resto de LibraCore."""
-    from libracore.db.logs import (
-        PARTE_CAJA,
-        PARTE_FACTURAS,
-        PARTE_PRESUPUESTOS,
-        PARTE_REMITOS,
-        PARTE_TURNOS,
-    )
+    """Las partes del UNION para un producto de este motor: ventas y stock
+    de acá, más `logs.PARTES_CORE` del `libracore` instalado, en su orden.
+    `PARTE_CAJA` va explícita en el medio (orden histórico: ventas, caja,
+    stock, después el resto del core) y se descuenta de `PARTES_CORE` por
+    identidad para no repetirla; el resto de la tupla del core entra tal cual
+    venga, así que una parte nueva del core (como `PARTE_CIERRES_DIARIOS`
+    desde v1.98.0) se suma sola sin que este archivo tenga que nombrarla."""
+    from libracore.db.logs import PARTE_CAJA, PARTES_CORE
 
-    return (PARTE_VENTAS_COMERCIO, PARTE_CAJA, PARTE_STOCK_COMERCIO,
-            PARTE_FACTURAS, PARTE_TURNOS, PARTE_REMITOS, PARTE_PRESUPUESTOS)
+    resto_core = tuple(p for p in PARTES_CORE if p is not PARTE_CAJA)
+    return (PARTE_VENTAS_COMERCIO, PARTE_CAJA, PARTE_STOCK_COMERCIO) + resto_core
 
 
 def get_actividad_log(conn, tipos=None, usuario_id=None, turno_id=None,
