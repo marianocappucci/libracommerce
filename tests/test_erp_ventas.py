@@ -723,6 +723,55 @@ def test_anular_venta_devuelta_del_todo_levanta(abrir_ventas):
         assert ventas.obtener_venta(conn, vid)["estado"] == "devuelta"
 
 
+# ── Huecos de VentaLibra (v0.16.2): el 409 que confunde y la referencia pisada ──
+
+
+def test_producto_inexistente_da_productoinexistente_sin_reintentar(abrir_ventas):
+    """🔴 Punto 1: un `producto_id` que no existe viola la FK de `sale_items`,
+    NO la unicidad de `sales.number` — no se reintenta, y el error nombra el
+    producto que falta."""
+    with pytest.raises(ventas.ProductoInexistente) as exc_info:
+        _venta(abrir_ventas, items=[
+            {"nombre": "Fantasma", "qty": 1, "precio": 50.0, "subtotal": 50.0, "producto_id": 999999},
+        ], pagos=[{"medio": "efectivo", "monto": 50.0, "estado": "aprobado"}])
+    assert "999999" in str(exc_info.value)
+    with abrir_ventas() as conn:
+        assert ventas.listar_ventas(conn) == []
+        assert _caja(conn) == []
+
+
+def test_conflicto_de_numero_real_sigue_reintentando(abrir_ventas, monkeypatch):
+    """Regresión explícita de `_es_conflicto_de_numero`: una violación de
+    `sales.number` real (no una FK) se sigue reintentando como hasta ahora."""
+    original = ventas.siguiente_numero
+    llamadas = []
+
+    def _repetido(conn):
+        llamadas.append(1)
+        return "V-00001" if len(llamadas) == 1 else original(conn)
+
+    _venta(abrir_ventas)
+    monkeypatch.setattr(ventas, "siguiente_numero", _repetido)
+    vid = _venta(abrir_ventas)
+    with abrir_ventas() as conn:
+        assert ventas.obtener_venta(conn, vid)["numero"] == "V-00002"
+
+
+def test_acreditar_pago_qr_no_pisa_una_referencia_cargada_a_mano(abrir_ventas):
+    """🔴 Punto 5: si el mostrador ya cargó una referencia sobre el pago QR
+    pendiente, acreditarlo no la debe pisar — mismo criterio que
+    `sellar_referencia_mp` (`referencia IS NULL OR referencia=''`)."""
+    vid = _venta(abrir_ventas, pagos=[
+        {"medio": "mercadopago", "monto": 200.0, "estado": "pendiente", "referencia": "manual-123"},
+    ])
+    with abrir_ventas() as conn:
+        assert ventas.acreditar_pago_qr(conn, vid, "555") is True
+        conn.commit()
+        pago = ventas.obtener_venta(conn, vid)["pagos"][0]
+        assert pago["estado"] == "aprobado"
+        assert pago["referencia"] == "manual-123"
+
+
 # ── F3: anular no revierte lo que nunca se cobró (pago QR pendiente) ───────
 
 
