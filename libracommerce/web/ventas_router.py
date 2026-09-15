@@ -119,6 +119,11 @@ class VentaPayload(BaseModel):
     cliente_nombre: str = ""
     observaciones: str = ""
     pagos: list[PagoPayload]
+    #: El depósito del que sale el stock de ESTA venta (F4, VentaLibra
+    #: multisucursal: el POS elige la sucursal). `None` (el default, y lo
+    #: único que mandan Contalibra y Restolibra hoy) es el comportamiento de
+    #: siempre: el motor resuelve el depósito por defecto.
+    deposito_id: int | None = None
 
 
 class DevolucionLinea(BaseModel):
@@ -274,6 +279,7 @@ def build_ventas_router(
                 estado=ventas.estado_segun_pagos(total, pagos), pagos=pagos,
                 stock_habilitado=bool(opciones.stock_habilitado()), hooks=opciones.hooks,
                 exigir_turno=opciones.exigir_turno, caja_con_turno=opciones.caja_con_turno,
+                deposito_id=payload.deposito_id,
             )
         except ventas.SinTurno as exc:
             raise HTTPException(409, str(exc)) from None
@@ -281,6 +287,10 @@ def build_ventas_router(
             # 🔴 No es un conflicto con otra venta: es un dato del pedido que
             # nunca iba a dejar de fallar. Va ANTES del catch-all de abajo,
             # que si no la atraparía como si lo fuera.
+            raise HTTPException(422, str(exc)) from None
+        except ventas.DepositoInexistente as exc:
+            # Mismo criterio que ProductoInexistente: un depósito inventado
+            # nunca se cura reintentando, así que va antes del catch-all.
             raise HTTPException(422, str(exc)) from None
         except (sqlite3.IntegrityError, RuntimeError):
             raise HTTPException(
@@ -331,6 +341,12 @@ def build_ventas_router(
                     caja_con_turno=opciones.caja_con_turno,
                 )
                 conn.commit()
+            except ventas.DepositoInexistente as exc:
+                # Explícito y no sólo cubierto por el `except ValueError` de
+                # abajo (que también lo atraparía, por herencia): así queda
+                # dicho con su nombre, igual que en `crear`.
+                conn.rollback()
+                raise HTTPException(422, str(exc)) from None
             except ValueError as exc:
                 conn.rollback()
                 raise HTTPException(422, str(exc)) from None

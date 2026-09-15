@@ -102,7 +102,12 @@ def add_movimiento_stock(conn, producto_id: int, tipo: str, cantidad: float,
     # normaliza siempre a la forma canónica completa para que todos los
     # movimientos ordenen igual entre sí.
     _fecha = _datetime.fromisoformat(fecha or _date.today().isoformat()).isoformat()
-    _deposito = deposito_id or get_default_deposito_id(conn)
+    # `is None` y no `or`: un `deposito_id=0` no es un id real (los ids de
+    # `locations` son seriales, arrancan en 1), pero `or` lo confundiría en
+    # silencio con "no vino ninguno" y lo mandaría al default. Verificado:
+    # ningún test ni caller del motor usa 0 como "sin depósito" (búsqueda en
+    # `tests/` y `libracommerce/`, 2026-09-15).
+    _deposito = deposito_id if deposito_id is not None else get_default_deposito_id(conn)
     conn.execute(
         """INSERT INTO stock_movements
            (item_id, variant_id, location_id, movement_type, quantity_delta, occurred_at,
@@ -220,7 +225,8 @@ def _es_servicio(conn, producto_id: int) -> bool:
 
 def descontar_stock_venta(conn, venta_id: int, items: list, fecha: str = "",
                           usuario_id: int | None = None,
-                          hooks: Hooks = SIN_GANCHOS):
+                          hooks: Hooks = SIN_GANCHOS,
+                          deposito_id: int | None = None):
     """Descuenta stock por cada ítem de la venta con `producto_id` que sea de
     tipo 'producto' — un servicio nunca genera movimiento: no tiene inventario.
 
@@ -233,6 +239,11 @@ def descontar_stock_venta(conn, venta_id: int, items: list, fecha: str = "",
     modificadores del pedido ya aplicados por el gancho) en vez de por el
     propio ítem. `None` significa "no tiene receta": se descuenta el ítem, que
     es el comportamiento de Contalibra y el default.
+
+    `deposito_id` es ADITIVO (F4, VentaLibra multisucursal): `None` (el
+    default) deja que `add_movimiento_stock` resuelva el depósito por
+    defecto, exactamente como hoy. Con un valor, se descuenta de ESE depósito
+    — el ítem, o sus insumos si tiene receta.
     """
     for item in items:
         pid = item.get("producto_id")
@@ -251,6 +262,7 @@ def descontar_stock_venta(conn, venta_id: int, items: list, fecha: str = "",
                     cantidad=-(float(insumo.cantidad) * qty),
                     referencia=f"Venta ID {venta_id} (receta)",
                     venta_id=venta_id, usuario_id=usuario_id, fecha=fecha,
+                    deposito_id=deposito_id,
                 )
         else:
             add_movimiento_stock(
@@ -259,4 +271,5 @@ def descontar_stock_venta(conn, venta_id: int, items: list, fecha: str = "",
                 referencia=f"Venta ID {venta_id}",
                 venta_id=venta_id, usuario_id=usuario_id, fecha=fecha,
                 variant_id=item.get("variante_id"),
+                deposito_id=deposito_id,
             )

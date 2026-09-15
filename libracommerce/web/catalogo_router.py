@@ -395,7 +395,10 @@ def build_depositos_router(
                 raise HTTPException(404, "Depósito no encontrado")
             if not nombre:
                 raise HTTPException(422, "El nombre es obligatorio.")
-            catalogo.update_deposito(conn, did, nombre, payload.descripcion.strip(), 1 if payload.activo else 0)
+            try:
+                catalogo.update_deposito(conn, did, nombre, payload.descripcion.strip(), 1 if payload.activo else 0)
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
             return catalogo.get_deposito(conn, did)
 
     @router.post("/{did}/set-default")
@@ -403,7 +406,10 @@ def build_depositos_router(
         with abrir() as conn:
             if not catalogo.get_deposito(conn, did):
                 raise HTTPException(404, "Depósito no encontrado")
-            catalogo.set_default_deposito(conn, did)
+            try:
+                catalogo.set_default_deposito(conn, did)
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
             return catalogo.get_deposito(conn, did)
 
     @router.delete("/{did}")
@@ -443,6 +449,11 @@ def build_depositos_router(
                     usuario_id=user.get("id"), fecha=payload.fecha,
                     observaciones=payload.observaciones.strip(),
                 )
+            except catalogo.DepositoInexistente as e:
+                # Explícito y no sólo cubierto por el `except ValueError` de
+                # abajo (que también lo atraparía, por herencia): así queda
+                # dicho con su nombre, igual que en `ventas_router.py`.
+                raise HTTPException(422, str(e)) from e
             except ValueError as e:
                 raise HTTPException(422, str(e)) from e
         return {"ok": True}
