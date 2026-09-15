@@ -121,11 +121,45 @@ def test_actividad_mezcla_las_partes_de_los_dos_motores(abrir_ventas):
         assert len(actividad.get_actividad_log(conn, limit=2)) == 2
 
 
-def test_las_partes_son_las_siete_del_producto():
+def test_las_partes_del_producto_son_las_dos_propias_mas_el_core():
     from libracore.db import logs
 
     partes = actividad.partes_de_comercio()
-    assert len(partes) == 7
+    # Ventas y stock de este motor, en su lugar de siempre; todo lo demás es
+    # exactamente `logs.PARTES_CORE` del libracore instalado — sin un número
+    # mágico, para que una parte nueva del core (como los cierres diarios)
+    # entre sola sin romper este test.
     assert partes[0] is actividad.PARTE_VENTAS_COMERCIO and partes[2] is actividad.PARTE_STOCK_COMERCIO
     assert set(partes) - {actividad.PARTE_VENTAS_COMERCIO, actividad.PARTE_STOCK_COMERCIO} == set(logs.PARTES_CORE)
+    assert len(partes) == len(logs.PARTES_CORE) + 2
     assert logs.PARTE_VENTAS not in partes and logs.PARTE_STOCK not in partes
+
+
+def test_el_cierre_diario_entra_a_la_actividad(abrir_ventas):
+    """Desde LibraCore v1.98.0 `logs.PARTES_CORE` suma `PARTE_CIERRES_DIARIOS`
+    (mismo criterio que la caja o los turnos): `partes_de_comercio()` la hereda
+    sola, sin nombrarla, y por eso tiene que aparecer en la línea de tiempo de
+    un producto de este motor."""
+    from libracore.db import cierre_diario as db_cierre_diario
+
+    _escenario(abrir_ventas)
+    with abrir_ventas() as conn:
+        db_cierre_diario.crear_tablas(conn)
+        conn.execute(
+            "INSERT INTO cierres_diarios "
+            "(sucursal_id, numero, fecha, usuario_id, monto_esperado_total, "
+            " monto_declarado_total, diferencia_total) "
+            "VALUES (NULL, 1, ?, ?, 1000, 900, -100)",
+            (HOY, USUARIO["id"]),
+        )
+        conn.commit()
+
+    with abrir_ventas() as conn:
+        filas = actividad.get_actividad_log(conn, tipos=["cierre_diario"])
+        assert len(filas) == 1
+        fila = filas[0]
+        assert fila["ref_tabla"] == "cierres_diarios"
+        assert "Cierre diario #1" in fila["descripcion"]
+        assert fila["usuario"] == "Cajero"
+
+        assert "cierre_diario" in {f["tipo"] for f in actividad.get_actividad_log(conn)}
