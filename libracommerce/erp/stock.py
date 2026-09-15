@@ -102,7 +102,12 @@ def add_movimiento_stock(conn, producto_id: int, tipo: str, cantidad: float,
     # normaliza siempre a la forma canónica completa para que todos los
     # movimientos ordenen igual entre sí.
     _fecha = _datetime.fromisoformat(fecha or _date.today().isoformat()).isoformat()
-    _deposito = deposito_id or get_default_deposito_id(conn)
+    # `is None` y no `or`: un `deposito_id=0` no es un id real (los ids de
+    # `locations` son seriales, arrancan en 1), pero `or` lo confundiría en
+    # silencio con "no vino ninguno" y lo mandaría al default. Verificado:
+    # ningún test ni caller del motor usa 0 como "sin depósito" (búsqueda en
+    # `tests/` y `libracommerce/`, 2026-09-15).
+    _deposito = deposito_id if deposito_id is not None else get_default_deposito_id(conn)
     conn.execute(
         """INSERT INTO stock_movements
            (item_id, variant_id, location_id, movement_type, quantity_delta, occurred_at,

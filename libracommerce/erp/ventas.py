@@ -57,7 +57,7 @@ from contextlib import AbstractContextManager
 from decimal import Decimal
 from typing import Any
 
-from .catalogo import get_deposito
+from .catalogo import DepositoInexistente, validar_deposito
 from .hooks import SIN_GANCHOS, Hooks
 from .stock import add_movimiento_stock, descontar_stock_venta
 
@@ -115,40 +115,12 @@ class ProductoInexistente(ValueError):
     de entrada. Ver `_es_conflicto_de_numero`."""
 
 
-class DepositoInexistente(ValueError):
-    """El `deposito_id` de una venta o una devolución (F4, VentaLibra
-    multisucursal) no existe o no está activo en `locations`.
-
-    Se valida con `_validar_deposito` —una sola función, que `registrar_venta`
-    y `devolver_items` llaman cada una ANTES de escribir nada—, mismo criterio
-    que `SinTurno`/`ProductoInexistente`: un depósito inventado no es un
-    conflicto con otra venta, es un dato del pedido que nunca iba a dejar de
-    fallar. Hereda de `ValueError` para que el 422 en `web/ventas_router.py`
-    sea el mismo mecanismo con el que ya rebota `catalogo.delete_deposito`.
-
-    🔴 **`descontar_stock_venta`/`add_movimiento_stock` NO validan esto por su
-    cuenta** —confiar en la FK de `stock_movements.location_id` dejaría pasar
-    escrituras previas (en `registrar_venta`: `sales`/`sale_items`/pagos/caja;
-    en `devolver_items`: nada, porque ahí es el primer `INSERT` del ítem, pero
-    igual después de leer y validar cantidades) antes de reventar, y el error
-    de FK no lo atrapa ningún `except` de `web/ventas_router.py` (sale como
-    500). Por eso la validación es temprano, en las dos funciones."""
-
-
-def _validar_deposito(conn, deposito_id: int | None) -> None:
-    """Levanta `DepositoInexistente` si `deposito_id` no es `None` y no
-    resuelve a un depósito existente y activo. `None` no se valida — es "no
-    se especificó", el comportamiento de siempre.
-
-    Compartida por `registrar_venta` y `devolver_items`: mismo criterio,
-    un solo lugar donde cambiarlo."""
-    if deposito_id is None:
-        return
-    deposito = get_deposito(conn, deposito_id)
-    if deposito is None or not deposito["activo"]:
-        raise DepositoInexistente(
-            f"El depósito {deposito_id} no existe o no está activo."
-        )
+# `DepositoInexistente` y `validar_deposito` (importadas arriba, de
+# `.catalogo`) viven ahí —el módulo dueño de `locations`— porque las necesita
+# TAMBIÉN `catalogo.transferir_stock`/`update_deposito`/`set_default_deposito`,
+# que este módulo no puede importar sin un ciclo (`catalogo` no depende de
+# `ventas`, al revés sí). El import ya deja `ventas.DepositoInexistente`
+# funcionando igual que antes, para `web/ventas_router.py` y los tests.
 
 
 def estado_de_row(status: str, status_detail: str | None) -> str:
@@ -307,7 +279,7 @@ def registrar_venta(conn, *, fecha: str, items: list, subtotal: float, descuento
     from libracore import pagos as acreditacion
     from libracore.db.caja import create_caja_movimiento
 
-    _validar_deposito(conn, deposito_id)
+    validar_deposito(conn, deposito_id)
 
     turno = hooks.turno_para(conn, usuario_id)
     if exigir_turno and turno is None:
@@ -789,8 +761,8 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
                    hooks: Hooks = SIN_GANCHOS, *, caja_con_turno: bool = False) -> dict:
     """Devuelve algunas líneas de una venta confirmada y reintegra su importe.
 
-    🔴 **`deposito_id` se valida con `_validar_deposito` ANTES de tocar nada**
-    (F4, VentaLibra multisucursal — mismo criterio y misma función que
+    🔴 **`deposito_id` se valida con `catalogo.validar_deposito` ANTES de tocar
+    nada** (F4, VentaLibra multisucursal — mismo criterio y misma función que
     `registrar_venta`): un depósito inventado levanta `DepositoInexistente`,
     no la `IntegrityError` de la FK de `stock_movements.location_id` que salía
     antes de este fix cuando la línea era de tipo 'product' (con una línea de
@@ -837,7 +809,7 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
     from libracore.db.core import _ar_now
     from libracore.db.reversiones import reintegrar_devolucion
 
-    _validar_deposito(conn, deposito_id)
+    validar_deposito(conn, deposito_id)
 
     venta = obtener_venta(conn, vid)
     if not venta:

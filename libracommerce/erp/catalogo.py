@@ -58,6 +58,27 @@ def _validar_tipo(tipo: str) -> CatalogItemType:
 # ── Depósitos ────────────────────────────────────────────────────────────
 
 
+class DepositoInexistente(ValueError):
+    """Un `deposito_id` (venta, devolución o transferencia) no existe o no
+    está activo en `locations`.
+
+    Se valida con `validar_deposito` —una sola función, ANTES de escribir
+    nada, en `erp.ventas.registrar_venta`/`devolver_items` y en
+    `transferir_stock` (origen Y destino)—: un depósito inventado no es un
+    conflicto con otra operación simultánea, es un dato del pedido que nunca
+    iba a dejar de fallar. Hereda de `ValueError` para que el 422 de
+    `web/ventas_router.py` y `web/catalogo_router.py` sea el mismo mecanismo
+    con el que ya rebotan `delete_deposito`/`update_deposito`.
+
+    🔴 **`add_movimiento_stock` (y por lo tanto `descontar_stock_venta`,
+    `transfer_stock`) NO valida esto por su cuenta** —confiar en la FK de
+    `stock_movements.location_id` dejaría pasar escrituras previas (la pata de
+    salida de una transferencia, por ejemplo) antes de reventar, y ese error
+    de FK no lo atrapa ningún `except ValueError` (sale como 500). Por eso la
+    validación va temprano, en cada caller que recibe un `deposito_id` de
+    afuera."""
+
+
 def _deposito_dict(row) -> dict:
     return {
         "id": row["id"], "nombre": row["name"], "descripcion": row["description"],
@@ -81,6 +102,23 @@ def get_deposito(conn, did: int) -> dict | None:
     return _deposito_dict(row) if row else None
 
 
+def validar_deposito(conn, deposito_id: int | None) -> None:
+    """Levanta `DepositoInexistente` si `deposito_id` no es `None` y no
+    resuelve a un depósito existente y activo. `None` no se valida — es "no
+    se especificó", el comportamiento de siempre.
+
+    Compartida por `erp.ventas.registrar_venta`/`devolver_items` y por
+    `transferir_stock` de este módulo: un solo criterio, un solo lugar donde
+    cambiarlo."""
+    if deposito_id is None:
+        return
+    deposito = get_deposito(conn, deposito_id)
+    if deposito is None or not deposito["activo"]:
+        raise DepositoInexistente(
+            f"El depósito {deposito_id} no existe o no está activo."
+        )
+
+
 def get_default_deposito_id(conn) -> int | None:
     row = conn.execute("SELECT id FROM locations WHERE is_default=1 LIMIT 1").fetchone()
     if not row:
@@ -94,10 +132,21 @@ def create_deposito(conn, nombre: str, descripcion: str = "") -> int:
 
 
 def update_deposito(conn, did: int, nombre: str, descripcion: str, activo: int):
+    """🔴 **No se puede desactivar el depósito por defecto** — levanta
+    `ValueError` (mismo mecanismo que `delete_deposito`, que ya rechaza
+    borrarlo). Sin esta guarda, `stock.py::add_movimiento_stock` seguía
+    resolviendo el default vía `get_default_deposito_id` —que no mira
+    `active`— y toda venta sin `deposito_id` explícito le seguía cargando
+    stock a un depósito que la pantalla mostraba como dado de baja."""
     repo = SqliteCommerceRepository(conn)
     location = repo.get_location(did)
     if location is None:
         return
+    if location.is_default and not activo:
+        raise ValueError(
+            "No se puede desactivar el depósito por defecto: primero hay que "
+            "marcar otro depósito como default."
+        )
     repo.save_location(
         Location(
             id=did, name=nombre, branch_id=location.branch_id,
@@ -108,6 +157,15 @@ def update_deposito(conn, did: int, nombre: str, descripcion: str, activo: int):
 
 
 def set_default_deposito(conn, did: int):
+    """🔴 **No se puede marcar como default un depósito inactivo** — mismo
+    motivo que la guarda de `update_deposito`: `get_default_deposito_id` no
+    mira `active`, así que un default inactivo le seguiría cargando stock en
+    silencio a un depósito dado de baja."""
+    row = conn.execute("SELECT active FROM locations WHERE id=?", (did,)).fetchone()
+    if row is not None and not row[0]:
+        raise ValueError(
+            "No se puede marcar como default un depósito inactivo: activalo primero."
+        )
     # El índice único parcial de `locations` no admite dos defaults a la vez,
     # así que primero se limpia el anterior y recién después se marca el nuevo.
     conn.execute("UPDATE locations SET is_default=0")
@@ -180,7 +238,19 @@ def transferir_stock(conn, producto_id: int, origen_id: int, destino_id: int,
     es el vocabulario que el log de actividad muestra sin mapa, y **el texto del
     error** es el que el endpoint devuelve en un 422 y ve el usuario: el del
     motor nombra ids, que no le dicen nada a quien mira nombres.
+
+    🔴 **`origen_id` y `destino_id` se validan con `validar_deposito` ANTES de
+    llamar a `transfer_stock`** —los dos, no sólo uno—. Sin esto: un
+    `destino_id` inexistente escribía la pata de SALIDA (dentro de la misma
+    transacción de `transfer_stock`, pero antes del `INSERT` que revienta) y
+    recién ahí reventaba con la `IntegrityError` de la FK, sin manejar (500);
+    un `destino_id` inactivo se aceptaba sin aviso, dejando el movimiento en
+    un depósito dado de baja; y un `origen_id` inexistente terminaba en el
+    422 de "Stock insuficiente" —engañoso: el problema no era la cantidad, el
+    depósito no existía—.
     """
+    validar_deposito(conn, origen_id)
+    validar_deposito(conn, destino_id)
     _fecha = _datetime.fromisoformat(fecha or _date.today().isoformat())
     ref = observaciones or "Transferencia entre depósitos"
     try:
