@@ -115,6 +115,17 @@ class ProductoInexistente(ValueError):
     de entrada. Ver `_es_conflicto_de_numero`."""
 
 
+class DepositoNoPermitido(ValueError):
+    """El gancho `hooks.validar_deposito` rechazó el `deposito_id` de esta
+    venta o devolución.
+
+    A diferencia de `DepositoInexistente` —el depósito no existe o está
+    desactivado—, acá el depósito existe y está activo: es el producto el
+    que decidió que no es un destino válido para esta operación (caso real:
+    VentaLibra multisucursal, un depósito que no es el de la sucursal del
+    turno de caja abierto)."""
+
+
 # `DepositoInexistente` y `validar_deposito` (importadas arriba, de
 # `.catalogo`) viven ahí —el módulo dueño de `locations`— porque las necesita
 # TAMBIÉN `catalogo.transferir_stock`/`update_deposito`/`set_default_deposito`,
@@ -272,6 +283,13 @@ def registrar_venta(conn, *, fecha: str, items: list, subtotal: float, descuento
     `DepositoInexistente` si no existe o no está activo—, con el mismo
     criterio que `SinTurno`.
 
+    🔴 **`hooks.validar_deposito` corre después, con el turno ya resuelto.**
+    `catalogo.validar_deposito` (arriba) sólo mira si el depósito existe y
+    está activo; el gancho puede rechazarlo igual por otra razón propia del
+    producto (VentaLibra multisucursal: que no sea el de la sucursal del
+    turno abierto), levantando `DepositoNoPermitido` — también ANTES de
+    escribir nada, mismo criterio.
+
     No commitea: es del caller (`crear_venta_directa`, o el cobro de un pedido
     en Restolibra, que arma la venta con estas mismas piezas).
     """
@@ -284,6 +302,7 @@ def registrar_venta(conn, *, fecha: str, items: list, subtotal: float, descuento
     turno = hooks.turno_para(conn, usuario_id)
     if exigir_turno and turno is None:
         raise SinTurno("No hay un turno de caja abierto: no se puede registrar la venta.")
+    hooks.validar_deposito(conn, operacion="venta", turno=turno, deposito_id=deposito_id)
     turno_id = turno["id"] if (caja_con_turno and turno) else None
 
     numero = hooks.numerador(conn)
@@ -804,6 +823,13 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
     🔴 **No es receta-aware**: repone el ítem vendido, nunca sus insumos. Es
     una limitación real para un producto con `resolver_receta` (Restolibra);
     no lo pidió esta fase, que es la de VentaLibra, sin recetas.
+
+    🔴 **`hooks.validar_deposito` corre ANTES del loop que repone stock** —la
+    primera escritura de esta función—, con `operacion="devolucion"` y el
+    turno que resolvió `hooks.turno_para`. Mismo gancho y misma excepción
+    (`DepositoNoPermitido`) que `registrar_venta`; ver el comentario junto a
+    `resolver_turno_temprano` más abajo sobre CUÁNDO se resuelve el turno
+    para no cambiarle el comportamiento a quien no registra el gancho.
     """
     from libracore.db.caja import MEDIO_CUENTA_CORRIENTE
     from libracore.db.core import _ar_now
@@ -842,6 +868,21 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
             vendido_por_clave[clave] = vendido_por_clave.get(clave, 0.0) + float(li["quantity"])
     ya_devuelto = _acumular(_movimientos_de_venta(conn, vid, _COND_DEVUELTO), con_deposito=False)
     fecha = _ar_now().split(" ")[0]
+
+    # `turno_para` no se resolvía acá hasta este gancho: `caja_con_turno`
+    # gatillaba la única llamada, más abajo, DESPUÉS del loop que ya había
+    # escrito stock. El gancho necesita el turno ANTES de esa escritura, así
+    # que hay que adelantar la resolución — pero adelantarla SIEMPRE
+    # cambiaría cuándo se llama `hooks.turno_para` incluso para quien no
+    # registró `validar_deposito`, y esa precedencia es la que no se puede
+    # tocar. Por eso se adelanta sólo cuando hace falta: `caja_con_turno=True`
+    # ya la resolvía (más abajo se reusa, no se llama dos veces) y con el
+    # gancho por default no hace falta ningún turno real (es un no-op que
+    # ignora el argumento) — para Contalibra y Restolibra, hoy, esta línea no
+    # agrega ningún llamado nuevo a `turno_para`.
+    resuelve_turno_temprano = caja_con_turno or hooks.validar_deposito is not SIN_GANCHOS.validar_deposito
+    turno = hooks.turno_para(conn, usuario_id) if resuelve_turno_temprano else None
+    hooks.validar_deposito(conn, operacion="devolucion", turno=turno, deposito_id=deposito_id)
 
     pedido_por_clave: dict[tuple, float] = {}
     importe = 0.0
@@ -884,12 +925,17 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
             "para devolver a cuenta corriente la venta tiene que tener cliente"
         )
 
-    turno = hooks.turno_para(conn, usuario_id) if caja_con_turno else None
+    # Reusa el `turno` ya resuelto arriba (para el gancho) — no se lo vuelve
+    # a pedir. `turno_id` sigue gateado por `caja_con_turno`, exactamente
+    # como antes: si `resuelve_turno_temprano` lo trajo por el gancho pero
+    # `caja_con_turno` es `False`, el movimiento de caja NO lo lleva, igual
+    # que hoy.
+    turno_id = turno["id"] if (caja_con_turno and turno) else None
     reintegrar_devolucion(
         venta_id=vid, numero=venta["numero"], fecha=fecha, monto=importe,
         medio_pago=medio_pago, referencia=_referencia_devolucion(vid, devoluciones),
         cliente_id=cliente_id, usuario_id=usuario_id,
-        turno_id=(turno["id"] if turno else None), conn=conn,
+        turno_id=turno_id, conn=conn,
     )
 
     vendido_total = sum(float(li["quantity"]) for li in lineas.values() if li["kind"] == "product")

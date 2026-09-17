@@ -11,7 +11,7 @@ from decimal import Decimal
 import pytest
 from conftest import USUARIO
 
-from libracommerce.erp import Hooks, Insumo, catalogo, stock, ventas
+from libracommerce.erp import SIN_GANCHOS, Hooks, Insumo, catalogo, stock, ventas
 
 HOY = datetime.date.today().isoformat()
 
@@ -1432,3 +1432,265 @@ def test_devolver_items_descuenta_lo_ya_devuelto_por_el_camino_viejo(abrir_venta
         ventas.devolver_items(conn, vid, {item_id_linea: 2.0}, deposito_id)
         conn.commit()
         assert ventas.obtener_venta(conn, vid)["estado"] == "devuelta"
+
+
+# ── F6: gancho nuevo `validar_deposito` (VentaLibra multisucursal) ────────
+
+
+def test_validar_deposito_default_es_no_op(abrir_ventas):
+    """El default (`SIN_GANCHOS`) no valida nada, sea lo que sea lo que
+    reciba."""
+    with abrir_ventas() as conn:
+        assert Hooks().validar_deposito(
+            conn, operacion="venta", turno=None, deposito_id=None
+        ) is None
+        assert Hooks().validar_deposito(
+            conn, operacion="devolucion", turno={"id": 1}, deposito_id=999999
+        ) is None
+
+
+def test_sin_ganchos_venta_y_devolucion_siguen_igual_incluido_deposito_none(abrir_ventas):
+    """(a) Con `SIN_GANCHOS` explícito, una venta y su devolución se registran
+    exactamente como antes de este gancho — incluido `deposito_id=None`, que
+    es lo único que mandan Contalibra y Restolibra hoy."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 2, "precio": 100.0, "subtotal": 200.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}],
+        hooks=SIN_GANCHOS, deposito_id=None)
+    with abrir_ventas() as conn:
+        assert ventas.obtener_venta(conn, vid)["estado"] == "cobrada"
+        item_id_linea = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (vid,)
+        ).fetchone()["id"]
+        deposito_id = conn.execute(
+            "SELECT location_id FROM stock_movements WHERE source_id=?", (vid,)
+        ).fetchone()["location_id"]
+        resultado = ventas.devolver_items(
+            conn, vid, {item_id_linea: 1.0}, deposito_id, hooks=SIN_GANCHOS
+        )
+        conn.commit()
+        assert resultado["importe"] == 100.0
+        assert ventas.obtener_venta(conn, vid)["estado"] == "devuelta_parcial"
+
+
+def test_validar_deposito_recibe_turno_operacion_y_deposito(abrir_ventas):
+    """(c) El gancho recibe el MISMO turno que resolvió `turno_para` (mismo
+    id), la `operacion` correcta (`"venta"` / `"devolucion"`) y el
+    `deposito_id` tal cual el caso de uso lo recibió — incluido `None`."""
+    llamados = []
+
+    def _gancho(conn, *, operacion, turno, deposito_id):
+        llamados.append((operacion, turno["id"] if turno else None, deposito_id))
+
+    ganchos = Hooks(validar_deposito=_gancho)
+    with abrir_ventas() as conn:
+        tid = _turno(conn, 500.0)
+        pid = _producto(conn, existencia=10.0)
+        sucursal_b = catalogo.create_deposito(conn, "Sucursal B")
+        conn.commit()
+
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 1, "precio": 100.0, "subtotal": 100.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 100.0, "estado": "aprobado"}],
+        hooks=ganchos, deposito_id=sucursal_b)
+    assert llamados[-1] == ("venta", tid, sucursal_b)
+
+    _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 1, "precio": 100.0, "subtotal": 100.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 100.0, "estado": "aprobado"}],
+        hooks=ganchos, deposito_id=None)
+    assert llamados[-1] == ("venta", tid, None)
+
+    with abrir_ventas() as conn:
+        item_id_linea = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (vid,)
+        ).fetchone()["id"]
+        ventas.devolver_items(
+            conn, vid, {item_id_linea: 1.0}, sucursal_b,
+            usuario_id=USUARIO["id"], hooks=ganchos,
+        )
+        conn.commit()
+    assert llamados[-1] == ("devolucion", tid, sucursal_b)
+
+
+def test_validar_deposito_con_gancho_default_no_agrega_llamados_a_turno_para(abrir_ventas, monkeypatch):
+    """Con el gancho por default (Contalibra, Restolibra hoy) y
+    `caja_con_turno=False`, este gancho no tiene que agregar NINGÚN llamado
+    nuevo a `hooks.turno_para` — es la condición que preserva la precedencia
+    para quien no registró `validar_deposito` (ver `resuelve_turno_temprano`
+    en `devolver_items`)."""
+    llamados = []
+    turno_para_original = Hooks().turno_para
+
+    def _contando(conn, usuario_id):
+        llamados.append(usuario_id)
+        return turno_para_original(conn, usuario_id)
+
+    ganchos = Hooks(turno_para=_contando)
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 2, "precio": 100.0, "subtotal": 200.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}], hooks=ganchos)
+    assert len(llamados) == 1  # registrar_venta ya lo llamaba una vez, sin cambios
+
+    llamados.clear()
+    with abrir_ventas() as conn:
+        item_id_linea = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (vid,)
+        ).fetchone()["id"]
+        deposito_id = conn.execute(
+            "SELECT location_id FROM stock_movements WHERE source_id=?", (vid,)
+        ).fetchone()["location_id"]
+        ventas.devolver_items(conn, vid, {item_id_linea: 1.0}, deposito_id, hooks=ganchos)
+        conn.commit()
+    # `caja_con_turno=False` (default) y gancho `validar_deposito` DEFAULT:
+    # `devolver_items` no llamaba a `turno_para` en absoluto antes de este
+    # gancho, y sigue sin llamarlo.
+    assert llamados == []
+
+
+# ── F6: precedencia — con SIN_GANCHOS, el orden de errores de hoy no cambia ──
+
+
+def test_precedencia_venta_deposito_inexistente_gana_a_sinturno(abrir_ventas):
+    """(d) venta: `deposito_id` inventado + `exigir_turno=True` sin turno
+    abierto disparan DOS errores a la vez. Gana `DepositoInexistente` porque
+    `catalogo.validar_deposito` corre ANTES del chequeo de `SinTurno` — esto
+    NO cambió: `hooks.validar_deposito` se agregó DESPUÉS de ambos chequeos.
+
+    🔑 Medido contra `origin/develop` (mismo archivo de test, sin ninguna API
+    nueva): mismos 4 casos, mismo resultado, antes y después de este gancho —
+    ver el reporte de la tarea."""
+    with pytest.raises(ventas.DepositoInexistente) as exc_info:
+        _venta(abrir_ventas, exigir_turno=True, deposito_id=999999)
+    assert "999999" in str(exc_info.value)
+    with abrir_ventas() as conn:
+        assert ventas.listar_ventas(conn) == []
+
+
+def test_precedencia_devolucion_deposito_inexistente_gana_a_venta_anulada(abrir_ventas):
+    """(d) devolución: `deposito_id` inventado + venta anulada disparan DOS
+    errores a la vez. Gana `DepositoInexistente` porque corre ANTES de
+    `obtener_venta`/el chequeo de estado — sin cambios: el gancho nuevo se
+    llama después de esos chequeos, ya con el loop de escritura al lado."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 1, "precio": 100.0, "subtotal": 100.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 100.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        item_id_linea = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (vid,)
+        ).fetchone()["id"]
+        ventas.anular_venta(conn, vid)
+        conn.commit()
+        with pytest.raises(ventas.DepositoInexistente) as exc_info:
+            ventas.devolver_items(conn, vid, {item_id_linea: 1.0}, 999999)
+        assert "999999" in str(exc_info.value)
+
+
+# ── F6: el gancho corre ANTES de escribir nada (venta y devolución) ───────
+
+
+def test_validar_deposito_corre_antes_de_escribir_la_venta(abrir_ventas):
+    """🔑 mutación (2): un `rollback` borra la venta escrita ANTES de que el
+    gancho rechace, así que comparar sólo el estado final (después del
+    rollback) no distingue 'el gancho corrió antes de `crear_venta`' de 'corrió
+    después, y como total falló igual, se deshizo'. Se mide DESDE ADENTRO del
+    gancho, en la misma conexión/transacción, todavía sin commitear: si
+    `crear_venta` ya corrió, esa fila YA es visible ahí (mismo connection,
+    lectura de lo propio no comiteado) aunque después se revierta."""
+    vistos = []
+
+    def _mide(conn, *, operacion, turno, deposito_id):
+        vistos.append(conn.execute("SELECT COUNT(*) FROM sales").fetchone()[0])
+        raise ventas.DepositoNoPermitido("nunca pasa el depósito 1")
+
+    with pytest.raises(ventas.DepositoNoPermitido):
+        _venta(abrir_ventas, hooks=Hooks(validar_deposito=_mide), deposito_id=1)
+    assert vistos == [0]
+
+
+def test_validar_deposito_rechaza_venta_no_deja_nada_y_no_consume_numerador(abrir_ventas):
+    """(b) Con un gancho que levanta `DepositoNoPermitido`: nada queda
+    escrito (ni venta, ni pago, ni caja, ni stock) y el numerador no se
+    consume — la siguiente venta que SÍ pasa vuelve a ser `V-00001`.
+
+    🔑 mutación (1)/(2): sin la llamada en `registrar_venta`, o si se la
+    mueve después de `crear_venta`, este test da rojo (no rechaza, o
+    rechaza tarde con la venta ya escrita)."""
+    def _rechaza(conn, *, operacion, turno, deposito_id):
+        raise ventas.DepositoNoPermitido(
+            f"el depósito {deposito_id} no es de esta sucursal"
+        )
+
+    ganchos = Hooks(validar_deposito=_rechaza)
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+        # `_producto` ya escribió el movimiento "inicial" del alta de stock:
+        # el conteo de referencia es DESPUÉS de eso, no cero.
+        n_stock_antes = conn.execute("SELECT COUNT(*) FROM stock_movements").fetchone()[0]
+
+    with pytest.raises(ventas.DepositoNoPermitido) as exc_info:
+        _venta(abrir_ventas, items=[
+            {"nombre": "Yerba", "qty": 1, "precio": 100.0, "subtotal": 100.0, "producto_id": pid},
+        ], pagos=[{"medio": "efectivo", "monto": 100.0, "estado": "aprobado"}],
+            hooks=ganchos, deposito_id=1)
+    assert "no es de esta sucursal" in str(exc_info.value)
+
+    with abrir_ventas() as conn:
+        assert ventas.listar_ventas(conn) == []
+        assert _caja(conn) == []
+        assert conn.execute("SELECT COUNT(*) FROM stock_movements").fetchone()[0] == n_stock_antes
+        assert stock.get_stock_actual(conn, pid) == 10.0
+
+    # El numerador no se consumió: la próxima venta SIN el gancho vuelve a
+    # ser V-00001.
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 1, "precio": 100.0, "subtotal": 100.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 100.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        assert ventas.obtener_venta(conn, vid)["numero"] == "V-00001"
+
+
+def test_validar_deposito_rechaza_devolucion_no_deja_nada(abrir_ventas):
+    """(b) Igual que arriba, para `devolver_items`: el stock y la caja no ven
+    ningún movimiento nuevo, y la venta NO queda marcada como devuelta.
+
+    🔑 mutación (3): sin la llamada en `devolver_items`, este test da rojo
+    (no rechaza, y el stock/la venta sí cambian)."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 4, "precio": 100.0, "subtotal": 400.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 400.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        item_id_linea = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (vid,)
+        ).fetchone()["id"]
+        deposito_id = conn.execute(
+            "SELECT location_id FROM stock_movements WHERE source_id=?", (vid,)
+        ).fetchone()["location_id"]
+        n_stock_antes = conn.execute(
+            "SELECT COUNT(*) FROM stock_movements WHERE source_id=?", (vid,)
+        ).fetchone()[0]
+        n_caja_antes = len(_caja(conn, "V-00001"))
+
+    def _rechaza(conn, *, operacion, turno, deposito_id):
+        raise ventas.DepositoNoPermitido("depósito no autorizado para la devolución")
+
+    ganchos = Hooks(validar_deposito=_rechaza)
+    with abrir_ventas() as conn:
+        with pytest.raises(ventas.DepositoNoPermitido) as exc_info:
+            ventas.devolver_items(conn, vid, {item_id_linea: 1.0}, deposito_id, hooks=ganchos)
+        assert "no autorizado" in str(exc_info.value)
+        n_stock_despues = conn.execute(
+            "SELECT COUNT(*) FROM stock_movements WHERE source_id=?", (vid,)
+        ).fetchone()[0]
+        assert n_stock_despues == n_stock_antes
+        assert len(_caja(conn, "V-00001")) == n_caja_antes
+        assert ventas.obtener_venta(conn, vid)["estado"] == "cobrada"
+        assert stock.get_stock_actual(conn, pid) == 6.0

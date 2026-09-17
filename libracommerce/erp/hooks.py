@@ -16,8 +16,9 @@ Cada uno nombra el caso real que lo motiva:
 | `lista_de_precio_para` | Contalibra | la lista mayorista asignada al cliente (`cliente_lista_precio`) |
 | `canales` | Restolibra | mostrador y delivery como canales del reporte de ventas |
 | `numerador` | VentaLibra | numeración propia (`POS-000001` contra su tabla `sequences`) en vez de `V-00001` |
-| `turno_para` | VentaLibra | el turno de caja de un usuario cuando lo lleva un turno **compartido** y no uno por cajero |
+| `turno_para` | VentaLibra | el turno de caja del usuario — desde el 2026-09-16 usa el mismo criterio que el default (`get_turno_activo`), ya no un turno compartido |
 | `cliente_cc_de` | VentaLibra | traducir el `party_id` de una venta al `clients.id` de LibraCore (`external_ref = party-<id>`) para la cuenta corriente |
+| `validar_deposito` | VentaLibra | rechazar un `deposito_id` que existe pero no es el de la sucursal del turno de caja abierto |
 
 🔴 **Los ganchos de venta reciben la MISMA conexión** con la que el caso de uso
 está escribiendo la venta, y corren adentro de esa transacción. Es lo que P7
@@ -85,9 +86,12 @@ class Numerador(Protocol):
 class TurnoPara(Protocol):
     """El turno de caja abierto para este usuario, o `None` si no hay ninguno
     (o no hay usuario). El default es el turno **por cajero**
-    (`libracore.db.turnos.get_turno_activo`); VentaLibra tiene un turno
-    **compartido** (`get_turno_activo_any`, ver `services/cuenta_corriente.py`
-    de ese repo) y lo reemplaza acá."""
+    (`libracore.db.turnos.get_turno_activo`); VentaLibra lo reemplaza acá con
+    el mismo criterio (ver `services/cuenta_corriente.py` de ese repo).
+
+    > Hasta el 2026-09-16 esta línea decía que VentaLibra tenía un turno
+    > **compartido** (`get_turno_activo_any`) en vez de uno por cajero. Quedó
+    > vencido cuando VentaLibra pasó al turno por usuario — corregido acá."""
 
     def __call__(self, conn: Any, usuario_id: int | None) -> Any | None: ...
 
@@ -101,6 +105,28 @@ class ClienteCcDe(Protocol):
     de ese repo)."""
 
     def __call__(self, conn: Any, venta: Any) -> int | None: ...
+
+
+class ValidarDeposito(Protocol):
+    """Corre dentro de la transacción de la venta o la devolución, con la
+    misma conexión que el caso de uso, ANTES de escribir nada. Levanta
+    `DepositoNoPermitido` (`erp.ventas`) para rechazar el `deposito_id`
+    recibido; el default no valida nada.
+
+    Caso real: VentaLibra multisucursal, donde la venta y la devolución
+    tienen que salir del depósito de la sucursal de la caja del turno
+    abierto, no de cualquier depósito activo (eso ya lo garantiza
+    `catalogo.validar_deposito`, que sólo mira si el depósito existe y está
+    activo, sin importar la sucursal).
+
+    `operacion` distingue `"venta"` de `"devolucion"` —el mismo gancho sirve
+    para las dos, por si el criterio llegara a diferir—. `turno` es el que
+    resolvió `hooks.turno_para` para este mismo llamado (puede ser `None` si
+    no hay turno abierto). `deposito_id` llega tal cual lo recibió el caso de
+    uso, incluido `None`."""
+
+    def __call__(self, conn: Any, *, operacion: str, turno: Any | None,
+                deposito_id: int | None) -> None: ...
 
 
 def _sin_receta(item_id: int, item: Mapping[str, Any]) -> None:
@@ -137,6 +163,11 @@ def _cliente_cc_default(conn: Any, venta: Any) -> int | None:
     return venta.get("cliente_id")
 
 
+def _deposito_libre(conn: Any, *, operacion: str, turno: Any | None,
+                    deposito_id: int | None) -> None:
+    return None
+
+
 @dataclass(frozen=True)
 class Hooks:
     """El conjunto de ganchos de un producto. Inmutable: se arma una vez en el
@@ -152,6 +183,7 @@ class Hooks:
     numerador: Numerador = _numerador_default
     turno_para: TurnoPara = _turno_default
     cliente_cc_de: ClienteCcDe = _cliente_cc_default
+    validar_deposito: ValidarDeposito = _deposito_libre
 
 
 #: El comportamiento de Contalibra: ningún gancho enganchado.

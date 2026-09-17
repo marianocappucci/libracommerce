@@ -292,6 +292,10 @@ def build_ventas_router(
             # Mismo criterio que ProductoInexistente: un depósito inventado
             # nunca se cura reintentando, así que va antes del catch-all.
             raise HTTPException(422, str(exc)) from None
+        except ventas.DepositoNoPermitido as exc:
+            # El depósito existe, pero `hooks.validar_deposito` lo rechazó
+            # (VentaLibra multisucursal): mismo 422 que un depósito inventado.
+            raise HTTPException(422, str(exc)) from None
         except (sqlite3.IntegrityError, RuntimeError):
             raise HTTPException(
                 409, "No se pudo registrar la venta (conflicto con otra venta simultánea). Reintentá."
@@ -345,6 +349,11 @@ def build_ventas_router(
                 # Explícito y no sólo cubierto por el `except ValueError` de
                 # abajo (que también lo atraparía, por herencia): así queda
                 # dicho con su nombre, igual que en `crear`.
+                conn.rollback()
+                raise HTTPException(422, str(exc)) from None
+            except ventas.DepositoNoPermitido as exc:
+                # Mismo criterio: el depósito existe, pero el gancho lo
+                # rechazó — explícito, igual que en `crear`.
                 conn.rollback()
                 raise HTTPException(422, str(exc)) from None
             except ValueError as exc:

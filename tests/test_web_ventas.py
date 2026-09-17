@@ -499,3 +499,62 @@ def test_devolver_a_deposito_inactivo_da_422(abrir_ventas):
     r = client.post(f"/api/ventas/{venta['id']}/devolver", json={
         "lineas": [{"sale_item_id": item_id_linea, "cantidad": 1}], "deposito_id": sucursal_b})
     assert r.status_code == 422, r.text
+
+
+# ── F6: gancho `validar_deposito` — el rechazo del PRODUCTO también es 422 ──
+
+
+def test_validar_deposito_rechaza_venta_da_422_por_la_api(abrir_ventas):
+    """(b) El depósito EXISTE (a diferencia de `test_deposito_id_inexistente_da_422...`),
+    pero el gancho lo rechaza: 422 con el mensaje del gancho, y nada queda
+    escrito.
+
+    🔑 mutación (4): si `DepositoNoPermitido` se mapeara a 409 en el router,
+    este test da rojo."""
+    def _rechaza(conn, *, operacion, turno, deposito_id):
+        raise ventas.DepositoNoPermitido(f"depósito {deposito_id} no es de esta sucursal")
+
+    client = _app(abrir_ventas, OpcionesVentas(hooks=Hooks(validar_deposito=_rechaza)))
+    pid = client.post("/api/productos", json={"nombre": "Yerba", "precio_venta": 100.0, "precio_costo": 60.0}).json()["id"]
+    client.post(f"/api/stock/{pid}/ajuste", json={"modo": "absoluto", "cantidad": 10})
+
+    r = client.post("/api/ventas", json={
+        "fecha": HOY, "items": [{"nombre": "Yerba", "qty": 1, "precio": 100.0, "producto_id": pid}],
+        "pagos": [{"medio": "efectivo", "monto": 100.0}], "deposito_id": 1})
+    assert r.status_code == 422, r.text
+    assert "no es de esta sucursal" in r.json()["detail"]
+    assert client.get("/api/ventas").json() == []
+    assert client.get(f"/api/stock/{pid}").json()["stock_actual"] == 10.0
+
+    # El numerador no se consumió: sin el gancho, la próxima venta es V-00001.
+    client_libre = _app(abrir_ventas)
+    venta = _venta(client_libre, items=[{"nombre": "Yerba", "qty": 1, "precio": 100.0, "producto_id": pid}])
+    assert venta["numero"] == "V-00001"
+
+
+def test_validar_deposito_rechaza_devolucion_da_422_por_la_api(abrir_ventas):
+    """(b) Mismo rechazo, pero en `/devolver`: 422 con el mensaje, sin tocar
+    stock, caja ni el estado de la venta."""
+    client = _app(abrir_ventas)
+    pid = client.post("/api/productos", json={"nombre": "Yerba", "precio_venta": 100.0, "precio_costo": 60.0}).json()["id"]
+    client.post(f"/api/stock/{pid}/ajuste", json={"modo": "absoluto", "cantidad": 10})
+    venta = _venta(client, items=[{"nombre": "Yerba", "qty": 4, "precio": 100.0, "producto_id": pid}],
+                  pagos=[{"medio": "efectivo", "monto": 400.0}])
+    with abrir_ventas() as conn:
+        item_id_linea = conn.execute(
+            "SELECT id FROM sale_items WHERE sale_id=?", (venta["id"],)
+        ).fetchone()["id"]
+        deposito_id = conn.execute(
+            "SELECT location_id FROM stock_movements WHERE source_id=?", (venta["id"],)
+        ).fetchone()["location_id"]
+
+    def _rechaza(conn, *, operacion, turno, deposito_id):
+        raise ventas.DepositoNoPermitido("depósito no autorizado para la devolución")
+
+    client_rechaza = _app(abrir_ventas, OpcionesVentas(hooks=Hooks(validar_deposito=_rechaza)))
+    r = client_rechaza.post(f"/api/ventas/{venta['id']}/devolver", json={
+        "lineas": [{"sale_item_id": item_id_linea, "cantidad": 1}], "deposito_id": deposito_id})
+    assert r.status_code == 422, r.text
+    assert "no autorizado" in r.json()["detail"]
+    assert client.get(f"/api/stock/{pid}").json()["stock_actual"] == 6.0
+    assert client.get(f"/api/ventas/{venta['id']}").json()["estado"] == "cobrada"
