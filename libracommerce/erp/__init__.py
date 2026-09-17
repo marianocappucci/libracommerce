@@ -38,6 +38,7 @@ from .hooks import (
     Numerador,
     ResolverReceta,
     TurnoPara,
+    ValidarDeposito,
 )
 
 __all__ = [
@@ -50,4 +51,5 @@ __all__ = [
     "Numerador",
     "ResolverReceta",
     "TurnoPara",
+    "ValidarDeposito",
 ]
