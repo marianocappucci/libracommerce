@@ -12,6 +12,7 @@ factories, sus suites siguen corriendo sin tocar: ése es el gate real.
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 
 import pytest
@@ -971,3 +972,197 @@ def test_el_ajuste_y_la_transferencia_por_variante(abrir):
         "variant_id": variante["id"]})
     assert t.json()["origen"]["stock"] == 5 and t.json()["destino"]["stock"] == 4
     assert client.get("/api/depositos/transferencias").json()[0]["variant_id"] == variante["id"]
+
+
+# ── Variantes de un producto con unidades, códigos y reglas propias (v0.19.0) ────
+
+
+def _con_reglas(abrir, **catalogo):
+    return _app(abrir, catalogo=OpcionesCatalogo(**catalogo))
+
+
+def test_guardar_un_producto_no_pisa_el_nombre_ni_la_escala_de_su_unidad(abrir):
+    """`_upsert_unit` reescribe la fila entera: sin conservar lo que ya tenía, «Kilogramo» (escala 3) pasaba a `kg`
+    (escala 0) cada vez que se guardaba un producto."""
+    client = _app(abrir)
+    with abrir() as conn:
+        conn.execute("INSERT INTO units (code, name, allows_fraction, decimal_scale) VALUES ('KG', 'Kilogramo', 1, 3)")
+    p = _crear_producto(client, "Yerba", unidad="KG")
+    client.put(f"/api/productos/{p['id']}", json={"nombre": "Yerba 2", "unidad": "KG", "codigo": "", "precio_venta": 1,
+                                                   "precio_costo": 1})
+    with abrir() as conn:
+        fila = conn.execute("SELECT name, allows_fraction, decimal_scale FROM units WHERE code='KG'").fetchone()
+    assert (fila["name"], bool(fila["allows_fraction"]), fila["decimal_scale"]) == ("Kilogramo", True, 3)
+
+
+def test_editar_un_producto_conserva_lo_que_el_payload_no_maneja(abrir):
+    client = _app(abrir)
+    p = _crear_producto(client, "Yerba")
+    with abrir() as conn:
+        conn.execute(
+            "UPDATE catalog_items SET purchasable=0, tax_profile='exento', metadata_json=? WHERE id=?",
+            ('{"estacion": "barra", "otra": "cosa"}', p["id"]),
+        )
+    client.put(f"/api/productos/{p['id']}", json={"nombre": "Yerba 2", "unidad": "u", "codigo": "", "precio_venta": 1,
+                                                   "precio_costo": 1, "estacion": "cocina"})
+    with abrir() as conn:
+        fila = conn.execute("SELECT purchasable, tax_profile, metadata_json FROM catalog_items WHERE id=?",
+                            (p["id"],)).fetchone()
+    assert not fila["purchasable"] and fila["tax_profile"] == "exento"
+    assert json.loads(fila["metadata_json"]) == {"estacion": "cocina", "otra": "cosa"}
+
+
+def test_editar_no_le_cambia_el_tipo_al_codigo_principal(client):
+    p = _crear_producto(client, "Yerba", codigo="")
+    client.post(f"/api/productos/{p['id']}/codigos", json={"tipo": "barcode", "codigo": "7790001", "es_principal": True})
+    r = client.put(f"/api/productos/{p['id']}", json={"nombre": "Yerba 2", "unidad": "u", "codigo": "7790001",
+                                                       "precio_venta": 1, "precio_costo": 1})
+    assert r.status_code == 200 and r.json()["codigo"] == "7790001"
+    assert [(c["tipo"], c["es_principal"]) for c in client.get(f"/api/productos/{p['id']}/codigos").json()] == [
+        ("barcode", True)]
+    # Y cambiarlo sí lo reemplaza (por uno interno, como siempre).
+    client.put(f"/api/productos/{p['id']}", json={"nombre": "Yerba 2", "unidad": "u", "codigo": "Y-1",
+                                                   "precio_venta": 1, "precio_costo": 1})
+    assert [(c["tipo"], c["codigo"]) for c in client.get(f"/api/productos/{p['id']}/codigos").json()] == [
+        ("internal", "Y-1")]
+
+
+def test_los_codigos_de_un_producto(client):
+    p = _crear_producto(client, "Balanza", codigo="P-1")
+    assert client.post(f"/api/productos/{p['id']}/codigos", json={"tipo": "scale", "codigo": "0012"}).status_code == 200
+    r = client.post(f"/api/productos/{p['id']}/codigos", json={"tipo": "barcode", "codigo": "7791234"})
+    assert r.json()["tipo"] == "barcode" and r.json()["es_principal"] is False
+    codigos = client.get(f"/api/productos/{p['id']}/codigos").json()
+    assert [c["codigo"] for c in codigos] == ["P-1", "0012", "7791234"]  # el principal primero
+    assert client.post(f"/api/productos/{p['id']}/codigos", json={"tipo": "ean", "codigo": "1"}).status_code == 422
+    assert client.post(f"/api/productos/{p['id']}/codigos", json={"tipo": "sku", "codigo": " "}).status_code == 422
+    assert client.post(f"/api/productos/{p['id']}/codigos", json={"tipo": "scale", "codigo": "0012"}).status_code == 409
+    # Un segundo principal choca con el índice parcial: 409, no 500.
+    r = client.post(f"/api/productos/{p['id']}/codigos", json={"tipo": "barcode", "codigo": "X", "es_principal": True})
+    assert r.status_code == 409
+    assert client.get("/api/productos/999/codigos").status_code == 404
+    assert client.post("/api/productos/999/codigos", json={"codigo": "1"}).status_code == 404
+    # El código de balanza que se cargó es el que `escanear` resuelve.
+    assert client.get("/api/productos/escanear", params={"code": "7791234"}).json()["producto"]["id"] == p["id"]
+
+
+def test_el_producto_trae_su_categoria_id_y_las_inactivas_no_se_ofrecen(client, abrir):
+    client.post("/api/productos/categorias", json={"nombre": "Almacén"})
+    cats = client.get("/api/productos/categorias").json()
+    p = _crear_producto(client, "Yerba", categoria="Almacén")
+    assert p["categoria_id"] == next(c["id"] for c in cats if c["nombre"] == "Almacén")
+    with abrir() as conn:
+        conn.execute("UPDATE categories SET active = 0 WHERE name = 'Almacén'")
+    assert "Almacén" not in [c["nombre"] for c in client.get("/api/productos/categorias").json()]
+
+
+def test_unidades_de_la_base_y_categorias_autorizadas(abrir):
+    rol = {"actual": "admin"}
+
+    def solo_admin():
+        if rol["actual"] != "admin":
+            raise HTTPException(403, "Sólo el administrador.")
+
+    client = _con_reglas(abrir, unidades_de_la_base=True, autorizar_categorias=Depends(solo_admin))
+    with abrir() as conn:
+        conn.execute("INSERT INTO units (code, name, allows_fraction, decimal_scale) VALUES ('KG', 'Kilogramo', 1, 3)")
+    assert "KG" in client.get("/api/productos/unidades").json()
+    assert "caja" not in client.get("/api/productos/unidades").json()  # ya no es la tupla fija
+    assert client.post("/api/productos/categorias", json={"nombre": "Almacén"}).status_code == 200
+    rol["actual"] = "cajero"
+    assert client.get("/api/productos/categorias").status_code == 200
+    assert client.post("/api/productos/categorias", json={"nombre": "Otra"}).status_code == 403
+    assert client.delete("/api/productos/categorias/1").status_code == 403
+
+
+def test_los_ganchos_de_los_productos(abrir):
+    llamadas = []
+
+    def validar(payload, actual):
+        llamadas.append(("validar", payload.nombre, actual["nombre"] if actual else None))
+        if actual and payload.tipo != actual["tipo"]:
+            raise HTTPException(409, "El tipo no se cambia.")
+        if payload.precio_venta < 0:
+            raise HTTPException(422, "El precio no puede ser negativo.")
+
+    def eliminar(actual):
+        raise HTTPException(409, f"{actual['nombre']} tiene historial: desactivalo.")
+
+    client = _con_reglas(abrir, validar_producto=validar, validar_eliminacion=eliminar)
+    assert client.post("/api/productos", json={"nombre": "X", "precio_venta": -1}).status_code == 422
+    assert client.get("/api/productos").json() == []  # la regla frenó el alta: no escribió nada
+    p = _crear_producto(client, "Yerba")
+    assert ("validar", "Yerba", None) in llamadas
+    r = client.put(f"/api/productos/{p['id']}", json={"nombre": "Yerba", "tipo": "servicio", "precio_venta": 1})
+    assert r.status_code == 409
+    assert client.get("/api/productos").json()[0]["tipo"] == "producto"
+    assert client.delete(f"/api/productos/{p['id']}").status_code == 409
+    assert client.get("/api/productos").json()  # sigue ahí
+
+
+def test_la_busqueda_no_distingue_acentos_y_pide_todas_las_palabras(client):
+    _crear_producto(client, "Café molido", codigo="CAF-1", categoria="Almacén")
+    _crear_producto(client, "Cono Simple")
+    _crear_producto(client, "Yerba")
+
+    def buscar(q):
+        return sorted(p["nombre"] for p in client.get("/api/productos", params={"q": q}).json())
+
+    assert buscar("cafe") == ["Café molido"] and buscar("CAFÉ") == ["Café molido"]
+    assert buscar("simple cono") == ["Cono Simple"]  # todas las palabras, en cualquier orden
+    assert buscar("almacen") == ["Café molido"]  # por categoría, sin acento
+    assert buscar("caf-1") == ["Café molido"]  # por código
+    assert buscar("cono yerba") == []  # ambas palabras tienen que estar en el MISMO producto
+    assert len(client.get("/api/productos").json()) == 3
+
+
+def test_el_listado_puede_pedir_solo_lo_activo_y_lo_vendible(client):
+    p = _crear_producto(client, "Insumo", vendible=False)
+    _crear_producto(client, "Yerba")
+    baja = _crear_producto(client, "De baja")
+    client.put(f"/api/productos/{baja['id']}", json={"nombre": "De baja", "unidad": "u", "codigo": "", "precio_venta": 1,
+                                                     "precio_costo": 1, "activo": False})
+    todos = {x["nombre"] for x in client.get("/api/productos").json()}
+    assert todos == {"Insumo", "Yerba", "De baja"}
+    assert {x["nombre"] for x in client.get("/api/productos", params={"solo_activos": True}).json()} == {"Insumo", "Yerba"}
+    assert {x["nombre"] for x in client.get("/api/productos", params={"solo_vendibles": True}).json()} == {"Yerba", "De baja"}
+    assert p["vendible"] == 0
+
+
+def test_el_erp_usa_la_fabrica_de_repositorio_del_producto(client):
+    """Un producto que envuelve el repositorio (VentaLibra: lo audita) declara UNA vez su fábrica y todo lo que entra
+    por los routers del motor pasa por ella: antes quedaba sin auditar."""
+    from libracommerce.db import repository
+
+    escritas = []
+
+    class Espia:
+        def __init__(self, conn):
+            self._repo = repository.SqliteCommerceRepository(conn)
+
+        def __getattr__(self, nombre):
+            metodo = getattr(self._repo, nombre)
+            if not nombre.startswith("save_"):
+                return metodo
+
+            def escribe(*args, **kwargs):
+                escritas.append(nombre)
+                return metodo(*args, **kwargs)
+
+            return escribe
+
+    repository.usar_fabrica_de_repositorio(Espia)
+    try:
+        p = _crear_producto(client, "Yerba", codigo="Y-1")
+        client.post(f"/api/productos/{p['id']}/variantes", json={"sku": "V1", "nombre": "1 kg"})
+        client.post(f"/api/productos/{p['id']}/codigos", json={"tipo": "barcode", "codigo": "779"})
+        client.put(f"/api/productos/{p['id']}", json={"nombre": "Yerba 2", "unidad": "u", "codigo": "Y-1",
+                                                       "precio_venta": 1, "precio_costo": 1})
+        client.post("/api/depositos", json={"nombre": "Otro"})
+    finally:
+        repository.usar_fabrica_de_repositorio(None)
+    assert {"save_catalog_item", "save_item_code", "save_item_variant", "save_location"} <= set(escritas)
+    # Sin fábrica vuelve al repositorio de siempre.
+    escritas.clear()
+    _crear_producto(client, "Otro producto")
+    assert escritas == []

@@ -99,6 +99,17 @@ class OpcionesCatalogo:
     generar_codigo_si_falta: bool = False
     #: Las unidades que ofrece el alta; se exponen en `GET /unidades`.
     unidades: tuple[str, ...] = catalogo.UNIDADES
+    #: Un producto que administra sus propias unidades (VentaLibra: código, nombre, si admite fracciones): `GET
+    #: /unidades` lista los códigos de `units` en vez de la tupla de arriba.
+    unidades_de_la_base: bool = False
+    #: Quién puede crear y borrar categorías (una `Depends(...)`). Un producto con categorías jerárquicas que las
+    #: administra por su cuenta la usa para cerrar esa vía.
+    autorizar_categorias: Any = None
+    #: Reglas de un producto, antes de guardar: `(payload, actual)` con `actual` = el producto como está hoy (`None` al
+    #: crear). Decide con una `HTTPException` (VentaLibra: el tipo no se cambia, la unidad se bloquea con movimientos).
+    validar_producto: Callable[["ProductoPayload", dict | None], None] | None = None
+    #: Antes de borrar un producto (`actual`): un producto con historial no se borra, se desactiva.
+    validar_eliminacion: Callable[[dict], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -187,6 +198,13 @@ class TransferenciaPayload(BaseModel):
     variant_id: int | None = None
 
 
+class CodigoPayload(BaseModel):
+    #: `internal`, `barcode`, `sku`, `scale` u `other` (`catalogo.TIPOS_DE_CODIGO`).
+    tipo: str = "barcode"
+    codigo: str
+    es_principal: bool = False
+
+
 class VariantePayload(BaseModel):
     sku: str
     nombre: str
@@ -234,13 +252,18 @@ def build_productos_router(
     pone el producto al montarlo."""
     abrir, _ = _deps(usuario_actual, conexion)
     opciones = opciones or OpcionesCatalogo()
+    categorias_escriben = [opciones.autorizar_categorias] if opciones.autorizar_categorias is not None else []
 
     router = APIRouter(prefix=prefix, tags=["productos"])
 
     @router.get("")
-    def listar(q: str = "", incluir_variantes: bool = False):
+    def listar(q: str = "", incluir_variantes: bool = False, solo_activos: bool = False,
+               solo_vendibles: bool = False):
+        """`q` busca cada palabra (en cualquier orden) en el nombre, el código o la categoría, sin distinguir
+        mayúsculas ni acentos. `solo_activos`/`solo_vendibles` (default `False`: todos, como siempre) son lo que el
+        punto de venta ofrece."""
         with abrir() as conn:
-            productos = catalogo.get_all_productos(conn, q=q)
+            productos = catalogo.get_all_productos(conn, q=q, solo_activos=solo_activos, solo_vendibles=solo_vendibles)
             if incluir_variantes:
                 for p in productos:
                     p["variantes"] = catalogo.get_variantes_producto(conn, p["id"])
@@ -248,6 +271,9 @@ def build_productos_router(
 
     @router.get("/unidades")
     def unidades():
+        if opciones.unidades_de_la_base:
+            with abrir() as conn:
+                return [r[0] for r in conn.execute("SELECT code FROM units ORDER BY code").fetchall()]
         return list(opciones.unidades)
 
     @router.get("/escanear")
@@ -270,7 +296,7 @@ def build_productos_router(
         with abrir() as conn:
             return catalogo.get_categorias_producto(conn)
 
-    @router.post("/categorias")
+    @router.post("/categorias", dependencies=categorias_escriben)
     def crear_categoria(payload: CategoriaPayload):
         nombre = payload.nombre.strip()
         if not nombre:
@@ -279,7 +305,7 @@ def build_productos_router(
             catalogo.create_categoria_producto(conn, nombre)
             return catalogo.get_categorias_producto(conn)
 
-    @router.delete("/categorias/{cid}")
+    @router.delete("/categorias/{cid}", dependencies=categorias_escriben)
     def eliminar_categoria(cid: int):
         with abrir() as conn:
             catalogo.delete_categoria_producto(conn, cid)
@@ -292,6 +318,8 @@ def build_productos_router(
             raise HTTPException(422, "El nombre es obligatorio.")
         codigo = payload.codigo.strip()
         categoria = payload.categoria.strip()
+        if opciones.validar_producto:
+            opciones.validar_producto(payload, None)
         with abrir() as conn:
             if not codigo and opciones.generar_codigo_si_falta:
                 codigo = catalogo.generar_codigo_producto(conn, categoria)
@@ -316,8 +344,11 @@ def build_productos_router(
         if not nombre:
             raise HTTPException(422, "El nombre es obligatorio.")
         with abrir() as conn:
-            if not catalogo.get_producto(conn, pid):
+            actual = catalogo.get_producto(conn, pid)
+            if not actual:
                 raise HTTPException(404, "Producto no encontrado")
+            if opciones.validar_producto:
+                opciones.validar_producto(payload, actual)
             try:
                 catalogo.update_producto(
                     conn, pid=pid, nombre=nombre, codigo=payload.codigo.strip(),
@@ -336,10 +367,38 @@ def build_productos_router(
     @router.delete("/{pid}")
     def eliminar(pid: int):
         with abrir() as conn:
-            if not catalogo.get_producto(conn, pid):
+            actual = catalogo.get_producto(conn, pid)
+            if not actual:
                 raise HTTPException(404, "Producto no encontrado")
+            if opciones.validar_eliminacion:
+                opciones.validar_eliminacion(actual)
             catalogo.delete_producto(conn, pid)
         return {"ok": True}
+
+    # ── Códigos (varios por producto: barras, SKU, balanza…) ─────────────
+
+    @router.get("/{pid}/codigos")
+    def listar_codigos(pid: int):
+        with abrir() as conn:
+            if not catalogo.get_producto(conn, pid):
+                raise HTTPException(404, "Producto no encontrado")
+            return catalogo.get_codigos(conn, pid)
+
+    @router.post("/{pid}/codigos")
+    def crear_codigo(pid: int, payload: CodigoPayload):
+        codigo = payload.codigo.strip()
+        if not codigo:
+            raise HTTPException(422, "El código es obligatorio.")
+        with abrir() as conn:
+            if not catalogo.get_producto(conn, pid):
+                raise HTTPException(404, "Producto no encontrado")
+            try:
+                return catalogo.add_codigo(conn, pid, payload.tipo, codigo, payload.es_principal)
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
+            except sqlite3.IntegrityError as e:
+                # UNIQUE(tipo, código) o un segundo principal: datos del pedido, no un error del servidor.
+                raise HTTPException(409, "Ese código ya existe, o el producto ya tiene un código principal.") from e
 
     # ── Variantes (talle/color, presentaciones) ──────────────────────────
 
