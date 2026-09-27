@@ -16,7 +16,7 @@ from decimal import Decimal
 
 import pytest
 from conftest import USUARIO, _usuario  # noqa: F401  (y la fixture `abrir`, que pytest carga sola)
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from libracommerce.domain.scale import ScaleFormat, ScaleValueKind
@@ -26,6 +26,7 @@ from libracommerce.erp import stock as erp_stock
 from libracommerce.web.catalogo_router import (
     MOTIVOS_MERMA_GASTRONOMICOS,
     OpcionesCatalogo,
+    OpcionesDepositos,
     OpcionesStock,
     build_depositos_router,
     build_productos_router,
@@ -33,10 +34,10 @@ from libracommerce.web.catalogo_router import (
 )
 
 
-def _app(abrir, *, catalogo=None, stock=None) -> TestClient:
+def _app(abrir, *, catalogo=None, stock=None, depositos=None) -> TestClient:
     app = FastAPI()
     app.include_router(build_productos_router(conexion=abrir, usuario_actual=_usuario, opciones=catalogo))
-    app.include_router(build_depositos_router(conexion=abrir, usuario_actual=_usuario))
+    app.include_router(build_depositos_router(conexion=abrir, usuario_actual=_usuario, opciones=depositos))
     app.include_router(build_stock_router(conexion=abrir, usuario_actual=_usuario, opciones=stock))
     return TestClient(app)
 
@@ -798,3 +799,175 @@ def test_crear_sin_permite_fraccion_conserva_lo_que_ya_tenia_la_unidad(client, a
     segundo = _crear_producto(client, "Segundo en kg", unidad="kg")  # sin el campo
     assert _puede_pesar(client, abrir, segundo["id"], "113")
 
+
+
+# ── Variantes de un producto con sucursales y depósitos (v0.18.0) ───────────
+
+
+def _con_sedes(abrir, **depositos):
+    """Como lo monta VentaLibra: stock por depósito y las reglas de sus depósitos como ganchos."""
+    return _app(abrir, stock=OpcionesStock(por_deposito=True), depositos=OpcionesDepositos(**depositos))
+
+
+def test_sin_opciones_el_deposito_no_cambia_y_trae_su_tipo(client):
+    d = client.post("/api/depositos", json={"nombre": "Central", "tipo": "store"}).json()
+    assert d["tipo"] == "store"
+    otro = client.post("/api/depositos", json={"nombre": "Otro"}).json()
+    assert otro["tipo"] == "warehouse"  # el default del dominio, como siempre
+    # Editar no cambia el tipo: el payload de edición ni lo trae.
+    editado = client.put(f"/api/depositos/{d['id']}", json={"nombre": "Central 2", "activo": True}).json()
+    assert editado["tipo"] == "store" and editado["nombre"] == "Central 2"
+
+
+def test_los_ganchos_de_los_depositos(abrir):
+    llamadas = []
+
+    def validar_alta(payload):
+        llamadas.append(("alta", payload.tipo))
+        if payload.tipo not in ("store", "warehouse"):
+            raise HTTPException(422, "El tipo tiene que ser store o warehouse.")
+
+    def validar_edicion(payload, actual):
+        llamadas.append(("edicion", actual["nombre"], payload.activo))
+        if not payload.activo and actual["tipo"] == "store":
+            raise HTTPException(409, "La instancia necesita una sucursal activa.")
+
+    def validar_eliminacion(actual):
+        llamadas.append(("baja", actual["nombre"]))
+        if actual["tipo"] == "store":
+            raise HTTPException(409, "Una sucursal no se elimina.")
+
+    client = _con_sedes(
+        abrir, validar_alta=validar_alta, validar_edicion=validar_edicion,
+        validar_eliminacion=validar_eliminacion, al_guardar=lambda d: llamadas.append(("guardado", d["nombre"])),
+    )
+    assert client.post("/api/depositos", json={"nombre": "X", "tipo": "cualquiera"}).status_code == 422
+    tienda = client.post("/api/depositos", json={"nombre": "Salón", "tipo": "store"}).json()
+    bodega = client.post("/api/depositos", json={"nombre": "Bodega", "tipo": "warehouse"}).json()
+    assert ("guardado", "Salón") in llamadas and ("guardado", "Bodega") in llamadas
+    # La regla del producto frena el cambio y NO toca el depósito.
+    assert client.put(f"/api/depositos/{tienda['id']}", json={"nombre": "Salón", "activo": False}).status_code == 409
+    assert next(d for d in client.get("/api/depositos").json() if d["id"] == tienda["id"])["activo"]
+    assert client.delete(f"/api/depositos/{tienda['id']}").status_code == 409
+    assert client.delete(f"/api/depositos/{bodega['id']}").json() == {"ok": True}
+    assert ("baja", "Bodega") in llamadas
+
+
+def test_autorizar_escritura_protege_las_escrituras_y_no_la_lectura_ni_la_transferencia(abrir):
+    rol = {"actual": "admin"}
+
+    def solo_admin():
+        if rol["actual"] != "admin":
+            raise HTTPException(403, "Sólo el administrador.")
+
+    client = _con_sedes(abrir, autorizar_escritura=Depends(solo_admin))
+    d = client.post("/api/depositos", json={"nombre": "Central"}).json()
+    otro = client.post("/api/depositos", json={"nombre": "Otro"}).json()
+    rol["actual"] = "cajero"
+    assert client.get("/api/depositos").status_code == 200
+    assert client.post("/api/depositos", json={"nombre": "B"}).status_code == 403
+    assert client.put(f"/api/depositos/{d['id']}", json={"nombre": "C"}).status_code == 403
+    assert client.post(f"/api/depositos/{d['id']}/set-default").status_code == 403
+    assert client.delete(f"/api/depositos/{otro['id']}").status_code == 403
+    # Mover mercadería es trabajo de todos los días: sigue abierto (falla por stock, no por permiso).
+    p = _crear_producto(client)
+    r = client.post("/api/depositos/transferir", json={
+        "producto_id": p["id"], "origen_id": d["id"], "destino_id": otro["id"], "cantidad": 1})
+    assert r.status_code == 422 and "insuficiente" in r.json()["detail"].lower()
+
+
+def _producto_con_stock_en(client, cantidad=10):
+    p = _crear_producto(client)
+    central = client.post("/api/depositos", json={"nombre": "Central"}).json()
+    client.post(f"/api/depositos/{central['id']}/set-default")
+    otro = client.post("/api/depositos", json={"nombre": "Sucursal"}).json()
+    client.post(f"/api/stock/{p['id']}/ajuste", json={"modo": "entrada", "cantidad": cantidad})
+    return p, central, otro
+
+
+def test_la_transferencia_dice_como_quedo_cada_lado_y_queda_en_el_historial(client):
+    p, central, otro = _producto_con_stock_en(client)
+    r = client.post("/api/depositos/transferir", json={
+        "producto_id": p["id"], "origen_id": central["id"], "destino_id": otro["id"], "cantidad": 4,
+        "observaciones": "reposición"})
+    assert r.status_code == 200
+    cuerpo = r.json()
+    assert cuerpo["ok"] is True and cuerpo["cantidad"] == 4
+    assert cuerpo["origen"] == {"id": central["id"], "nombre": "Central", "stock": 6}
+    assert cuerpo["destino"] == {"id": otro["id"], "nombre": "Sucursal", "stock": 4}
+
+    historial = client.get("/api/depositos/transferencias").json()
+    assert len(historial) == 1
+    t = historial[0]
+    assert (t["producto_id"], t["cantidad"], t["origen"], t["destino"], t["observaciones"]) == (
+        p["id"], 4, "Central", "Sucursal", "reposición")
+    # Por depósito: trae lo que salió y lo que entró; un tercero no ve nada.
+    assert len(client.get(f"/api/depositos/transferencias?deposito_id={central['id']}").json()) == 1
+    assert len(client.get(f"/api/depositos/transferencias?deposito_id={otro['id']}").json()) == 1
+    tercero = client.post("/api/depositos", json={"nombre": "Tercero"}).json()
+    assert client.get(f"/api/depositos/transferencias?deposito_id={tercero['id']}").json() == []
+
+
+def test_un_ajuste_manual_no_aparece_como_transferencia(client):
+    p, central, _otro = _producto_con_stock_en(client)
+    client.post(f"/api/stock/{p['id']}/ajuste", json={"modo": "salida", "cantidad": 1})
+    assert client.get("/api/depositos/transferencias").json() == []
+
+
+def test_sin_por_deposito_el_stock_y_el_ajuste_son_los_de_siempre(client):
+    p, central, otro = _producto_con_stock_en(client)
+    listado = client.get("/api/stock").json()
+    assert "depositos" not in listado and "por_deposito" not in listado["productos"][0]
+    # El `deposito_id` del payload se ignora: el ajuste va al default, como siempre.
+    r = client.post(f"/api/stock/{p['id']}/ajuste", json={"modo": "entrada", "cantidad": 2, "deposito_id": otro["id"]})
+    assert r.status_code == 200 and "stock_deposito" not in r.json()
+    por = {d["id"]: d["stock_actual"] for d in client.get(f"/api/depositos/stock-producto/{p['id']}").json()}
+    assert por[central["id"]] == 12 and por[otro["id"]] == 0
+
+
+def test_con_por_deposito_el_listado_trae_las_columnas_y_el_ajuste_va_al_deposito(abrir):
+    client = _con_sedes(abrir)
+    p, central, otro = _producto_con_stock_en(client)  # 10 en Central
+    inactivo = client.post("/api/depositos", json={"nombre": "Viejo"}).json()
+    client.put(f"/api/depositos/{inactivo['id']}", json={"nombre": "Viejo", "activo": False})
+
+    listado = client.get("/api/stock").json()
+    nombres = [d["nombre"] for d in listado["depositos"]]
+    assert "Central" in nombres and "Sucursal" in nombres and "Viejo" not in nombres  # los inactivos no son columna
+    assert listado["depositos"][0]["es_default"] and "tipo" in listado["depositos"][0]
+    assert listado["productos"][0]["por_deposito"] == {str(central["id"]): 10}
+
+    # Entrada en la sucursal: no toca a Central, y la respuesta dice cómo quedó ese depósito.
+    r = client.post(f"/api/stock/{p['id']}/ajuste", json={"modo": "entrada", "cantidad": 3, "deposito_id": otro["id"]})
+    assert r.json()["stock_actual"] == 13 and r.json()["stock_deposito"] == 3
+    # «Fijar en» se compara con el stock de ESE depósito, no con el total.
+    r = client.post(f"/api/stock/{p['id']}/ajuste", json={"modo": "absoluto", "cantidad": 5, "deposito_id": otro["id"]})
+    assert r.json()["stock_deposito"] == 5 and r.json()["stock_actual"] == 15
+    r = client.post(f"/api/stock/{p['id']}/ajuste", json={"modo": "salida", "cantidad": 2, "deposito_id": central["id"]})
+    assert r.json()["stock_deposito"] == 8
+    por = client.get("/api/stock").json()["productos"][0]["por_deposito"]
+    assert por == {str(central["id"]): 8, str(otro["id"]): 5}
+    # Un depósito que no existe o está inactivo es un 422 con nombre, no un 500 por la FK.
+    for malo in (9999, inactivo["id"]):
+        r = client.post(f"/api/stock/{p['id']}/ajuste", json={"modo": "entrada", "cantidad": 1, "deposito_id": malo})
+        assert r.status_code == 422 and "depósito" in r.json()["detail"]
+
+
+def test_el_ajuste_y_la_transferencia_por_variante(abrir):
+    client = _con_sedes(abrir)
+    p, central, otro = _producto_con_stock_en(client, cantidad=0)
+    variante = client.post(f"/api/productos/{p['id']}/variantes", json={"sku": "M", "nombre": "Talle M"}).json()
+    client.post(f"/api/stock/{p['id']}/ajuste", json={
+        "modo": "entrada", "cantidad": 7, "deposito_id": central["id"], "variant_id": variante["id"]})
+    # «Fijar en» compara con esa variante: 7 -> 9 es un ajuste de +2, y el resto del producto no se toca.
+    r = client.post(f"/api/stock/{p['id']}/ajuste", json={
+        "modo": "absoluto", "cantidad": 9, "deposito_id": central["id"], "variant_id": variante["id"]})
+    assert r.json()["stock_deposito"] == 9
+    lectura = client.get(f"/api/stock/{p['id']}", params={"deposito_id": central["id"], "variant_id": variante["id"]})
+    assert lectura.json()["stock_deposito"] == 9
+    assert "stock_deposito" not in client.get(f"/api/stock/{p['id']}").json()
+    t = client.post("/api/depositos/transferir", json={
+        "producto_id": p["id"], "origen_id": central["id"], "destino_id": otro["id"], "cantidad": 4,
+        "variant_id": variante["id"]})
+    assert t.json()["origen"]["stock"] == 5 and t.json()["destino"]["stock"] == 4
+    assert client.get("/api/depositos/transferencias").json()[0]["variant_id"] == variante["id"]

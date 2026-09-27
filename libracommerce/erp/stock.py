@@ -118,12 +118,32 @@ def add_movimiento_stock(conn, producto_id: int, tipo: str, cantidad: float,
     )
 
 
-def get_stock_actual(conn, producto_id: int) -> float:
-    row = conn.execute(
-        "SELECT COALESCE(SUM(quantity_delta),0) FROM stock_movements WHERE item_id=?",
-        (producto_id,),
-    ).fetchone()
-    return float(row[0])
+def get_stock_actual(conn, producto_id: int, deposito_id: int | None = None,
+                     variant_id: int | None = None) -> float:
+    """El stock de un producto. Sin `deposito_id` ni `variant_id`, el total de todos los depósitos (lo de siempre);
+    con ellos, el de ese depósito y/o esa variante."""
+    sql = "SELECT COALESCE(SUM(quantity_delta),0) FROM stock_movements WHERE item_id=?"
+    params: list[Any] = [producto_id]
+    if deposito_id is not None:
+        sql += " AND location_id=?"
+        params.append(deposito_id)
+    if variant_id is not None:
+        sql += " AND variant_id=?"
+        params.append(variant_id)
+    return float(conn.execute(sql, tuple(params)).fetchone()[0])
+
+
+def get_stock_por_deposito(conn) -> dict[int, dict[int, float]]:
+    """`{producto_id: {deposito_id: stock}}` con los depósitos que tienen movimientos. Lo usa `GET /api/stock` de
+    un producto con sucursales (`OpcionesStock.por_deposito`)."""
+    rows = conn.execute(
+        "SELECT item_id, location_id, COALESCE(SUM(quantity_delta),0) FROM stock_movements "
+        "GROUP BY item_id, location_id"
+    ).fetchall()
+    salida: dict[int, dict[int, float]] = {}
+    for item_id, location_id, cantidad in rows:
+        salida.setdefault(item_id, {})[location_id] = float(cantidad)
+    return salida
 
 
 def get_stock_todos(conn) -> list[dict]:
@@ -205,9 +225,11 @@ def get_movimientos_stock(conn, producto_id: int | None = None,
 
 
 def ajustar_stock(conn, producto_id: int, stock_nuevo: float, referencia: str,
-                  usuario_id: int | None = None, fecha: str = ""):
-    """Un movimiento de ajuste que lleva el stock al valor indicado."""
-    actual = get_stock_actual(conn, producto_id)
+                  usuario_id: int | None = None, fecha: str = "",
+                  deposito_id: int | None = None, variant_id: int | None = None):
+    """Un movimiento de ajuste que lleva el stock al valor indicado. Con `deposito_id`/`variant_id` el valor es el
+    de ese depósito y esa variante (y el movimiento va ahí); sin ellos, el total y el depósito por defecto."""
+    actual = get_stock_actual(conn, producto_id, deposito_id, variant_id)
     delta = round(stock_nuevo - actual, 4)
     if delta == 0:
         return
@@ -215,6 +237,7 @@ def ajustar_stock(conn, producto_id: int, stock_nuevo: float, referencia: str,
         conn, producto_id=producto_id, tipo="ajuste",
         cantidad=delta, referencia=referencia,
         usuario_id=usuario_id, fecha=fecha,
+        deposito_id=deposito_id, variant_id=variant_id,
     )
 
 

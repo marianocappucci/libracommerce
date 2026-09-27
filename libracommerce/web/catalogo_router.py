@@ -108,6 +108,30 @@ class OpcionesStock:
     #: Tope por defecto del historial de movimientos.
     limite_movimientos: int = 200
     etiquetas_de_tipo: dict[str, str] = field(default_factory=lambda: dict(stock.TIPO_LABELS))
+    #: Un producto con varias sucursales/depósitos: `GET /api/stock` trae además `depositos` y el stock de cada
+    #: producto en cada uno (`por_deposito`), y el ajuste puede ir a un depósito (`deposito_id`). Sin esto la
+    #: respuesta es la de siempre (Contalibra, Restolibra).
+    por_deposito: bool = False
+
+
+@dataclass(frozen=True)
+class OpcionesDepositos:
+    """Lo que un producto le agrega a los depósitos. Sin nada, el router hace lo que hacían Contalibra y
+    Restolibra. Cada gancho decide con una `HTTPException`: el motor no sabe qué código le toca a la regla de cada
+    producto.
+
+    - `autorizar_escritura`: quién crea, edita, predetermina y borra (una `Depends(...)`, como
+      `OpcionesCajas.autorizar_escritura` de LibraCore). La transferencia y la lectura quedan con la protección con la
+      que el producto monte el router.
+    - `validar_alta(payload)` / `validar_edicion(payload, actual)` / `validar_eliminacion(actual)`: antes de escribir.
+    - `al_guardar(deposito)`: después de crear o editar (VentaLibra: una sucursal que vende necesita su caja).
+    """
+
+    autorizar_escritura: Any = None
+    validar_alta: Callable[["DepositoCreatePayload"], None] | None = None
+    validar_edicion: Callable[["DepositoUpdatePayload", dict], None] | None = None
+    validar_eliminacion: Callable[[dict], None] | None = None
+    al_guardar: Callable[[dict], None] | None = None
 
 
 # ── Payloads (a nivel de módulo: FastAPI los resuelve por anotación) ─────
@@ -143,6 +167,8 @@ class CategoriaPayload(BaseModel):
 class DepositoCreatePayload(BaseModel):
     nombre: str
     descripcion: str = ""
+    #: `locations.location_type`, sólo al crear (el tipo no se cambia después). `None` = el default del dominio.
+    tipo: str | None = None
 
 
 class DepositoUpdatePayload(BaseModel):
@@ -158,6 +184,7 @@ class TransferenciaPayload(BaseModel):
     cantidad: float
     fecha: str = ""
     observaciones: str = ""
+    variant_id: int | None = None
 
 
 class VariantePayload(BaseModel):
@@ -183,6 +210,9 @@ class AjustePayload(BaseModel):
     factor: float = 1
     # Sólo con modo="merma".
     motivo: str = "Otro"
+    # Con `OpcionesStock.por_deposito`: en qué depósito (y de qué variante) va el ajuste. `None` = el de siempre.
+    deposito_id: int | None = None
+    variant_id: int | None = None
 
 
 def _deps(usuario_actual, conexion):
@@ -363,10 +393,14 @@ def build_depositos_router(
     conexion: Conexion | None = None,
     usuario_actual: Callable[..., Any] | None = None,
     prefix: str = "/api/depositos",
+    opciones: OpcionesDepositos | None = None,
 ):
-    """Depósitos, stock por depósito y transferencias. Idéntico en los dos
-    productos (6 líneas de diferencia, todas docstrings)."""
+    """Depósitos, stock por depósito y transferencias. Idéntico en los dos productos (6 líneas de diferencia,
+    todas docstrings); las variantes de un producto con sucursales entran por `opciones`."""
     abrir, usuario = _deps(usuario_actual, conexion)
+    opt = opciones or OpcionesDepositos()
+    # Ya viene envuelta en `Depends(...)`: se pasa tal cual.
+    escribe = [opt.autorizar_escritura] if opt.autorizar_escritura is not None else []
 
     router = APIRouter(prefix=prefix, tags=["depositos"])
 
@@ -378,30 +412,41 @@ def build_depositos_router(
                 d["total_productos"] = len(catalogo.get_stock_por_deposito(conn, d["id"]))
             return depositos
 
-    @router.post("")
+    @router.post("", dependencies=escribe)
     def crear(payload: DepositoCreatePayload):
         nombre = payload.nombre.strip()
         if not nombre:
             raise HTTPException(422, "El nombre es obligatorio.")
+        if opt.validar_alta:
+            opt.validar_alta(payload)
         with abrir() as conn:
-            did = catalogo.create_deposito(conn, nombre, payload.descripcion.strip())
-            return catalogo.get_deposito(conn, did)
+            did = catalogo.create_deposito(conn, nombre, payload.descripcion.strip(), payload.tipo)
+            creado = catalogo.get_deposito(conn, did)
+            if opt.al_guardar:
+                opt.al_guardar(creado)
+            return creado
 
-    @router.put("/{did}")
+    @router.put("/{did}", dependencies=escribe)
     def actualizar(did: int, payload: DepositoUpdatePayload):
         nombre = payload.nombre.strip()
         with abrir() as conn:
-            if not catalogo.get_deposito(conn, did):
+            actual = catalogo.get_deposito(conn, did)
+            if not actual:
                 raise HTTPException(404, "Depósito no encontrado")
             if not nombre:
                 raise HTTPException(422, "El nombre es obligatorio.")
+            if opt.validar_edicion:
+                opt.validar_edicion(payload, actual)
             try:
                 catalogo.update_deposito(conn, did, nombre, payload.descripcion.strip(), 1 if payload.activo else 0)
             except ValueError as e:
                 raise HTTPException(422, str(e)) from e
-            return catalogo.get_deposito(conn, did)
+            guardado = catalogo.get_deposito(conn, did)
+            if opt.al_guardar:
+                opt.al_guardar(guardado)
+            return guardado
 
-    @router.post("/{did}/set-default")
+    @router.post("/{did}/set-default", dependencies=escribe)
     def set_default(did: int):
         with abrir() as conn:
             if not catalogo.get_deposito(conn, did):
@@ -412,16 +457,25 @@ def build_depositos_router(
                 raise HTTPException(422, str(e)) from e
             return catalogo.get_deposito(conn, did)
 
-    @router.delete("/{did}")
+    @router.delete("/{did}", dependencies=escribe)
     def eliminar(did: int):
         with abrir() as conn:
-            if not catalogo.get_deposito(conn, did):
+            actual = catalogo.get_deposito(conn, did)
+            if not actual:
                 raise HTTPException(404, "Depósito no encontrado")
+            if opt.validar_eliminacion:
+                opt.validar_eliminacion(actual)
             try:
                 catalogo.delete_deposito(conn, did)
             except ValueError as e:
                 raise HTTPException(422, str(e)) from e
         return {"ok": True}
+
+    @router.get("/transferencias")
+    def transferencias(deposito_id: int | None = None, limite: int = 200):
+        """El historial de transferencias (las que tocan `deposito_id`, de los dos lados, o todas)."""
+        with abrir() as conn:
+            return catalogo.get_transferencias(conn, deposito_id, limite)
 
     @router.get("/{did}/stock")
     def stock_del_deposito(did: int):
@@ -447,7 +501,7 @@ def build_depositos_router(
                     conn, producto_id=payload.producto_id, origen_id=payload.origen_id,
                     destino_id=payload.destino_id, cantidad=payload.cantidad,
                     usuario_id=user.get("id"), fecha=payload.fecha,
-                    observaciones=payload.observaciones.strip(),
+                    observaciones=payload.observaciones.strip(), variant_id=payload.variant_id,
                 )
             except catalogo.DepositoInexistente as e:
                 # Explícito y no sólo cubierto por el `except ValueError` de
@@ -456,9 +510,24 @@ def build_depositos_router(
                 raise HTTPException(422, str(e)) from e
             except ValueError as e:
                 raise HTTPException(422, str(e)) from e
-        return {"ok": True}
+            # Cómo quedó cada lado: la pantalla lo pinta sin volver a preguntar (campos de más: quien no
+            # los lee no cambia).
+            return {
+                "ok": True,
+                "cantidad": payload.cantidad,
+                "origen": _lado(conn, payload.origen_id, payload.producto_id, payload.variant_id),
+                "destino": _lado(conn, payload.destino_id, payload.producto_id, payload.variant_id),
+            }
 
     return router
+
+
+def _lado(conn, deposito_id: int, producto_id: int, variant_id: int | None) -> dict:
+    deposito = catalogo.get_deposito(conn, deposito_id)
+    return {
+        "id": deposito_id, "nombre": deposito["nombre"] if deposito else f"#{deposito_id}",
+        "stock": stock.get_stock_actual(conn, producto_id, deposito_id, variant_id),
+    }
 
 
 # ── Stock ────────────────────────────────────────────────────────────────
@@ -483,7 +552,19 @@ def build_stock_router(
     def listar():
         with abrir() as conn:
             productos = stock.get_stock_todos(conn)
-        return {"productos": productos, "alertas": stock.alertas_de_stock(productos)}
+            depositos = catalogo.get_all_depositos(conn) if opciones.por_deposito else []
+            por_deposito = stock.get_stock_por_deposito(conn) if opciones.por_deposito else {}
+        respuesta = {"productos": productos, "alertas": stock.alertas_de_stock(productos)}
+        if opciones.por_deposito:
+            # Los inactivos no son columna, pero su stock sigue en el total (la mercadería existe aunque el
+            # depósito ya no se use).
+            respuesta["depositos"] = [
+                {"id": d["id"], "nombre": d["nombre"], "tipo": d["tipo"], "es_default": d["es_default"]}
+                for d in depositos if d["activo"]
+            ]
+            for p in productos:
+                p["por_deposito"] = {str(k): v for k, v in por_deposito.get(p["id"], {}).items()}
+        return respuesta
 
     @router.get("/movimientos")
     def movimientos(producto_id: int = 0, desde: str = "", hasta: str = "", limit: int | None = None):
@@ -502,26 +583,40 @@ def build_stock_router(
         return opciones.etiquetas_de_tipo
 
     @router.get("/{pid}")
-    def detalle(pid: int):
+    def detalle(pid: int, deposito_id: int | None = None, variant_id: int | None = None):
+        """`stock_actual` es el total; con `OpcionesStock.por_deposito`, `deposito_id` y/o `variant_id` piden el de ese
+        depósito y esa variante, que vuelve en `stock_deposito`."""
         with abrir() as conn:
             producto = catalogo.get_producto(conn, pid)
             if not producto:
                 raise HTTPException(404, "Producto no encontrado")
-            return {"producto": producto, "stock_actual": stock.get_stock_actual(conn, pid)}
+            respuesta = {"producto": producto, "stock_actual": stock.get_stock_actual(conn, pid)}
+            if opciones.por_deposito and (deposito_id is not None or variant_id is not None):
+                respuesta["stock_deposito"] = stock.get_stock_actual(conn, pid, deposito_id, variant_id)
+            return respuesta
 
     @router.post("/{pid}/ajuste")
     def ajuste(pid: int, payload: AjustePayload, user: dict = Depends(usuario)):
         fecha = payload.fecha or date.today().isoformat()
         referencia = payload.referencia.strip() or "Ajuste manual"
         usuario_id = user.get("id")
+        # Sin `por_deposito` el ajuste es el de siempre, aunque el payload traiga el campo.
+        deposito_id = payload.deposito_id if opciones.por_deposito else None
+        variant_id = payload.variant_id if opciones.por_deposito else None
         with abrir() as conn:
             producto = catalogo.get_producto(conn, pid)
             if not producto:
                 raise HTTPException(404, "Producto no encontrado")
+            try:
+                catalogo.validar_deposito(conn, deposito_id)
+            except catalogo.DepositoInexistente as e:
+                raise HTTPException(422, str(e)) from e
+            destino = {"deposito_id": deposito_id, "variant_id": variant_id}
             if payload.modo == "absoluto":
                 if payload.cantidad < 0:
                     raise HTTPException(422, "El stock no puede fijarse en un valor negativo.")
-                stock.ajustar_stock(conn, pid, payload.cantidad, referencia, usuario_id=usuario_id, fecha=fecha)
+                stock.ajustar_stock(conn, pid, payload.cantidad, referencia, usuario_id=usuario_id, fecha=fecha,
+                                    **destino)
             elif payload.modo == "entrada":
                 factor = payload.factor or 1
                 if factor <= 0:
@@ -531,18 +626,24 @@ def build_stock_router(
                 ref = referencia
                 if unidad_compra and factor != 1:
                     ref = f"{referencia} ({payload.cantidad:g} {unidad_compra} × {factor:g})"
-                stock.add_movimiento_stock(conn, pid, "entrada", cantidad_base, ref, usuario_id=usuario_id, fecha=fecha)
+                stock.add_movimiento_stock(conn, pid, "entrada", cantidad_base, ref, usuario_id=usuario_id,
+                                           fecha=fecha, **destino)
             elif payload.modo == "salida":
                 stock.add_movimiento_stock(
                     conn, pid, "salida", -abs(payload.cantidad), referencia, usuario_id=usuario_id, fecha=fecha,
+                    **destino,
                 )
             elif payload.modo == "merma" and con_merma:
                 motivo = (payload.motivo or "Otro").strip() or "Otro"
                 stock.add_movimiento_stock(
-                    conn, pid, "merma", -abs(payload.cantidad), f"Merma: {motivo}", usuario_id=usuario_id, fecha=fecha,
+                    conn, pid, "merma", -abs(payload.cantidad), f"Merma: {motivo}", usuario_id=usuario_id,
+                    fecha=fecha, **destino,
                 )
             else:
                 raise HTTPException(422, "Modo inválido.")
-            return {"producto": producto, "stock_actual": stock.get_stock_actual(conn, pid)}
+            respuesta = {"producto": producto, "stock_actual": stock.get_stock_actual(conn, pid)}
+            if deposito_id is not None:
+                respuesta["stock_deposito"] = stock.get_stock_actual(conn, pid, deposito_id, variant_id)
+            return respuesta
 
     return router
