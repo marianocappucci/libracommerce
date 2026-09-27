@@ -84,12 +84,15 @@ def _deposito_dict(row) -> dict:
         "id": row["id"], "nombre": row["name"], "descripcion": row["description"],
         "activo": row["active"], "es_default": row["is_default"],
         "created_at": row["created_at"],
+        # `locations.location_type`: el motor no lo interpreta; lo usa un producto
+        # con sucursales y depósitos (VentaLibra: `store`/`warehouse`).
+        "tipo": row["location_type"],
     }
 
 
 def get_all_depositos(conn) -> list[dict]:
     rows = conn.execute(
-        "SELECT id, name, description, active, is_default, created_at FROM locations "
+        "SELECT id, name, description, active, is_default, created_at, location_type FROM locations "
         "ORDER BY is_default DESC, name"
     ).fetchall()
     return [_deposito_dict(r) for r in rows]
@@ -97,7 +100,8 @@ def get_all_depositos(conn) -> list[dict]:
 
 def get_deposito(conn, did: int) -> dict | None:
     row = conn.execute(
-        "SELECT id, name, description, active, is_default, created_at FROM locations WHERE id=?", (did,)
+        "SELECT id, name, description, active, is_default, created_at, location_type FROM locations WHERE id=?",
+        (did,),
     ).fetchone()
     return _deposito_dict(row) if row else None
 
@@ -126,8 +130,13 @@ def get_default_deposito_id(conn) -> int | None:
     return row[0] if row else None
 
 
-def create_deposito(conn, nombre: str, descripcion: str = "") -> int:
-    saved = SqliteCommerceRepository(conn).save_location(Location(None, nombre, description=descripcion))
+def create_deposito(conn, nombre: str, descripcion: str = "", tipo: str | None = None) -> int:
+    """`tipo` es el `location_type` (sin él, el default del dominio, como siempre). El motor no valida el
+    vocabulario: es del producto (`OpcionesDepositos.validar_alta`)."""
+    location = Location(None, nombre, description=descripcion)
+    if tipo:
+        location = replace(location, location_type=tipo)
+    saved = SqliteCommerceRepository(conn).save_location(location)
     return saved.id
 
 
@@ -230,7 +239,7 @@ def get_stock_producto_todos_depositos(conn, producto_id: int) -> list[dict]:
 
 def transferir_stock(conn, producto_id: int, origen_id: int, destino_id: int,
                      cantidad: float, usuario_id: int | None = None,
-                     fecha: str = "", observaciones: str = ""):
+                     fecha: str = "", observaciones: str = "", variant_id: int | None = None):
     """Mueve stock entre depósitos, atómico y con la guarda de disponibilidad
     adentro de la misma transacción (`transfer_stock`, motor `v0.7.1`).
 
@@ -257,6 +266,7 @@ def transferir_stock(conn, producto_id: int, origen_id: int, destino_id: int,
         transfer_stock(
             SqliteCommerceRepository(conn),
             item_id=producto_id,
+            variant_id=variant_id,
             from_location_id=origen_id,
             to_location_id=destino_id,
             # `cantidad` es float en toda esta capa; vía `str` para no
@@ -272,6 +282,51 @@ def transferir_stock(conn, producto_id: int, origen_id: int, destino_id: int,
         raise ValueError(
             f"Stock insuficiente en depósito origen (disponible: {float(e.disponible)})."
         ) from e
+
+
+def get_transferencias(conn, deposito_id: int | None = None, limite: int = 200) -> list[dict]:
+    """El historial de transferencias, reconstruido desde el ledger: no hay tabla propia.
+
+    Cada transferencia son DOS filas de `stock_movements` que `transfer_stock` aparea: la entrada lleva
+    `source_type='transfer'` y `source_id` = id de la salida (la salida se escribe primero y los movimientos son
+    inmutables, así que el ancla es la salida). Un ajuste manual no aparece acá por dos guardas independientes: el
+    `movement_type = 'transfer_out'` y el `JOIN` estricto con la contraparte; conviene saberlo antes de sacar una
+    por "redundante".
+
+    `deposito_id` trae las que tocan ese depósito **de los dos lados** (lo que salió y lo que entró).
+    """
+    where = ""
+    params: list = ["transfer_out"]
+    if deposito_id is not None:
+        where = "AND (salida.location_id = ? OR entrada.location_id = ?)"
+        params += [deposito_id, deposito_id]
+    params.append(limite)
+    rows = conn.execute(
+        f"""
+        SELECT salida.id, salida.item_id, salida.variant_id, -salida.quantity_delta,
+               salida.location_id, entrada.location_id, salida.occurred_at, salida.note,
+               salida.created_by, ci.name
+        FROM stock_movements AS salida
+        JOIN stock_movements AS entrada
+          ON entrada.source_type = 'transfer' AND entrada.source_id = salida.id
+        LEFT JOIN catalog_items AS ci ON ci.id = salida.item_id
+        WHERE salida.movement_type = ? {where}
+        ORDER BY salida.occurred_at DESC, salida.id DESC
+        LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+    nombres = {r[0]: r[1] for r in conn.execute("SELECT id, name FROM locations").fetchall()}
+    return [
+        {
+            "id": r[0], "producto_id": r[1], "producto": r[9] or f"#{r[1]}", "variant_id": r[2],
+            "cantidad": float(r[3]),
+            "origen_id": r[4], "origen": nombres.get(r[4], f"#{r[4]}"),
+            "destino_id": r[5], "destino": nombres.get(r[5], f"#{r[5]}"),
+            "fecha": str(r[6]), "observaciones": r[7] or "", "usuario_id": r[8],
+        }
+        for r in rows
+    ]
 
 
 # ── Categorías de producto ───────────────────────────────────────────────
