@@ -17,7 +17,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from libracommerce.db.repository import SqliteCommerceRepository
+from libracommerce.db.repository import repositorio_de
 from libracommerce.domain.catalog import ItemPrice, PriceList
 
 #: "Sin restricción de fecha de inicio", para todo lo que este módulo escribe.
@@ -50,12 +50,12 @@ def get_lista_precio(conn, lista_id: int) -> dict | None:
 
 
 def create_lista_precio(conn, nombre: str, descripcion: str = "") -> int:
-    saved = SqliteCommerceRepository(conn).save_price_list(PriceList(None, nombre, description=descripcion))
+    saved = repositorio_de(conn).save_price_list(PriceList(None, nombre, description=descripcion))
     return saved.id
 
 
 def update_lista_precio(conn, lista_id: int, nombre: str, descripcion: str, activa: int):
-    repo = SqliteCommerceRepository(conn)
+    repo = repositorio_de(conn)
     lista = repo.get_price_list(lista_id)
     if lista is None:
         return
@@ -147,7 +147,7 @@ def set_quiebres(conn, lista_id: int, producto_id: int, quiebres: list[dict]) ->
 def resolver_precio_por_cantidad(conn, lista_id: int, producto_id: int, cantidad: float) -> float | None:
     """El precio efectivo para esa cantidad: entre base y quiebres aplicables, el
     quiebre más alto (`resolve_price` del motor). None si no hay precio."""
-    precio = SqliteCommerceRepository(conn).resolve_price(
+    precio = repositorio_de(conn).resolve_price(
         producto_id, price_list_id=lista_id, quantity=Decimal(str(cantidad)),
     )
     return float(precio) if precio is not None else None
@@ -184,11 +184,11 @@ def precio_vigente(conn, item_id: int, *, lista_id: int | None = None, cantidad:
     `resolver_precio_por_cantidad` (misma llamada de fondo, con `branch_id` y
     `at` en None)."""
     if variante_id is not None:
-        variante = SqliteCommerceRepository(conn).get_item_variant(variante_id)
+        variante = repositorio_de(conn).get_item_variant(variante_id)
         if variante is None or variante.item_id != item_id:
             raise ValueError(f"la variante {variante_id} no pertenece al producto {item_id}")
     momento = datetime.fromisoformat(en) if en else None
-    precio = SqliteCommerceRepository(conn).resolve_price(
+    precio = repositorio_de(conn).resolve_price(
         item_id, price_list_id=lista_id, quantity=Decimal(str(cantidad)),
         at=momento, branch_id=sucursal_id,
     )
@@ -212,14 +212,14 @@ def set_precio_vigente(conn, lista_id: int, producto_id: int, monto: float, *,
         min_quantity=Decimal(str(cantidad_minima)) if cantidad_minima is not None else None,
         branch_id=sucursal_id,
     )
-    saved = SqliteCommerceRepository(conn).save_item_price(item_price)
+    saved = repositorio_de(conn).save_item_price(item_price)
     return _item_price_dict(saved)
 
 
 def get_precios_vigentes(conn, producto_id: int, lista_id: int | None = None) -> list[dict]:
     """Todas las filas de `item_prices` del producto —flat, quiebres, vigencia
     y sucursal—, para una pantalla de precios como la de VentaLibra."""
-    precios = SqliteCommerceRepository(conn).list_item_prices(producto_id)
+    precios = repositorio_de(conn).list_item_prices(producto_id)
     if lista_id is not None:
         precios = [p for p in precios if p.price_list_id == lista_id]
     return [_item_price_dict(p) for p in precios]

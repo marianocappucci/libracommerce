@@ -1256,3 +1256,26 @@ class SqliteCommerceRepository:
             },
             "stock_bajo_minimo": int(bajo_minimo),
         }
+
+
+# ── La fábrica del repositorio ───────────────────────────────────────────
+#
+# Las funciones de `libracommerce.erp` (catálogo, listas de precio) reciben una `conn` y arman su repositorio ahí adentro.
+# Un producto que envuelve el repositorio (VentaLibra: `RepositorioAuditado`, que anota cada escritura en
+# `actividad_log`) no tenía cómo enterarse, y todo lo que entraba por los routers del motor quedaba sin auditar. Con esta
+# fábrica el producto declara UNA vez cómo se arma su repositorio y el ERP lo usa.
+
+_fabrica_de_repositorio = None
+
+
+def usar_fabrica_de_repositorio(fabrica) -> None:
+    """Declara cómo arma el producto su repositorio (`fabrica(conn)`), o `None` para volver al de siempre. Es del
+    proceso, no de una app: la fábrica no guarda estado (el usuario sale de un `ContextVar` por request)."""
+    global _fabrica_de_repositorio
+    _fabrica_de_repositorio = fabrica
+
+
+def repositorio_de(conn):
+    """El repositorio que las funciones del ERP usan sobre `conn`: el del producto si declaró una fábrica, o
+    `SqliteCommerceRepository` a secas."""
+    return (_fabrica_de_repositorio or SqliteCommerceRepository)(conn)
