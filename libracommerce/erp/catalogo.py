@@ -333,7 +333,9 @@ def get_transferencias(conn, deposito_id: int | None = None, limite: int = 200) 
 
 
 def get_categorias_producto(conn) -> list[dict]:
-    rows = conn.execute("SELECT id, name FROM categories ORDER BY name").fetchall()
+    """Las categorías que se ofrecen al cargar un producto: las activas (`categories.active` es de un producto que las
+    da de baja sin borrarlas, como VentaLibra; para el resto todas lo están)."""
+    rows = conn.execute("SELECT id, name FROM categories WHERE active = 1 ORDER BY name").fetchall()
     return [{"id": r["id"], "nombre": r["name"]} for r in rows]
 
 
@@ -364,7 +366,7 @@ _PRODUCTO_SELECT = """
     SELECT ci.id, ci.item_type, ci.name, ci.description, ci.active, ci.sellable,
            ci.default_sale_price, ci.default_cost, ci.unit_code, ci.min_stock,
            ci.metadata_json, ci.created_at,
-           COALESCE(cat.name, '') AS categoria,
+           ci.category_id, COALESCE(cat.name, '') AS categoria,
            ic.code AS codigo,
            u.allows_fraction
     FROM catalog_items ci
@@ -385,6 +387,7 @@ def _producto_dict(row) -> dict:
         "precio_costo": float(row["default_cost"]),
         "unidad": row["unit_code"],
         "categoria": row["categoria"],
+        "categoria_id": row["category_id"],
         "created_at": row["created_at"],
         "stock_minimo": float(row["min_stock"]),
         "estacion": metadata.get("estacion", ""),
@@ -413,7 +416,18 @@ def agregar_codigo_balanza(conn, pid: int, codigo: str) -> None:
 def _set_codigo(repo: SqliteCommerceRepository, conn, item_id: int, codigo: str):
     """`productos.codigo` era una columna UNIQUE; acá es el `item_code` interno
     primario. Se reemplaza el anterior en vez de acumular códigos, para
-    preservar la semántica de "un código por producto"."""
+    preservar la semántica de "un código por producto".
+
+    **Si el código no cambió, no se toca nada**: el primario puede ser de otro tipo (un código de barras, el que un
+    producto con varios códigos —VentaLibra— marcó como principal) y reescribirlo como `internal` en cada edición le
+    cambiaría el tipo sin que nadie lo pidiera."""
+    actual = conn.execute(
+        "SELECT code FROM item_codes WHERE item_id=? AND is_primary=1", (item_id,)
+    ).fetchone()
+    if actual is not None and actual[0] == codigo:
+        return
+    if actual is None and not codigo:
+        return
     conn.execute("DELETE FROM item_codes WHERE item_id=? AND is_primary=1", (item_id,))
     if codigo:
         repo.save_item_code(ItemCode(None, item_id, ItemCodeType.INTERNAL, codigo, is_primary=True))
@@ -438,12 +452,23 @@ def _resolver_permite_fraccion(conn, unidad: str, permite_fraccion: bool | None)
     return _permite_fraccion_actual(conn, unidad)
 
 
+def _unidad(conn, codigo: str, permite_fraccion: bool) -> Unit:
+    """La unidad con lo que YA tiene `units` para ese código (nombre, escala decimal), y `allows_fraction` como se
+    pidió. `_upsert_unit` reescribe la fila entera en cada `save_catalog_item`: con `Unit(code, name=code)` un producto
+    de una instancia que administra sus unidades (VentaLibra: «Kilogramo», escala 3) las pisaba con el código y escala 0
+    cada vez que se guardaba."""
+    row = conn.execute("SELECT name, decimal_scale FROM units WHERE code=?", (codigo,)).fetchone()
+    if row is None:
+        return Unit(code=codigo, name=codigo, allows_fraction=permite_fraccion)
+    return Unit(code=codigo, name=row["name"], allows_fraction=permite_fraccion, decimal_scale=row["decimal_scale"])
+
+
 def _catalog_item(pid: int | None, *, nombre, unidad, categoria_id, descripcion, activo, vendible,
                   estacion, precio_venta, precio_costo, stock_minimo, item_type,
-                  permite_fraccion: bool = False) -> CatalogItem:
+                  permite_fraccion: bool = False, unit: Unit | None = None) -> CatalogItem:
     return CatalogItem(
         id=pid, item_type=item_type, name=nombre,
-        unit=Unit(code=unidad, name=unidad, allows_fraction=permite_fraccion),
+        unit=unit or Unit(code=unidad, name=unidad, allows_fraction=permite_fraccion),
         category_id=categoria_id,
         description=descripcion, active=bool(activo), sellable=bool(vendible),
         metadata={"estacion": estacion} if estacion else {},
@@ -466,6 +491,7 @@ def create_producto(conn, nombre: str, codigo: str = "", descripcion: str = "",
         descripcion=descripcion, activo=True, vendible=vendible, estacion=estacion,
         precio_venta=precio_venta, precio_costo=precio_costo, stock_minimo=stock_minimo,
         item_type=item_type, permite_fraccion=_resolver_permite_fraccion(conn, unidad, permite_fraccion),
+        unit=_unidad(conn, unidad, _resolver_permite_fraccion(conn, unidad, permite_fraccion)),
     ))
     _set_codigo(repo, conn, saved.id, codigo)
     return saved.id
@@ -489,6 +515,28 @@ def generar_codigo_producto(conn, categoria: str = "") -> str:
     return f"{base}-{maxn + 1:04d}"
 
 
+#: Las dos formas de cada letra mapean a la forma SIN acento y en minúscula: así ni `_sin_acentos` (Python) ni
+#: `_sin_acentos_sql` dependen de que `LOWER()` sepa bajar una vocal acentuada.
+_QUITAR_ACENTOS = (
+    ("á", "a"), ("é", "e"), ("í", "i"), ("ó", "o"), ("ú", "u"), ("ü", "u"), ("ñ", "n"),
+    ("Á", "a"), ("É", "e"), ("Í", "i"), ("Ó", "o"), ("Ú", "u"), ("Ü", "u"), ("Ñ", "n"),
+)
+
+
+def _sin_acentos(texto: str) -> str:
+    for con_acento, sin_acento in _QUITAR_ACENTOS:
+        texto = texto.replace(con_acento, sin_acento)
+    return texto.lower()
+
+
+def _sin_acentos_sql(columna: str) -> str:
+    """La misma normalización como expresión SQL. `columna` es siempre un nombre fijo, nunca un valor de usuario."""
+    expr = columna
+    for con_acento, sin_acento in _QUITAR_ACENTOS:
+        expr = f"REPLACE({expr}, '{con_acento}', '{sin_acento}')"
+    return f"LOWER({expr})"
+
+
 def get_all_productos(conn, solo_activos: bool = False, q: str = "",
                       solo_vendibles: bool = False, tipo: str = "") -> list[dict]:
     where: list[str] = []
@@ -500,11 +548,16 @@ def get_all_productos(conn, solo_activos: bool = False, q: str = "",
     if tipo:
         where.append("ci.item_type=?")
         params.append(_validar_tipo(tipo))
-    if q:
-        # Sin distinguir mayúsculas en ningún motor: con `LIKE` a secas PostgreSQL
-        # sí las distingue y `yerba` no encontraba `Yerba` (hallazgo de M2).
-        where.append("(LOWER(ci.name) LIKE ? OR LOWER(ic.code) LIKE ? OR LOWER(cat.name) LIKE ?)")
-        params += [f"%{q.lower()}%"] * 3
+    for termino in q.split():
+        # Sin distinguir mayúsculas ni acentos, en ningún motor: con `LIKE` a secas PostgreSQL sí distingue mayúsculas
+        # (`yerba` no encontraba `Yerba`, hallazgo de M2) y ni SQLite ni PostgreSQL saben bajar una vocal acentuada sin
+        # ICU/locale, así que se normaliza con `REPLACE` (ver `_QUITAR_ACENTOS`). Y **todos** los términos, en cualquier
+        # orden, cada uno en el nombre, el código o la categoría: «simple cono» encuentra «Cono Simple».
+        where.append(
+            f"({_sin_acentos_sql('ci.name')} LIKE ? OR {_sin_acentos_sql('ic.code')} LIKE ?"
+            f" OR {_sin_acentos_sql('cat.name')} LIKE ?)"
+        )
+        params += [f"%{_sin_acentos(termino)}%"] * 3
     sql = _PRODUCTO_SELECT
     if where:
         sql += " WHERE " + " AND ".join(where)
@@ -530,18 +583,56 @@ def update_producto(conn, pid: int, nombre: str, codigo: str, descripcion: str,
                     permite_fraccion: bool | None = None):
     item_type = _validar_tipo(tipo)
     repo = SqliteCommerceRepository(conn)
-    repo.save_catalog_item(_catalog_item(
+    anterior = repo.get_catalog_item(pid)
+    nuevo = _catalog_item(
         pid, nombre=nombre, unidad=unidad, categoria_id=_resolver_categoria_id(conn, categoria),
         descripcion=descripcion, activo=activo, vendible=vendible, estacion=estacion,
         precio_venta=precio_venta, precio_costo=precio_costo, stock_minimo=stock_minimo,
         item_type=item_type, permite_fraccion=_resolver_permite_fraccion(conn, unidad, permite_fraccion),
-    ))
+        unit=_unidad(conn, unidad, _resolver_permite_fraccion(conn, unidad, permite_fraccion)),
+    )
+    if anterior is not None:
+        # Lo que este payload no maneja se conserva: `purchasable`, `tax_profile` y las claves de `metadata` que no
+        # son la estación. Un `CatalogItem` nuevo los reseteaba a su default en cada edición.
+        metadata = {k: v for k, v in anterior.metadata.items() if k != "estacion"} | nuevo.metadata
+        nuevo = replace(nuevo, purchasable=anterior.purchasable, tax_profile=anterior.tax_profile, metadata=metadata)
+    repo.save_catalog_item(nuevo)
     _set_codigo(repo, conn, pid, codigo)
 
 
 def delete_producto(conn, pid: int):
     conn.execute("DELETE FROM item_codes WHERE item_id=?", (pid,))
     conn.execute("DELETE FROM catalog_items WHERE id=?", (pid,))
+
+
+# ── Códigos de un producto (varios por producto, de distintos tipos) ─────
+
+TIPOS_DE_CODIGO = tuple(t.value for t in ItemCodeType)
+
+
+def get_codigos(conn, pid: int) -> list[dict]:
+    """Todos los códigos del producto, el principal primero. `codigo` de `get_producto` es sólo el principal."""
+    rows = conn.execute(
+        "SELECT id, item_id, code_type, code, is_primary FROM item_codes WHERE item_id=? "
+        "ORDER BY is_primary DESC, id",
+        (pid,),
+    ).fetchall()
+    return [
+        {"id": r["id"], "producto_id": r["item_id"], "tipo": r["code_type"], "codigo": r["code"],
+         "es_principal": bool(r["is_primary"])}
+        for r in rows
+    ]
+
+
+def add_codigo(conn, pid: int, tipo: str, codigo: str, es_principal: bool = False) -> dict:
+    """Agrega un código. `ValueError` si el tipo no es de `TIPOS_DE_CODIGO`; el `IntegrityError` de un código repetido
+    o de un segundo principal lo traduce el router (409)."""
+    if tipo not in TIPOS_DE_CODIGO:
+        raise ValueError(f"tipo de código inválido: {tipo!r} (los válidos: {', '.join(TIPOS_DE_CODIGO)})")
+    SqliteCommerceRepository(conn).save_item_code(
+        ItemCode(id=None, item_id=pid, code_type=ItemCodeType(tipo), code=codigo, is_primary=es_principal)
+    )
+    return next(c for c in get_codigos(conn, pid) if c["codigo"] == codigo and c["tipo"] == tipo)
 
 
 # ── Variantes (F1 de VentaLibra a LibraCommerce, 2026-09-14) ─────────────
