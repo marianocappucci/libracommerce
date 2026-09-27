@@ -1127,3 +1127,42 @@ def test_el_listado_puede_pedir_solo_lo_activo_y_lo_vendible(client):
     assert {x["nombre"] for x in client.get("/api/productos", params={"solo_activos": True}).json()} == {"Insumo", "Yerba"}
     assert {x["nombre"] for x in client.get("/api/productos", params={"solo_vendibles": True}).json()} == {"Yerba", "De baja"}
     assert p["vendible"] == 0
+
+
+def test_el_erp_usa_la_fabrica_de_repositorio_del_producto(client):
+    """Un producto que envuelve el repositorio (VentaLibra: lo audita) declara UNA vez su fábrica y todo lo que entra
+    por los routers del motor pasa por ella: antes quedaba sin auditar."""
+    from libracommerce.db import repository
+
+    escritas = []
+
+    class Espia:
+        def __init__(self, conn):
+            self._repo = repository.SqliteCommerceRepository(conn)
+
+        def __getattr__(self, nombre):
+            metodo = getattr(self._repo, nombre)
+            if not nombre.startswith("save_"):
+                return metodo
+
+            def escribe(*args, **kwargs):
+                escritas.append(nombre)
+                return metodo(*args, **kwargs)
+
+            return escribe
+
+    repository.usar_fabrica_de_repositorio(Espia)
+    try:
+        p = _crear_producto(client, "Yerba", codigo="Y-1")
+        client.post(f"/api/productos/{p['id']}/variantes", json={"sku": "V1", "nombre": "1 kg"})
+        client.post(f"/api/productos/{p['id']}/codigos", json={"tipo": "barcode", "codigo": "779"})
+        client.put(f"/api/productos/{p['id']}", json={"nombre": "Yerba 2", "unidad": "u", "codigo": "Y-1",
+                                                       "precio_venta": 1, "precio_costo": 1})
+        client.post("/api/depositos", json={"nombre": "Otro"})
+    finally:
+        repository.usar_fabrica_de_repositorio(None)
+    assert {"save_catalog_item", "save_item_code", "save_item_variant", "save_location"} <= set(escritas)
+    # Sin fábrica vuelve al repositorio de siempre.
+    escritas.clear()
+    _crear_producto(client, "Otro producto")
+    assert escritas == []

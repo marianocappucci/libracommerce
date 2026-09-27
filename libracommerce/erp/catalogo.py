@@ -29,7 +29,7 @@ from datetime import datetime as _datetime
 from decimal import Decimal
 from typing import Any
 
-from libracommerce.db.repository import SqliteCommerceRepository
+from libracommerce.db.repository import repositorio_de
 from libracommerce.domain.catalog import (
     CatalogItem,
     CatalogItemType,
@@ -136,7 +136,7 @@ def create_deposito(conn, nombre: str, descripcion: str = "", tipo: str | None =
     location = Location(None, nombre, description=descripcion)
     if tipo:
         location = replace(location, location_type=tipo)
-    saved = SqliteCommerceRepository(conn).save_location(location)
+    saved = repositorio_de(conn).save_location(location)
     return saved.id
 
 
@@ -147,7 +147,7 @@ def update_deposito(conn, did: int, nombre: str, descripcion: str, activo: int):
     resolviendo el default vía `get_default_deposito_id` —que no mira
     `active`— y toda venta sin `deposito_id` explícito le seguía cargando
     stock a un depósito que la pantalla mostraba como dado de baja."""
-    repo = SqliteCommerceRepository(conn)
+    repo = repositorio_de(conn)
     location = repo.get_location(did)
     if location is None:
         return
@@ -264,7 +264,7 @@ def transferir_stock(conn, producto_id: int, origen_id: int, destino_id: int,
     ref = observaciones or "Transferencia entre depósitos"
     try:
         transfer_stock(
-            SqliteCommerceRepository(conn),
+            repositorio_de(conn),
             item_id=producto_id,
             variant_id=variant_id,
             from_location_id=origen_id,
@@ -408,12 +408,12 @@ def agregar_codigo_balanza(conn, pid: int, codigo: str) -> None:
     (`item_codes.code_type='scale'`) -- no es el EAN que imprime la etiqueta
     (ese trae el peso adentro, ver `domain/scale.py`), es el código corto que
     el comercio eligió al cargarlo en el equipo. Lo consume `escanear`."""
-    SqliteCommerceRepository(conn).save_item_code(
+    repositorio_de(conn).save_item_code(
         ItemCode(id=None, item_id=pid, code_type=ItemCodeType.SCALE, code=codigo)
     )
 
 
-def _set_codigo(repo: SqliteCommerceRepository, conn, item_id: int, codigo: str):
+def _set_codigo(repo, conn, item_id: int, codigo: str):
     """`productos.codigo` era una columna UNIQUE; acá es el `item_code` interno
     primario. Se reemplaza el anterior en vez de acumular códigos, para
     preservar la semántica de "un código por producto".
@@ -485,7 +485,7 @@ def create_producto(conn, nombre: str, codigo: str = "", descripcion: str = "",
                     vendible: int = 1, tipo: str = "producto",
                     permite_fraccion: bool | None = None) -> int:
     item_type = _validar_tipo(tipo)
-    repo = SqliteCommerceRepository(conn)
+    repo = repositorio_de(conn)
     saved = repo.save_catalog_item(_catalog_item(
         None, nombre=nombre, unidad=unidad, categoria_id=_resolver_categoria_id(conn, categoria),
         descripcion=descripcion, activo=True, vendible=vendible, estacion=estacion,
@@ -582,7 +582,7 @@ def update_producto(conn, pid: int, nombre: str, codigo: str, descripcion: str,
                     vendible: int = 1, tipo: str = "producto",
                     permite_fraccion: bool | None = None):
     item_type = _validar_tipo(tipo)
-    repo = SqliteCommerceRepository(conn)
+    repo = repositorio_de(conn)
     anterior = repo.get_catalog_item(pid)
     nuevo = _catalog_item(
         pid, nombre=nombre, unidad=unidad, categoria_id=_resolver_categoria_id(conn, categoria),
@@ -629,7 +629,7 @@ def add_codigo(conn, pid: int, tipo: str, codigo: str, es_principal: bool = Fals
     o de un segundo principal lo traduce el router (409)."""
     if tipo not in TIPOS_DE_CODIGO:
         raise ValueError(f"tipo de código inválido: {tipo!r} (los válidos: {', '.join(TIPOS_DE_CODIGO)})")
-    SqliteCommerceRepository(conn).save_item_code(
+    repositorio_de(conn).save_item_code(
         ItemCode(id=None, item_id=pid, code_type=ItemCodeType(tipo), code=codigo, is_primary=es_principal)
     )
     return next(c for c in get_codigos(conn, pid) if c["codigo"] == codigo and c["tipo"] == tipo)
@@ -686,7 +686,7 @@ def get_variante(conn, vid: int) -> dict | None:
 
 
 def create_variante(conn, pid: int, sku: str, nombre: str, atributos: dict[str, str] | None = None) -> dict:
-    saved = SqliteCommerceRepository(conn).save_item_variant(
+    saved = repositorio_de(conn).save_item_variant(
         ItemVariant(id=None, item_id=pid, sku=sku, name=nombre, attributes=atributos or {})
     )
     return _variante_dict(saved)
@@ -694,7 +694,7 @@ def create_variante(conn, pid: int, sku: str, nombre: str, atributos: dict[str, 
 
 def update_variante(conn, vid: int, sku: str, nombre: str,
                     atributos: dict[str, str] | None, activa: bool) -> dict | None:
-    repo = SqliteCommerceRepository(conn)
+    repo = repositorio_de(conn)
     existente = repo.get_item_variant(vid)
     if existente is None:
         return None
@@ -724,7 +724,7 @@ class EtiquetaBalanzaError(ValueError):
 
 
 def get_formato_balanza(conn) -> ScaleFormat | None:
-    crudo = SqliteCommerceRepository(conn).get_setting(_SETTING_FORMATO_BALANZA)
+    crudo = repositorio_de(conn).get_setting(_SETTING_FORMATO_BALANZA)
     if not crudo:
         return None
     datos = json.loads(crudo)
@@ -740,7 +740,7 @@ def set_formato_balanza(conn, fmt: ScaleFormat | None) -> None:
         return
     datos = asdict(fmt)
     datos["value_kind"] = fmt.value_kind.value
-    SqliteCommerceRepository(conn).set_setting(_SETTING_FORMATO_BALANZA, json.dumps(datos))
+    repositorio_de(conn).set_setting(_SETTING_FORMATO_BALANZA, json.dumps(datos))
 
 
 def escanear(conn, code: str) -> dict | None:
@@ -760,7 +760,7 @@ def escanear(conn, code: str) -> dict | None:
     """
     fmt = get_formato_balanza(conn)
     leido = parse_scale_barcode(code, fmt) if fmt is not None else None
-    repo = SqliteCommerceRepository(conn)
+    repo = repositorio_de(conn)
 
     if leido is None:
         item = repo.find_item_by_code(code)
