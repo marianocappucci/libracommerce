@@ -89,6 +89,43 @@ def test_puerto_de_reportes_abre_la_conexion_del_producto(abrir_ventas):
     assert [r["nombre"] for r in puerto.stock_bajo()] == ["Azúcar"]
 
 
+def test_las_ventas_anuladas_y_pendientes_no_cuentan_si_el_producto_lo_pide(abrir_ventas):
+    """Sin `solo_confirmadas` (Contalibra, Restolibra) los reportes cuentan todo, como siempre; con él (VentaLibra, que anula y
+    cobra por QR) una venta anulada o pendiente de cobro no es una venta."""
+    yerba, _azucar, (v1, v2, _v3) = _escenario(abrir_ventas)
+    pendiente = _venta(abrir_ventas, [{"nombre": "Yerba", "qty": 2, "precio": 100.0, "subtotal": 200.0, "producto_id": yerba}],
+                       [{"medio": "mercadopago", "monto": 200.0, "estado": "pendiente"}])
+    with abrir_ventas() as conn:
+        ventas.anular_venta(conn, v2["id"] if isinstance(v2, dict) else v2)
+        # Sin la opción: las tres de hoy (una anulada, una pendiente) cuentan.
+        assert reportes.reporte_resumen(conn, HOY, HOY)["ventas_cantidad"] == 3
+        assert sum(r["cantidad"] for r in reportes.reporte_ventas(conn, HOY, HOY)) == 3
+        # Con la opción: sólo la confirmada.
+        resumen = reportes.reporte_resumen(conn, HOY, HOY, solo_confirmadas=True)
+        assert resumen["ventas_cantidad"] == 1 and float(resumen["ventas_total"]) == 300.0
+        assert [(r["cantidad"], float(r["total"])) for r in reportes.reporte_ventas(conn, HOY, HOY, solo_confirmadas=True)] == [(1, 300.0)]
+        assert {r["medio"] for r in reportes.reporte_medios_pago(conn, HOY, HOY, solo_confirmadas=True)} == {"efectivo"}
+        top = reportes.reporte_productos_top(conn, HOY, HOY, solo_confirmadas=True)
+        assert [(r["nombre"], float(r["cantidad"])) for r in top] == [("Yerba", 3.0)]
+    puerto = reportes.puerto_de_reportes(abrir_ventas, solo_confirmadas=True)
+    assert puerto.resumen(HOY, HOY)["ventas_cantidad"] == 1 and puerto.ventas(HOY, HOY, "dia")[0]["cantidad"] == 1
+    assert pendiente  # la venta pendiente existe: sólo que no cuenta
+
+
+def test_el_saldo_de_caja_del_resumen_no_cuenta_lo_anulado_ni_el_fiado_si_se_pide(abrir_ventas):
+    yerba, _azucar, _ = _escenario(abrir_ventas)  # 450 de ingresos hoy
+    _venta(abrir_ventas, [{"nombre": "Yerba", "qty": 5, "precio": 100.0, "subtotal": 500.0, "producto_id": yerba}],
+           [{"medio": "cuenta_corriente", "monto": 500.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        con_fiado = float(reportes.reporte_resumen(conn, HOY, HOY)["caja_saldo"])
+        sin_fiado = float(reportes.reporte_resumen(conn, HOY, HOY, sin_fiado=True)["caja_saldo"])
+        assert (con_fiado, sin_fiado) == (950.0, 450.0)
+        # Un movimiento anulado no cuenta en ningún caso (antes este resumen lo sumaba).
+        conn.execute("UPDATE caja_movimientos SET anulado = 1 WHERE medio_pago = 'efectivo' AND monto = 300")
+        assert float(reportes.reporte_resumen(conn, HOY, HOY, sin_fiado=True)["caja_saldo"]) == 150.0
+    assert float(reportes.puerto_de_reportes(abrir_ventas, sin_fiado=True).resumen(HOY, HOY)["caja_saldo"]) == 150.0
+
+
 # ── Actividad ────────────────────────────────────────────────────────────
 
 

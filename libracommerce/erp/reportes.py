@@ -22,8 +22,13 @@ from collections.abc import Callable
 from typing import Any
 
 
-def _rango(desde: str, hasta: str, columna: str) -> tuple[str, list]:
+def _rango(desde: str, hasta: str, columna: str, solo_confirmadas: bool = False,
+           estado: str = "status") -> tuple[str, list]:
+    """`solo_confirmadas`: sólo las ventas `confirmed`, o sea sin las anuladas (`cancelled`) ni las pendientes de cobro
+    (`draft`: un QR sin acreditar). Default `False`: todas, como siempre."""
     where, params = [], []
+    if solo_confirmadas:
+        where.append(f"{estado} = 'confirmed'")
     if desde:
         where.append(f"{columna} >= ?")
         params.append(desde)
@@ -33,10 +38,11 @@ def _rango(desde: str, hasta: str, columna: str) -> tuple[str, list]:
     return (("WHERE " + " AND ".join(where)) if where else ""), params
 
 
-def reporte_ventas(conn, desde: str = "", hasta: str = "", agrupacion: str = "dia") -> list[dict]:
+def reporte_ventas(conn, desde: str = "", hasta: str = "", agrupacion: str = "dia",
+                   solo_confirmadas: bool = False) -> list[dict]:
     """Ventas agrupadas por día, semana o mes."""
     fmt = {"dia": "%Y-%m-%d", "semana": "%Y-W%W", "mes": "%Y-%m"}.get(agrupacion, "%Y-%m-%d")
-    w, params = _rango(desde, hasta, "occurred_on")
+    w, params = _rango(desde, hasta, "occurred_on", solo_confirmadas)
     sql = f"""
         SELECT strftime('{fmt}', occurred_on) AS periodo,
                COUNT(*) AS cantidad,
@@ -47,10 +53,10 @@ def reporte_ventas(conn, desde: str = "", hasta: str = "", agrupacion: str = "di
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
-def reporte_medios_pago(conn, desde: str = "", hasta: str = "") -> list[dict]:
+def reporte_medios_pago(conn, desde: str = "", hasta: str = "", solo_confirmadas: bool = False) -> list[dict]:
     """Totales por medio de pago en el período (`ventas_pagos` es de LibraCore;
     la venta, de acá)."""
-    w, params = _rango(desde, hasta, "s.occurred_on")
+    w, params = _rango(desde, hasta, "s.occurred_on", solo_confirmadas, "s.status")
     sql = f"""
         SELECT vp.medio, COUNT(DISTINCT vp.venta_id) AS operaciones,
                ROUND(SUM(vp.monto), 2) AS total
@@ -61,9 +67,10 @@ def reporte_medios_pago(conn, desde: str = "", hasta: str = "") -> list[dict]:
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
-def reporte_productos_top(conn, desde: str = "", hasta: str = "", limit: int = 20) -> list[dict]:
+def reporte_productos_top(conn, desde: str = "", hasta: str = "", limit: int = 20,
+                          solo_confirmadas: bool = False) -> list[dict]:
     """Productos más vendidos (por cantidad y por monto) en el período."""
-    w, params = _rango(desde, hasta, "s.occurred_on")
+    w, params = _rango(desde, hasta, "s.occurred_on", solo_confirmadas, "s.status")
     sql = f"""
         SELECT si.description_snapshot AS nombre,
                ROUND(SUM(CAST(si.quantity AS REAL)), 2) AS cantidad,
@@ -92,16 +99,24 @@ def reporte_stock_bajo(conn) -> list[dict]:
     return [dict(r) for r in conn.execute(sql).fetchall()]
 
 
-def reporte_resumen(conn, desde: str = "", hasta: str = "") -> dict:
+def reporte_resumen(conn, desde: str = "", hasta: str = "", solo_confirmadas: bool = False,
+                    sin_fiado: bool = False) -> dict:
     """KPIs rápidos del período: ventas (de acá), facturas y saldo de caja (de
-    LibraCore)."""
-    w_ventas, params = _rango(desde, hasta, "occurred_on")
+    LibraCore).
+
+    El saldo de caja **no cuenta los movimientos anulados** (como todo lo que produce un número de plata en
+    `libracore.db.reportes`); con `sin_fiado` tampoco las marcas de cuenta corriente."""
+    w_ventas, params = _rango(desde, hasta, "occurred_on", solo_confirmadas)
     w, _ = _rango(desde, hasta, "fecha")
+    from libracore.db.caja import sql_no_anulado, sql_no_es_cuenta_corriente
+
+    condiciones = [sql_no_anulado()] + ([sql_no_es_cuenta_corriente()] if sin_fiado else [])
+    w_caja = (w + " AND " if w else "WHERE ") + " AND ".join(condiciones)
     v = conn.execute(f"SELECT COUNT(*) cnt, ROUND(SUM(total),2) total FROM sales {w_ventas}", params).fetchone()
     f_row = conn.execute(f"SELECT COUNT(*) cnt FROM facturas {w}", params).fetchone()
     caja = conn.execute(
         f"SELECT ROUND(SUM(CASE WHEN tipo='ingreso' THEN monto ELSE -monto END),2) saldo "
-        f"FROM caja_movimientos {w}", params
+        f"FROM caja_movimientos {w_caja}", params
     ).fetchone()
     return {
         "ventas_cantidad": v["cnt"] or 0,
@@ -111,23 +126,27 @@ def reporte_resumen(conn, desde: str = "", hasta: str = "") -> dict:
     }
 
 
-def puerto_de_reportes(conexion: Callable[[], Any]):
+def puerto_de_reportes(conexion: Callable[[], Any], *, solo_confirmadas: bool = False, sin_fiado: bool = False):
     """El `PuertoDeReportes` de LibraCore con las cinco lecturas de acá, cada
     una abriendo su conexión con la fábrica del producto (`get_connection`).
-    Las de caja no entran: el router las toma de `libracore.db.reportes`."""
+    Las de caja no entran: el router las toma de `libracore.db.reportes`.
+
+    `solo_confirmadas` deja afuera de ventas, medios y productos las ventas anuladas y las pendientes de cobro (un producto que
+    anula y que cobra por QR; VentaLibra); `sin_fiado` deja la cuenta corriente afuera del saldo de caja del resumen. Los dos
+    default `False`: lo de siempre."""
     from libracore.reportes import PuertoDeReportes
 
-    def _con(fn):
+    def _con(fn, **fijos):
         def _f(*args, **kwargs):
             with conexion() as conn:
-                return fn(conn, *args, **kwargs)
+                return fn(conn, *args, **fijos, **kwargs)
         _f.__name__ = fn.__name__
         return _f
 
     return PuertoDeReportes(
-        ventas=_con(reporte_ventas),
-        medios_pago=_con(reporte_medios_pago),
-        productos_top=_con(reporte_productos_top),
+        ventas=_con(reporte_ventas, solo_confirmadas=solo_confirmadas),
+        medios_pago=_con(reporte_medios_pago, solo_confirmadas=solo_confirmadas),
+        productos_top=_con(reporte_productos_top, solo_confirmadas=solo_confirmadas),
         stock_bajo=_con(reporte_stock_bajo),
-        resumen=_con(reporte_resumen),
+        resumen=_con(reporte_resumen, solo_confirmadas=solo_confirmadas, sin_fiado=sin_fiado),
     )
