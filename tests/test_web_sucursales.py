@@ -10,11 +10,17 @@ depósitos `active=1`). Estos tests son, en gran parte, los mismos casos que
 
 from __future__ import annotations
 
+from datetime import datetime
+from decimal import Decimal
+
 import pytest
 from conftest import _usuario  # noqa: F401  (y la fixture `abrir`, que pytest carga sola)
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from libracommerce.db.repository import repositorio_de
+from libracommerce.domain.inventory import StockMovement, StockMovementType
+from libracommerce.erp import catalogo
 from libracommerce.web.catalogo_router import (
     OpcionesStock,
     build_depositos_router,
@@ -48,6 +54,14 @@ def _crear_sucursal(client, nombre="Casa Central", **extra):
     resp = client.post("/api/sucursales", json=payload)
     assert resp.status_code == 200, resp.text
     return resp.json()
+
+
+def _depositos_de(abrir, sid):
+    with abrir() as conn:
+        filas = conn.execute(
+            "SELECT id, active, name FROM locations WHERE branch_id=? ORDER BY id", (sid,)
+        ).fetchall()
+    return [{"id": f[0], "activo": bool(f[1]), "nombre": f[2]} for f in filas]
 
 
 def _crear_deposito(client, nombre, branch_id=None):
@@ -94,7 +108,7 @@ def test_deposito_creado_con_branch_id_cuenta_en_la_sucursal(client):
     _crear_deposito(client, "Depósito de la sucursal", branch_id=s["id"])
     listado = client.get("/api/sucursales").json()
     encontrada = next(x for x in listado if x["id"] == s["id"])
-    assert encontrada["depositos"] == 1
+    assert encontrada["depositos"] == 2  # el que trae la sucursal + el que se agregó
 
 
 def test_crear_deposito_con_sucursal_inexistente_es_422(client):
@@ -134,21 +148,24 @@ def test_no_se_puede_marcar_default_una_sucursal_inactiva(client):
     assert resp.status_code == 422
 
 
-def test_se_puede_desactivar_una_sucursal_sin_depositos(client):
+def test_se_puede_desactivar_una_sucursal_sin_existencias(client, abrir):
     s = _crear_sucursal(client, "Vacía")
     resp = client.put(f"/api/sucursales/{s['id']}", json={"nombre": "Vacía", "activa": False})
     assert resp.status_code == 200
     assert resp.json()["activa"] is False
+    assert not any(d["activo"] for d in _depositos_de(abrir, s["id"]))
 
 
-def test_no_se_puede_desactivar_una_sucursal_con_deposito_activo(client):
-    """El caso simple: un depósito `active=1` colgando de la sucursal, aunque
-    esté vacío de stock — sigue siendo un destino que las pantallas ofrecen."""
-    s = _crear_sucursal(client, "Con depósito activo")
-    _crear_deposito(client, "Depósito", branch_id=s["id"])
+def test_la_baja_de_una_sucursal_da_de_baja_sus_depositos_vacios(client, abrir):
+    """Un depósito activo pero vacío no bloquea la baja (ADR-013): el chequeo que importa es el de existencias,
+    y la baja arrastra a todos los depósitos de la sucursal."""
+    s = _crear_sucursal(client, "Con depósitos")
+    _crear_deposito(client, "Segundo", branch_id=s["id"])
     resp = client.put(f"/api/sucursales/{s['id']}", json={"nombre": "X", "activa": False})
-    assert resp.status_code == 422
-    assert "depósito" in resp.json()["detail"]
+    assert resp.status_code == 200, resp.text
+    depositos = _depositos_de(abrir, s["id"])
+    assert len(depositos) == 2
+    assert not any(d["activo"] for d in depositos)
 
 
 def test_no_se_puede_desactivar_una_sucursal_con_existencias_en_deposito_inactivo(client):
@@ -185,3 +202,155 @@ def test_transferir_el_stock_y_desactivar_el_deposito_libera_la_baja(client):
     assert client.put(f"/api/depositos/{d['id']}", json={"nombre": "Vacío", "activo": False}).status_code == 200
     resp = client.put(f"/api/sucursales/{s['id']}", json={"nombre": "X", "activa": False})
     assert resp.status_code == 200
+
+
+# ── Toda sucursal declara al menos un depósito (Fase 0.5, ADR-013) ────────
+
+
+def test_crear_sucursal_crea_su_primer_deposito_y_lo_predetermina(client, abrir):
+    s = _crear_sucursal(client, "Local Centro")
+    depositos = _depositos_de(abrir, s["id"])
+    assert [d["nombre"] for d in depositos] == ["Depósito Local Centro"]
+    assert s["deposito_predeterminado_id"] == depositos[0]["id"]
+    assert client.get("/api/sucursales").json()[0]["depositos"] >= 1
+
+
+def test_crear_sucursal_con_nombre_de_deposito(client, abrir):
+    s = _crear_sucursal(client, "Norte", deposito="Trastienda")
+    assert [d["nombre"] for d in _depositos_de(abrir, s["id"])] == ["Trastienda"]
+
+
+def test_un_deposito_nuevo_no_le_saca_el_predeterminado_a_la_sucursal(client):
+    s = _crear_sucursal(client, "Sur")
+    _crear_deposito(client, "Extra", branch_id=s["id"])
+    assert client.get(f"/api/sucursales/{s['id']}").json()["deposito_predeterminado_id"] == s["deposito_predeterminado_id"]
+
+
+def test_no_se_puede_desactivar_el_ultimo_deposito_activo_de_una_sucursal(client):
+    s = _crear_sucursal(client, "Una sola")
+    did = s["deposito_predeterminado_id"]
+    resp = client.put(f"/api/depositos/{did}", json={"nombre": "X", "activo": False})
+    assert resp.status_code == 422
+    assert "único depósito activo" in resp.json()["detail"]
+
+
+def test_no_se_puede_eliminar_el_ultimo_deposito_de_una_sucursal(client):
+    s = _crear_sucursal(client, "Una sola")
+    resp = client.delete(f"/api/depositos/{s['deposito_predeterminado_id']}")
+    assert resp.status_code == 422
+    assert "único depósito activo" in resp.json()["detail"]
+
+
+def test_desactivar_el_predeterminado_pasa_el_predeterminado_a_otro_activo(client):
+    s = _crear_sucursal(client, "Dos")
+    otro = _crear_deposito(client, "Otro", branch_id=s["id"])
+    resp = client.put(f"/api/depositos/{s['deposito_predeterminado_id']}", json={"nombre": "X", "activo": False})
+    assert resp.status_code == 200, resp.text
+    assert client.get(f"/api/sucursales/{s['id']}").json()["deposito_predeterminado_id"] == otro["id"]
+
+
+def test_eliminar_el_predeterminado_pasa_el_predeterminado_a_otro_activo(client):
+    s = _crear_sucursal(client, "Dos")
+    otro = _crear_deposito(client, "Otro", branch_id=s["id"])
+    assert client.delete(f"/api/depositos/{s['deposito_predeterminado_id']}").status_code == 200
+    assert client.get(f"/api/sucursales/{s['id']}").json()["deposito_predeterminado_id"] == otro["id"]
+
+
+def test_un_deposito_sin_sucursal_no_tiene_la_guarda(client):
+    suelto = _crear_deposito(client, "Suelto")
+    assert client.put(f"/api/depositos/{suelto['id']}", json={"nombre": "Suelto", "activo": False}).status_code == 200
+
+
+def test_no_se_puede_dar_de_baja_la_sucursal_con_el_deposito_por_defecto_de_la_instancia(client):
+    s = _crear_sucursal(client, "Con el default")
+    assert client.post(f"/api/depositos/{s['deposito_predeterminado_id']}/set-default").status_code == 200
+    resp = client.put(f"/api/sucursales/{s['id']}", json={"nombre": "X", "activa": False})
+    assert resp.status_code == 422
+    assert "por defecto de la instancia" in resp.json()["detail"]
+
+
+def test_reactivar_la_sucursal_reactiva_su_deposito_predeterminado(client, abrir):
+    s = _crear_sucursal(client, "Vuelve")
+    assert client.put(f"/api/sucursales/{s['id']}", json={"nombre": "Vuelve", "activa": False}).status_code == 200
+    resp = client.put(f"/api/sucursales/{s['id']}", json={"nombre": "Vuelve", "activa": True})
+    assert resp.status_code == 200, resp.text
+    activos = [d for d in _depositos_de(abrir, s["id"]) if d["activo"]]
+    assert [d["id"] for d in activos] == [s["deposito_predeterminado_id"]]
+    assert resp.json()["deposito_predeterminado_id"] == s["deposito_predeterminado_id"]
+
+
+def test_marcar_otro_deposito_como_predeterminado(client):
+    s = _crear_sucursal(client, "Elige")
+    otro = _crear_deposito(client, "Otro", branch_id=s["id"])
+    resp = client.post(f"/api/sucursales/{s['id']}/deposito-predeterminado", json={"deposito_id": otro["id"]})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["deposito_predeterminado_id"] == otro["id"]
+
+
+def test_el_predeterminado_tiene_que_ser_un_deposito_activo_de_esa_sucursal(client):
+    a = _crear_sucursal(client, "A")
+    b = _crear_sucursal(client, "B")
+    ajeno = client.post(
+        f"/api/sucursales/{a['id']}/deposito-predeterminado", json={"deposito_id": b["deposito_predeterminado_id"]}
+    )
+    assert ajeno.status_code == 422
+    inactivo = _crear_deposito(client, "Inactivo", branch_id=a["id"])
+    client.put(f"/api/depositos/{inactivo['id']}", json={"nombre": "Inactivo", "activo": False})
+    resp = client.post(f"/api/sucursales/{a['id']}/deposito-predeterminado", json={"deposito_id": inactivo["id"]})
+    assert resp.status_code == 422
+
+
+def test_deposito_predeterminado_de_una_sucursal_404(client):
+    resp = client.post("/api/sucursales/999/deposito-predeterminado", json={"deposito_id": 1})
+    assert resp.status_code == 404
+
+
+def test_deposito_de_venta_repara_una_sucursal_de_antes_de_la_invariante(client, abrir):
+    """Una sucursal creada sin `default_location_id` (datos de antes de la Fase 0.5, o un producto que
+    migró) igual resuelve su depósito de venta: el activo de menor id."""
+    s = _crear_sucursal(client, "Vieja")
+    with abrir() as conn:
+        conn.execute("UPDATE branches SET default_location_id=NULL WHERE id=?", (s["id"],))
+    with abrir() as conn:
+        assert catalogo.get_deposito_de_venta(conn, s["id"]) == s["deposito_predeterminado_id"]
+
+
+def test_deposito_de_venta_de_una_sucursal_inexistente_es_none(abrir):
+    with abrir() as conn:
+        assert catalogo.get_deposito_de_venta(conn, 999) is None
+
+
+# ── Hallazgos de la revisión de Codex (2026-09-28) ────────────────────────
+
+
+def test_la_baja_mira_el_saldo_de_cada_variante_y_no_el_total_del_producto(client, abrir):
+    """+5 de una variante y -5 de otra suman 0 a nivel producto pero son existencias distintas de cero: la
+    baja no puede dejarlas invisibles."""
+    s = _crear_sucursal(client, "Con variantes")
+    did = s["deposito_predeterminado_id"]
+    p = client.post("/api/productos", json={"nombre": "Remera", "precio_venta": 10.0, "precio_costo": 5.0}).json()
+    va = client.post(f"/api/productos/{p['id']}/variantes", json={"sku": "R-A", "nombre": "A"}).json()
+    vb = client.post(f"/api/productos/{p['id']}/variantes", json={"sku": "R-B", "nombre": "B"}).json()
+    ajuste = client.post(f"/api/stock/{p['id']}/ajuste", json={
+        "modo": "entrada", "cantidad": 5, "deposito_id": did, "variant_id": va["id"]})
+    assert ajuste.status_code == 200, ajuste.text
+    with abrir() as conn:
+        repositorio_de(conn).append_stock_movement(StockMovement(
+            None, p["id"], did, StockMovementType.ADJUSTMENT, Decimal("-5"), datetime(2026, 9, 28, 10, 0),
+            variant_id=vb["id"],
+        ))
+    resp = client.put(f"/api/sucursales/{s['id']}", json={"nombre": "X", "activa": False})
+    assert resp.status_code == 422
+    assert "existencias" in resp.json()["detail"]
+
+
+def test_las_respuestas_de_deposito_traen_la_sucursal(client):
+    s = _crear_sucursal(client, "Dueña")
+    suelto = _crear_deposito(client, "Suelto")
+    extra = _crear_deposito(client, "Extra", branch_id=s["id"])
+    assert suelto["branch_id"] is None
+    assert extra["branch_id"] == s["id"]
+    por_id = {d["id"]: d for d in client.get("/api/depositos").json()}
+    assert por_id[extra["id"]]["branch_id"] == s["id"]
+    assert por_id[s["deposito_predeterminado_id"]]["branch_id"] == s["id"]
+    assert por_id[suelto["id"]]["branch_id"] is None

@@ -87,12 +87,14 @@ def _deposito_dict(row) -> dict:
         # `locations.location_type`: el motor no lo interpreta; lo usa un producto
         # con sucursales y depósitos (VentaLibra: `store`/`warehouse`).
         "tipo": row["location_type"],
+        # `locations.branch_id`: la sucursal del depósito (`None` en un producto sin sucursales).
+        "branch_id": row["branch_id"],
     }
 
 
 def get_all_depositos(conn) -> list[dict]:
     rows = conn.execute(
-        "SELECT id, name, description, active, is_default, created_at, location_type FROM locations "
+        "SELECT id, name, description, active, is_default, created_at, location_type, branch_id FROM locations "
         "ORDER BY is_default DESC, name"
     ).fetchall()
     return [_deposito_dict(r) for r in rows]
@@ -100,7 +102,8 @@ def get_all_depositos(conn) -> list[dict]:
 
 def get_deposito(conn, did: int) -> dict | None:
     row = conn.execute(
-        "SELECT id, name, description, active, is_default, created_at, location_type FROM locations WHERE id=?",
+        "SELECT id, name, description, active, is_default, created_at, location_type, branch_id FROM locations "
+        "WHERE id=?",
         (did,),
     ).fetchone()
     return _deposito_dict(row) if row else None
@@ -137,12 +140,15 @@ def create_deposito(
     vocabulario: es del producto (`OpcionesDepositos.validar_alta`).
 
     `branch_id`, si se pasa, tiene que resolver a una sucursal existente y activa (`validar_sucursal`) —
-    un producto sin sucursales (Contalibra) nunca lo manda y sigue en `None`, como siempre."""
+    un producto sin sucursales (Contalibra) nunca lo manda y sigue en `None`, como siempre. Si esa sucursal
+    todavía no tenía depósito predeterminado, este pasa a serlo."""
     validar_sucursal(conn, branch_id)
     location = Location(None, nombre, branch_id=branch_id, description=descripcion)
     if tipo:
         location = replace(location, location_type=tipo)
     saved = repositorio_de(conn).save_location(location)
+    if branch_id is not None:
+        _asegurar_deposito_predeterminado(conn, branch_id)
     return saved.id
 
 
@@ -152,7 +158,11 @@ def update_deposito(conn, did: int, nombre: str, descripcion: str, activo: int):
     borrarlo). Sin esta guarda, `stock.py::add_movimiento_stock` seguía
     resolviendo el default vía `get_default_deposito_id` —que no mira
     `active`— y toda venta sin `deposito_id` explícito le seguía cargando
-    stock a un depósito que la pantalla mostraba como dado de baja."""
+    stock a un depósito que la pantalla mostraba como dado de baja.
+
+    🔴 **Tampoco el último depósito activo de una sucursal activa** (`_verificar_no_es_el_ultimo_deposito`):
+    toda sucursal declara como mínimo un depósito donde vive su stock. Si el que se desactiva era el
+    predeterminado de su sucursal, el predeterminado pasa a otro activo."""
     repo = repositorio_de(conn)
     location = repo.get_location(did)
     if location is None:
@@ -162,6 +172,9 @@ def update_deposito(conn, did: int, nombre: str, descripcion: str, activo: int):
             "No se puede desactivar el depósito por defecto: primero hay que "
             "marcar otro depósito como default."
         )
+    se_desactiva = location.active and not activo
+    if se_desactiva:
+        _verificar_no_es_el_ultimo_deposito(conn, location)
     repo.save_location(
         Location(
             id=did, name=nombre, branch_id=location.branch_id,
@@ -169,6 +182,8 @@ def update_deposito(conn, did: int, nombre: str, descripcion: str, activo: int):
             description=descripcion, is_default=location.is_default,
         )
     )
+    if location.branch_id is not None and (se_desactiva or (activo and not location.active)):
+        _asegurar_deposito_predeterminado(conn, location.branch_id)
 
 
 def set_default_deposito(conn, did: int):
@@ -194,7 +209,12 @@ def delete_deposito(conn, did: int):
     es_default = conn.execute("SELECT is_default FROM locations WHERE id=?", (did,)).fetchone()
     if es_default and es_default[0]:
         raise ValueError("No se puede eliminar el depósito por defecto.")
+    location = repositorio_de(conn).get_location(did)
+    if location is not None and location.active:
+        _verificar_no_es_el_ultimo_deposito(conn, location)
     conn.execute("DELETE FROM locations WHERE id=?", (did,))
+    if location is not None and location.branch_id is not None:
+        _asegurar_deposito_predeterminado(conn, location.branch_id)
 
 
 def get_stock_por_deposito(conn, deposito_id: int) -> list[dict]:
@@ -364,6 +384,7 @@ def _sucursal_dict(row) -> dict:
         "id": row["id"], "nombre": row["name"], "codigo": row["code"],
         "direccion": row["address"], "activa": bool(row["active"]),
         "es_default": bool(row["is_default"]),
+        "deposito_predeterminado_id": row["default_location_id"],
     }
 
 
@@ -371,7 +392,7 @@ def get_all_sucursales(conn, solo_activas: bool = False) -> list[dict]:
     """Cada fila trae `depositos`: cuántos depósitos activos tiene, igual que
     `listar_sucursales` de LibraDesk — es lo que la pantalla necesita para no
     mostrar una sucursal sin ningún lugar donde cargar stock."""
-    sql = "SELECT id, name, code, address, active, is_default FROM branches"
+    sql = "SELECT id, name, code, address, active, is_default, default_location_id FROM branches"
     if solo_activas:
         sql += " WHERE active = 1"
     sql += " ORDER BY is_default DESC, name"
@@ -388,7 +409,7 @@ def get_all_sucursales(conn, solo_activas: bool = False) -> list[dict]:
 
 def get_sucursal(conn, sid: int) -> dict | None:
     row = conn.execute(
-        "SELECT id, name, code, address, active, is_default FROM branches WHERE id=?", (sid,)
+        "SELECT id, name, code, address, active, is_default, default_location_id FROM branches WHERE id=?", (sid,)
     ).fetchone()
     return _sucursal_dict(row) if row else None
 
@@ -415,20 +436,32 @@ def get_default_sucursal_id(conn) -> int | None:
     return row[0] if row else None
 
 
-def create_sucursal(conn, nombre: str, codigo: str = "", direccion: str = "") -> int:
-    """Crea sólo la sucursal — no crea un depósito. Un depósito se crea aparte
-    con `create_deposito(..., branch_id=sid)`, igual que en LibraDesk."""
+def create_sucursal(
+    conn, nombre: str, codigo: str = "", direccion: str = "",
+    deposito: str | None = None, deposito_tipo: str | None = None,
+) -> int:
+    """Crea la sucursal **y su primer depósito**, que queda como predeterminado: toda sucursal declara como
+    mínimo un depósito (decisión del humano, 2026-09-28) y el stock vive sólo en depósitos. Sin `deposito`, se
+    llama «Depósito <nombre de la sucursal>»; `deposito_tipo` es el `location_type` (el motor no valida el
+    vocabulario, es del producto)."""
+    nombre = nombre.strip()
     cur = conn.execute(
         "INSERT INTO branches (name, code, address) VALUES (?, ?, ?)",
-        (nombre.strip(), codigo, direccion),
+        (nombre, codigo, direccion),
     )
-    return cur.lastrowid
+    sid = cur.lastrowid
+    create_deposito(
+        conn, (deposito or "").strip() or f"Depósito {nombre}", tipo=deposito_tipo, branch_id=sid
+    )
+    return sid
 
 
 def update_sucursal(conn, sid: int, nombre: str, codigo: str, direccion: str, activo: int):
     """🔴 **No se puede desactivar la sucursal por defecto** (mismo criterio
-    que `update_deposito`) **ni una sucursal con algo vivo colgando** —ver
-    `_verificar_baja_de_sucursal`, portada literal de LibraDesk."""
+    que `update_deposito`) **ni una sucursal con existencias en sus depósitos** —ver
+    `_verificar_baja_de_sucursal`, portada de LibraDesk—. Al darla de baja se dan de baja también sus
+    depósitos; al reactivarla se reactiva su predeterminado, porque una sucursal activa siempre tiene al
+    menos un depósito activo."""
     actual = get_sucursal(conn, sid)
     if actual is None:
         raise ValueError("La sucursal no existe.")
@@ -437,41 +470,54 @@ def update_sucursal(conn, sid: int, nombre: str, codigo: str, direccion: str, ac
             "No se puede desactivar la sucursal por defecto: primero hay que "
             "marcar otra sucursal como default."
         )
-    if actual["activa"] and not activo:
+    se_desactiva = actual["activa"] and not activo
+    if se_desactiva:
         _verificar_baja_de_sucursal(conn, sid)
     conn.execute(
         "UPDATE branches SET name=?, code=?, address=?, active=? WHERE id=?",
         (nombre.strip(), codigo, direccion, int(activo), sid),
     )
+    if se_desactiva:
+        # La baja arrastra a sus depósitos (sin existencias, ya verificado): una sucursal inactiva con depósitos
+        # activos dejaría stock ofrecido en pantallas que ya no muestran la sucursal.
+        conn.execute("UPDATE locations SET active=0 WHERE branch_id=?", (sid,))
+    elif not actual["activa"] and activo:
+        _reactivar_deposito_de(conn, sid)
 
 
 def _verificar_baja_de_sucursal(conn, sucursal_id: int) -> None:
     """Se planta si la sucursal todavía tiene algo vivo colgando.
 
-    Portado literal de `_verificar_baja_de_sucursal` de LibraDesk
+    Portado de `_verificar_baja_de_sucursal` de LibraDesk
     (`app/services/comercial.py`), incluida la corrección del 2026-08-16: se
-    miran las EXISTENCIAS (pares item/depósito con saldo `<> 0`, no `> 0` —
-    un stock negativo tampoco es "nada que mover"), no sólo los depósitos
-    `active=1` — un depósito desactivado con stock adentro también cuenta. La
+    miran las EXISTENCIAS (ternas ítem/variante/depósito con saldo `<> 0`, no `> 0` —
+    un stock negativo tampoco es "nada que mover"), y un depósito desactivado
+    con stock adentro también cuenta.
+
+    🔵 **Diferencia con LibraDesk (ADR-013):** acá un depósito activo *vacío* ya no bloquea la baja. Con la
+    invariante «toda sucursal activa tiene un depósito activo» (`_verificar_no_es_el_ultimo_deposito`) esa
+    condición era imposible de cumplir —no se puede desactivar el último depósito antes que la sucursal ni
+    la sucursal antes que sus depósitos—; lo que protegía (que el stock no quede invisible) lo cubre el
+    chequeo de existencias, y `update_sucursal` da de baja los depósitos junto con la sucursal. La
     historia (`sales`/`purchase_orders`/`item_prices` con este `branch_id`)
     **no bloquea**: bloquear por eso haría imposible cerrar una sucursal que
     alguna vez vendió algo, nunca."""
     problemas = []
 
-    depositos = conn.execute(
-        "SELECT COUNT(*) AS n FROM locations WHERE branch_id=? AND active=1", (sucursal_id,)
+    es_default = conn.execute(
+        "SELECT COUNT(*) AS n FROM locations WHERE branch_id=? AND is_default=1", (sucursal_id,)
     ).fetchone()["n"]
-    if depositos:
-        problemas.append(f"{depositos} depósito(s) de stock activo(s)")
+    if es_default:
+        problemas.append("el depósito por defecto de la instancia")
 
     con_saldo = conn.execute(
         """
         SELECT COUNT(*) AS n FROM (
-            SELECT sm.item_id, sm.location_id
+            SELECT sm.item_id, sm.variant_id, sm.location_id
             FROM stock_movements sm
             JOIN locations l ON l.id = sm.location_id
             WHERE l.branch_id = ?
-            GROUP BY sm.item_id, sm.location_id
+            GROUP BY sm.item_id, sm.variant_id, sm.location_id
             HAVING SUM(sm.quantity_delta) <> 0
         ) x
         """,
@@ -483,9 +529,95 @@ def _verificar_baja_de_sucursal(conn, sucursal_id: int) -> None:
     if problemas:
         raise ValueError(
             "La sucursal todavía tiene " + " y ".join(problemas) + ". "
-            "Transferí el stock a otra sucursal y desactivá los depósitos antes "
-            "de dar de baja la sucursal."
+            "Transferí el stock a otra sucursal (y marcá otro depósito como default de la instancia, si "
+            "corresponde) antes de dar de baja la sucursal."
         )
+
+
+def _asegurar_deposito_predeterminado(conn, sucursal_id: int) -> None:
+    """Deja `branches.default_location_id` apuntando a un depósito ACTIVO de la sucursal: el que ya tenía, si
+    sigue siéndolo, y si no el activo de menor id (`NULL` si no queda ninguno)."""
+    fila = conn.execute(
+        "SELECT default_location_id FROM branches WHERE id=?", (sucursal_id,)
+    ).fetchone()
+    if fila is None:
+        return
+    actual = fila[0]
+    if actual is not None:
+        vigente = conn.execute(
+            "SELECT 1 FROM locations WHERE id=? AND branch_id=? AND active=1", (actual, sucursal_id)
+        ).fetchone()
+        if vigente:
+            return
+    nuevo = conn.execute(
+        "SELECT id FROM locations WHERE branch_id=? AND active=1 ORDER BY id LIMIT 1", (sucursal_id,)
+    ).fetchone()
+    conn.execute(
+        "UPDATE branches SET default_location_id=? WHERE id=?", (nuevo[0] if nuevo else None, sucursal_id)
+    )
+
+
+def _verificar_no_es_el_ultimo_deposito(conn, location) -> None:
+    """Levanta `ValueError` si `location` es el único depósito activo de una sucursal activa. Un depósito
+    sin sucursal, o de una sucursal ya dada de baja, no tiene esta guarda."""
+    if location.branch_id is None:
+        return
+    sucursal = get_sucursal(conn, location.branch_id)
+    if sucursal is None or not sucursal["activa"]:
+        return
+    otros = conn.execute(
+        "SELECT COUNT(*) FROM locations WHERE branch_id=? AND active=1 AND id<>?",
+        (location.branch_id, location.id),
+    ).fetchone()[0]
+    if not otros:
+        raise ValueError(
+            f"«{location.name}» es el único depósito activo de la sucursal «{sucursal['nombre']}»: "
+            "creá otro antes de quitarlo, o dá de baja la sucursal."
+        )
+
+
+def _reactivar_deposito_de(conn, sucursal_id: int) -> None:
+    """Al reactivar una sucursal: si quedó sin ningún depósito activo, reactiva el predeterminado (o el de
+    menor id) y, si no tuviera ninguno, crea uno."""
+    activos = conn.execute(
+        "SELECT COUNT(*) FROM locations WHERE branch_id=? AND active=1", (sucursal_id,)
+    ).fetchone()[0]
+    if not activos:
+        candidato = conn.execute(
+            "SELECT l.id FROM locations l JOIN branches b ON b.id = l.branch_id "
+            "WHERE l.branch_id=? ORDER BY (l.id = b.default_location_id) DESC, l.id LIMIT 1",
+            (sucursal_id,),
+        ).fetchone()
+        if candidato:
+            conn.execute("UPDATE locations SET active=1 WHERE id=?", (candidato[0],))
+        else:
+            nombre = get_sucursal(conn, sucursal_id)["nombre"]
+            create_deposito(conn, f"Depósito {nombre}", branch_id=sucursal_id)
+    _asegurar_deposito_predeterminado(conn, sucursal_id)
+
+
+def get_deposito_de_venta(conn, sucursal_id: int) -> int | None:
+    """El depósito del que descuenta una venta hecha en esta sucursal: su predeterminado si sigue activo, y
+    si no (datos de antes de esta invariante) el activo de menor id. `None` si la sucursal no existe o no
+    tiene ninguno activo — quien llama decide si eso es un error."""
+    if get_sucursal(conn, sucursal_id) is None:
+        return None
+    _asegurar_deposito_predeterminado(conn, sucursal_id)
+    return conn.execute("SELECT default_location_id FROM branches WHERE id=?", (sucursal_id,)).fetchone()[0]
+
+
+def set_deposito_predeterminado(conn, sucursal_id: int, deposito_id: int):
+    """Marca cuál de los depósitos de la sucursal es el de venta. Tiene que ser de esa sucursal y estar activo."""
+    if get_sucursal(conn, sucursal_id) is None:
+        raise ValueError("La sucursal no existe.")
+    fila = conn.execute(
+        "SELECT active FROM locations WHERE id=? AND branch_id=?", (deposito_id, sucursal_id)
+    ).fetchone()
+    if fila is None:
+        raise ValueError("El depósito no pertenece a esa sucursal.")
+    if not fila[0]:
+        raise ValueError("No se puede marcar como predeterminado un depósito inactivo: activalo primero.")
+    conn.execute("UPDATE branches SET default_location_id=? WHERE id=?", (deposito_id, sucursal_id))
 
 
 def set_default_sucursal(conn, sid: int):

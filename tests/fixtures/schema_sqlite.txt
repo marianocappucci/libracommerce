@@ -1,6 +1,6 @@
 # motor: sqlite
 
-## tablas (174)
+## tablas (175)
 actividad_log|accion|TEXT|NN|
 actividad_log|cambios|TEXT||
 actividad_log|descripcion|TEXT|NN|''
@@ -13,6 +13,7 @@ branches|active|INTEGER|NN|1
 branches|address|TEXT|NN|''
 branches|code|TEXT|NN|''
 branches|created_at|TEXT|NN|datetime('now','-3 hours')
+branches|default_location_id|INTEGER||
 branches|id|INTEGER||
 branches|is_default|INTEGER|NN|0
 branches|name|TEXT|NN|

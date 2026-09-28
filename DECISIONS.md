@@ -266,3 +266,46 @@ Contalibra base tiene que prender el sustrato, hoy apagado a propósito
 (`branch_id=None` hardcodeado, 9 consultas de listas de precio con
 `AND branch_id IS NULL` como invariante — prenderlo no es aditivo).
 Restolibra queda afuera mientras no adopte este motor.
+
+## ADR-013 — Toda sucursal activa tiene al menos un depósito activo, y uno es el de venta (2026-09-28)
+
+**Contexto.** La regla que originó ADR-012 —«toda sucursal declara como mínimo un
+depósito, y el stock vive sólo en depósitos»— quedó sin imponer en la Fase 0:
+`create_sucursal` no creaba depósito y nada protegía al último depósito de una
+sucursal; sólo estaba guardada la baja de la sucursal. Además, con varios
+depósitos por sucursal, «de cuál descuenta una venta» no tenía respuesta: la
+única marca (`locations.is_default`) es global a la instancia. Decisiones del
+humano (2026-09-28): el motor impone la invariante, y el depósito de venta es un
+**predeterminado por sucursal**, no «el de menor id».
+
+**Decisión.** `create_sucursal` crea la sucursal **y su primer depósito**
+(parámetros `deposito`/`deposito_tipo`; sin nombre, «Depósito <sucursal>»), que
+queda como predeterminado. `branches.default_location_id` guarda cuál es (sin FK,
+mismo criterio que `locations.branch_id`; la tabla es nueva en ADR-012 y no había
+salido en ningún tag, así que la columna entra en su `CREATE TABLE` y no en una
+migración). `get_deposito_de_venta(conn, sucursal_id)` lo resuelve y repara solo
+un predeterminado ausente o inactivo (el activo de menor id);
+`set_deposito_predeterminado` y `POST /api/sucursales/{id}/deposito-predeterminado`
+lo cambian. No se puede desactivar ni eliminar el **último depósito activo de una
+sucursal activa** (`update_deposito`/`delete_deposito`); si se quita el
+predeterminado, pasa a otro activo.
+
+**Diferencia deliberada con LibraDesk.** Esa invariante hace imposible su guarda
+«no se da de baja una sucursal con depósitos activos»: no se podría desactivar el
+último depósito antes que la sucursal, ni la sucursal antes que sus depósitos. Lo
+que esa guarda protegía —que el stock no quede invisible— lo cubre el chequeo de
+**existencias** (`<> 0`, incluidos los depósitos ya inactivos), que se conserva.
+Un depósito activo pero vacío ya no bloquea: **la baja de la sucursal da de baja
+sus depósitos**, y **reactivarla reactiva su predeterminado** (o el de menor id,
+o crea uno si no tuviera ninguno). La baja también se planta si la sucursal
+contiene el depósito por defecto de la instancia (`is_default`), que `update_deposito` no deja
+desactivar.
+
+**Consecuencias.** Las sucursales que ya existan sin depósito (datos de LibraDesk
+o de una migración) no se reparan solas: `get_deposito_de_venta` devuelve `None`
+para una sin ningún depósito activo y quien llama decide, y las pantallas ven
+`depositos = 0` en el listado. Al migrar VentaLibra y LibraDesk (fases siguientes)
+esas sucursales tienen que recibir su depósito en la propia migración. Un depósito
+sin sucursal (Contalibra, Restolibra) conserva exactamente las guardas de antes.
+`OpcionesSucursales.al_guardar` recibe la sucursal ya con su depósito
+(`deposito_predeterminado_id`).

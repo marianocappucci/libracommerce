@@ -151,7 +151,8 @@ class OpcionesSucursales:
     tiene sucursales (Contalibra) — mismo criterio que `OpcionesDepositos`.
 
     La baja de una sucursal ya trae su propia guarda (`catalogo._verificar_baja_de_sucursal`, portada de
-    LibraDesk): esto es sólo lo que un producto le agrega ENCIMA de esa guarda."""
+    LibraDesk): esto es sólo lo que un producto le agrega ENCIMA de esa guarda. `al_guardar` recibe la sucursal
+    con `deposito_predeterminado_id`: al crearla, el depósito que el motor ya le creó."""
 
     autorizar_escritura: Any = None
     validar_alta: Callable[["SucursalCreatePayload"], None] | None = None
@@ -209,6 +210,14 @@ class SucursalCreatePayload(BaseModel):
     nombre: str
     codigo: str = ""
     direccion: str = ""
+    #: El primer depósito de la sucursal (toda sucursal tiene uno). Vacío = «Depósito <nombre>».
+    deposito: str = ""
+    #: `location_type` del depósito que se crea con la sucursal. `None` = el default del dominio.
+    deposito_tipo: str | None = None
+
+
+class DepositoPredeterminadoPayload(BaseModel):
+    deposito_id: int
 
 
 class SucursalUpdatePayload(BaseModel):
@@ -666,7 +675,9 @@ def build_sucursales_router(
         if opt.validar_alta:
             opt.validar_alta(payload)
         with abrir() as conn:
-            sid = catalogo.create_sucursal(conn, nombre, payload.codigo, payload.direccion)
+            sid = catalogo.create_sucursal(
+                conn, nombre, payload.codigo, payload.direccion, payload.deposito, payload.deposito_tipo
+            )
             creada = catalogo.get_sucursal(conn, sid)
             if opt.al_guardar:
                 opt.al_guardar(creada)
@@ -699,6 +710,17 @@ def build_sucursales_router(
                 raise HTTPException(404, "Sucursal no encontrada")
             try:
                 catalogo.set_default_sucursal(conn, sid)
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
+            return catalogo.get_sucursal(conn, sid)
+
+    @router.post("/{sid}/deposito-predeterminado", dependencies=escribe)
+    def deposito_predeterminado(sid: int, payload: DepositoPredeterminadoPayload):
+        with abrir() as conn:
+            if not catalogo.get_sucursal(conn, sid):
+                raise HTTPException(404, "Sucursal no encontrada")
+            try:
+                catalogo.set_deposito_predeterminado(conn, sid, payload.deposito_id)
             except ValueError as e:
                 raise HTTPException(422, str(e)) from e
             return catalogo.get_sucursal(conn, sid)

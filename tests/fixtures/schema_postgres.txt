@@ -1,6 +1,6 @@
 # motor: postgresql
 
-## tablas (174)
+## tablas (175)
 actividad_log|accion|text|NN|
 actividad_log|cambios|text||
 actividad_log|descripcion|text|NN|''::text
@@ -13,6 +13,7 @@ branches|active|integer|NN|1
 branches|address|text|NN|''::text
 branches|code|text|NN|''::text
 branches|created_at|text|NN|to_char(((CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text) + '-03:00:00'::interval), 'YYYY-MM-DD HH24:MI:SS'::text)
+branches|default_location_id|integer||
 branches|id|bigint|NN|nextval('branches_id_seq'::regclass)
 branches|is_default|integer|NN|0
 branches|name|text|NN|

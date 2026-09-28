@@ -115,6 +115,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             address TEXT NOT NULL DEFAULT '',
             active INTEGER NOT NULL DEFAULT 1,
             is_default INTEGER NOT NULL DEFAULT 0,
+            default_location_id INTEGER,
             created_at TEXT NOT NULL DEFAULT (datetime('now','-3 hours'))
         );
 
