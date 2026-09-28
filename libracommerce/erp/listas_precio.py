@@ -95,6 +95,23 @@ def update_lista_precio(conn, lista_id: int, nombre: str, descripcion: str, acti
     )
 
 
+def set_lista_precio_default(conn, lista_id: int) -> None:
+    """🔴 **No se puede marcar como default una lista inactiva** — mismo
+    motivo que `catalogo.set_default_deposito`: `resolve_price` sin
+    `price_list_id` explícito filtra por `is_default=1 AND active=1`, así
+    que un default inactivo dejaría a `resolve_price` sin ninguna lista (no
+    cae a la inactiva en silencio: simplemente no resuelve nada)."""
+    row = conn.execute("SELECT active FROM price_lists WHERE id=?", (lista_id,)).fetchone()
+    if row is not None and not row[0]:
+        raise ValueError(
+            "No se puede marcar como predeterminada una lista inactiva: activala primero."
+        )
+    # El índice único parcial de `price_lists` no admite dos defaults a la
+    # vez, así que primero se limpia el anterior y recién después se marca el nuevo.
+    conn.execute("UPDATE price_lists SET is_default=0")
+    conn.execute("UPDATE price_lists SET is_default=1 WHERE id=?", (lista_id,))
+
+
 def delete_lista_precio(conn, lista_id: int):
     # `item_prices` no tiene ON DELETE CASCADE hacia `price_lists`: se borra a
     # mano, que es lo que hacía la tabla vieja (eliminar la lista eliminaba sus precios).
@@ -254,6 +271,18 @@ def get_precios_vigentes(conn, producto_id: int, lista_id: int | None = None) ->
     if lista_id is not None:
         precios = [p for p in precios if p.price_list_id == lista_id]
     return [_item_price_dict(p) for p in precios]
+
+
+def delete_precio_vigente(conn, producto_id: int, vigencia_id: int) -> bool:
+    """Da de baja una fila puntual de `item_prices` (una promoción con
+    vigencia) -- `set_precio_vigente` sólo sabe insertar, nunca reemplaza una
+    fila existente, así que cancelar una promoción antes de que venza natural-
+    mente necesita esto. Devuelve `False` si no existía (o era de otro
+    producto: `item_id` va en el `WHERE`, no confía en que el id alcance)."""
+    cur = conn.execute(
+        "DELETE FROM item_prices WHERE id=? AND item_id=?", (vigencia_id, producto_id),
+    )
+    return cur.rowcount > 0
 
 
 # ── Escritura del flat ───────────────────────────────────────────────────
