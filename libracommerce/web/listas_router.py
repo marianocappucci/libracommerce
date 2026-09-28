@@ -143,6 +143,16 @@ def build_listas_precio_router(
             lp.delete_lista_precio(conn, lista_id)
         return {"ok": True}
 
+    @router.post("/{lista_id}/set-default")
+    def set_default(lista_id: int):
+        with abrir() as conn:
+            _exigir(conn, lista_id)
+            try:
+                lp.set_lista_precio_default(conn, lista_id)
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
+            return lp.get_lista_precio(conn, lista_id)
+
     @router.get("/{lista_id}/items")
     def items(lista_id: int, categoria: str = ""):
         with abrir() as conn:
@@ -273,6 +283,13 @@ def build_precios_vigentes_router(
     def listar(producto_id: int, lista_id: int | None = None):
         with abrir() as conn:
             return lp.get_precios_vigentes(conn, producto_id, lista_id=lista_id)
+
+    @router.delete("/items/{producto_id}/vigencias/{vigencia_id}")
+    def borrar(producto_id: int, vigencia_id: int):
+        with abrir() as conn:
+            if not lp.delete_precio_vigente(conn, producto_id, vigencia_id):
+                raise HTTPException(404, "No se encontró esa vigencia para este producto.")
+        return {"ok": True}
 
     return router
 

@@ -71,6 +71,35 @@ def test_crud_de_listas(client):
     assert client.get("/api/listas-precio/999/items").status_code == 404
 
 
+def test_set_default_marca_una_sola_lista_a_la_vez(client):
+    a = _lista(client, "A")
+    b = _lista(client, "B")
+    assert not a["es_default"] and not b["es_default"]
+
+    r = client.post(f"/api/listas-precio/{a['id']}/set-default")
+    assert r.status_code == 200, r.text
+    assert r.json()["es_default"]
+    listas = {x["id"]: x["es_default"] for x in client.get("/api/listas-precio").json()}
+    assert listas[a["id"]] and not listas[b["id"]]
+
+    # Marcar B le saca el default a A -- nunca dos a la vez (índice único parcial).
+    client.post(f"/api/listas-precio/{b['id']}/set-default")
+    listas = {x["id"]: x["es_default"] for x in client.get("/api/listas-precio").json()}
+    assert listas[b["id"]] and not listas[a["id"]]
+
+
+def test_no_se_puede_predeterminar_una_lista_inactiva(client):
+    lista = _lista(client)
+    client.put(f"/api/listas-precio/{lista['id']}", json={"nombre": lista["nombre"], "activa": False})
+    r = client.post(f"/api/listas-precio/{lista['id']}/set-default")
+    assert r.status_code == 422
+    assert "inactiva" in r.json()["detail"]
+
+
+def test_set_default_de_una_lista_inexistente_da_404(client):
+    assert client.post("/api/listas-precio/999/set-default").status_code == 404
+
+
 def test_items_guardar_y_borrar_con_precio_cero(client):
     p = _producto(client, "Fideos", categoria="Almacén")
     q = _producto(client, "Arroz")
@@ -270,3 +299,33 @@ def test_get_precios_vigentes(client, abrir):
     assert {f["monto"] for f in filas} == {90.0, 75.0}
     filas_lista = client.get(f"/api/listas-precio/items/{p['id']}/vigencias?lista_id={lista['id']}").json()
     assert len(filas_lista) == 2
+
+
+def test_borrar_una_vigencia_puntual(client):
+    """`set_precio_vigente` sólo inserta -- cancelar una promo antes de que
+    venza sola necesita un borrado explícito."""
+    p = _producto(client, "Fideos")
+    lista = _lista(client)
+    creada = client.post(f"/api/listas-precio/{lista['id']}/items/{p['id']}/precio-vigente",
+                         json={"monto": 50, "sucursal_id": 5}).json()
+
+    r = client.delete(f"/api/listas-precio/items/{p['id']}/vigencias/{creada['id']}")
+    assert r.status_code == 200, r.text
+
+    filas = client.get(f"/api/listas-precio/items/{p['id']}/vigencias").json()
+    assert creada["id"] not in {f["id"] for f in filas}
+
+
+def test_borrar_una_vigencia_inexistente_da_404(client):
+    p = _producto(client, "Fideos")
+    assert client.delete(f"/api/listas-precio/items/{p['id']}/vigencias/999").status_code == 404
+
+
+def test_borrar_una_vigencia_de_otro_producto_da_404(client):
+    """El `WHERE item_id=?` no deja borrar una vigencia ajena aunque se acierte el id."""
+    p = _producto(client, "Fideos")
+    otro = _producto(client, "Arroz")
+    lista = _lista(client)
+    creada = client.post(f"/api/listas-precio/{lista['id']}/items/{p['id']}/precio-vigente",
+                         json={"monto": 50, "sucursal_id": 5}).json()
+    assert client.delete(f"/api/listas-precio/items/{otro['id']}/vigencias/{creada['id']}").status_code == 404

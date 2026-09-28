@@ -182,3 +182,36 @@ monta sin gate (módulo siempre libre) y gana la card "Lista de precios
 lista con la prop `conListaDePrecio`, apagada por falta de este endpoint. Si
 Restolibra alguna vez vende por volumen, monta el mismo router sin escribir
 nada nuevo.
+
+## ADR-011 — Listas de precio: marcar una como predeterminada, cerrando una capacidad muerta desde P9-M2 (2026-09-28)
+
+**Contexto.** `repository.resolve_price` ya sabía resolver sin `price_list_id`
+explícito cayendo a la lista `is_default=1 AND active=1` (probado desde
+`test_repository.py`), pero **nunca hubo forma de marcar una lista como
+default**: `create_lista_precio` no la setea y `update_lista_precio` sólo la
+preserva. Hallazgo hecho investigando el roadmap de producto de VentaLibra
+(promociones y combos): ningún producto de la familia usa `resolve_price` sin
+pasar el `lista_id` a mano, así que esa rama de código estaba escrita, probada
+al nivel del repositorio, y completamente inalcanzable desde la capa HTTP.
+
+**Decisión.** `erp.listas_precio.set_lista_precio_default(conn, lista_id)` y
+`POST /{lista_id}/set-default` en `build_listas_precio_router`, mismo patrón
+exacto que `catalogo.set_default_deposito`/`POST /{did}/set-default` de este
+mismo repo: limpia el default anterior antes de marcar el nuevo (el índice
+único parcial de `price_lists` no admite dos a la vez), y no deja marcar como
+default una lista inactiva (dejaría a `resolve_price` sin ninguna lista que
+resolver, no cae en silencio a la inactiva).
+
+**Consecuencias.** Recién con esto un producto puede, por primera vez,
+resolver "el precio de este producto ahora" sin conocer de antemano el id de
+una lista — la pieza que faltaba para que un carrito (POS) consulte precio por
+cantidad y vigencia en vivo. VentaLibra es quien lo va a consumir primero (ver
+su propio `DECISIONS.md`); Contalibra y Restolibra no se tocan.
+
+De paso, mismo hallazgo de "capacidad escrita y nunca alcanzable": `set_precio_
+vigente` sólo sabía insertar (nunca reemplazaba una fila de `item_prices`
+existente), así que no había forma de cancelar una promoción con vigencia
+antes de que venciera sola. Se agrega `erp.listas_precio.delete_precio_
+vigente(conn, producto_id, vigencia_id)` y `DELETE /items/{producto_id}/
+vigencias/{vigencia_id}`, con `item_id` en el `WHERE` (no alcanza con acertar
+el id: tiene que ser del producto que dice la URL).
