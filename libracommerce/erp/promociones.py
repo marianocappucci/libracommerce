@@ -30,7 +30,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from .listas_precio import a_hora_local
+from .listas_precio import _ZONA_LOCAL, a_hora_local
 
 TIPO_NXM = "nxm"
 TIPO_COMBO = "combo"
@@ -69,7 +69,19 @@ def _validar(tipo: str, items: list[dict], paga, precio, desde: str, hasta: str)
             raise ValueError("un combo necesita al menos dos productos distintos")
         if precio is None or _dec(precio) <= 0:
             raise ValueError("el combo necesita un precio mayor a 0")
-    if desde and hasta and datetime.fromisoformat(hasta) <= datetime.fromisoformat(desde):
+    # Cada cota se parsea por separado: una sola mal escrita (`desde` o `hasta`, sin la otra) se
+    # guardaba y después rompía `calcular`, que parsea todas las promociones activas en cada venta.
+    cotas = {}
+    for nombre_cota, valor in (("desde", desde), ("hasta", hasta)):
+        if not valor:
+            continue
+        try:
+            cotas[nombre_cota] = datetime.fromisoformat(valor)
+        except ValueError:
+            raise ValueError(
+                f"la fecha '{nombre_cota}' no es válida: {valor!r} (usar AAAA-MM-DDTHH:MM)"
+            ) from None
+    if len(cotas) == 2 and cotas["hasta"] <= cotas["desde"]:
         raise ValueError("la vigencia termina antes de empezar")
 
 
@@ -186,7 +198,12 @@ def calcular(conn, lineas: list[dict], *, en: str = "") -> dict:
 
     Devuelve `{"aplicadas": [{promocion_id, nombre, veces, ahorro}], "ahorro": total}`.
     """
-    momento = a_hora_local(datetime.fromisoformat(en)) if en else datetime.now()
+    # Sin `en`, "ahora" es la hora de Argentina y no la del proceso: en un contenedor sin `TZ`
+    # (UTC) una promoción de 18 a 20 hs se evaluaría 3 horas corrida, igual que el bug de precios.
+    momento = (
+        a_hora_local(datetime.fromisoformat(en)) if en
+        else datetime.now(_ZONA_LOCAL).replace(tzinfo=None)
+    )
 
     disponible: dict[int, Decimal] = {}
     importe: dict[int, Decimal] = {}
