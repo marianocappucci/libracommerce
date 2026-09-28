@@ -14,7 +14,7 @@ Cada función recibe la conexión; las formas de los dicts son las históricas.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from libracommerce.db.repository import repositorio_de
@@ -22,6 +22,24 @@ from libracommerce.domain.catalog import ItemPrice, PriceList
 
 #: "Sin restricción de fecha de inicio", para todo lo que este módulo escribe.
 _SIN_VIGENCIA = "2000-01-01T00:00:00"
+
+#: Argentina no tiene horario de verano desde 2009: un desfase fijo evita depender
+#: de que la imagen del contenedor traiga la base de zonas horarias.
+_ZONA_LOCAL = timezone(timedelta(hours=-3))
+
+
+def a_hora_local(momento: datetime) -> datetime:
+    """Un instante con zona (`...Z`, lo que manda `new Date().toISOString()`) pasa
+    a la hora de pared de Argentina, sin zona.
+
+    🔴 Las vigencias se guardan como texto **sin zona y en hora local** (lo que
+    carga un `datetime-local`) y `resolve_price` compara texto contra texto. Un
+    `en` en UTC quedaba 3 horas adelantado: una promoción de 18 a 20 hs se
+    activaba a las 15. Uno sin zona se deja tal cual.
+    """
+    if momento.tzinfo is None:
+        return momento
+    return momento.astimezone(_ZONA_LOCAL).replace(tzinfo=None)
 
 
 def _lista_dict(row) -> dict:
@@ -235,7 +253,7 @@ def precio_vigente(conn, item_id: int, *, lista_id: int | None = None, cantidad:
         variante = repositorio_de(conn).get_item_variant(variante_id)
         if variante is None or variante.item_id != item_id:
             raise ValueError(f"la variante {variante_id} no pertenece al producto {item_id}")
-    momento = datetime.fromisoformat(en) if en else None
+    momento = a_hora_local(datetime.fromisoformat(en)) if en else None
     precio = repositorio_de(conn).resolve_price(
         item_id, price_list_id=lista_id, quantity=Decimal(str(cantidad)),
         at=momento, branch_id=sucursal_id,
