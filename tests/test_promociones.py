@@ -5,6 +5,7 @@ Contra los dos motores (`abrir_ventas`)."""
 from __future__ import annotations
 
 import datetime
+from datetime import timezone
 
 import pytest
 from conftest import USUARIO, _usuario
@@ -340,3 +341,44 @@ def test_la_promocion_se_deshace_junto_con_la_venta_si_esta_falla(abrir_ventas):
     assert r.status_code == 422
     with abrir_ventas() as conn:
         assert conn.execute("SELECT COUNT(*) FROM sale_promotions").fetchone()[0] == 0
+
+
+# ── v0.25.1: los dos hallazgos de la revisión de Codex sobre #110 ────────
+
+@pytest.mark.parametrize("cota", ["desde", "hasta"])
+def test_una_sola_cota_mal_escrita_se_rechaza_y_no_rompe_el_calculo(client, cota):
+    """Antes sólo se parseaban si venían las dos: `desde="mañana"` solo se guardaba y después
+    `calcular` (que parsea todas las activas en cada venta) reventaba con un 500."""
+    pid = _producto(client, "Alfajor")
+    r = client.post("/api/promociones", json={
+        "nombre": "x", "tipo": "nxm", "paga": 1, "items": [{"producto_id": pid, "cantidad": 2}],
+        cota: "mañana"})
+    assert r.status_code == 422 and cota in r.json()["detail"]
+    assert client.get("/api/promociones").json() == []
+    assert _calcular(client, [_linea(pid, 2)])["ahorro"] == 0
+
+
+def test_una_cota_mal_escrita_tambien_se_rechaza_al_actualizar(client):
+    pid = _producto(client, "Alfajor")
+    promo = _nxm(client, pid)
+    r = client.put(f"/api/promociones/{promo['id']}", json={
+        "nombre": "x", "tipo": "nxm", "paga": 1, "items": [{"producto_id": pid, "cantidad": 2}],
+        "hasta": "2026-13-45"})
+    assert r.status_code == 422
+    assert _calcular(client, [_linea(pid, 2)])["ahorro"] == 100.0
+
+
+def test_sin_en_ahora_es_la_hora_de_argentina_aunque_el_proceso_este_en_utc(client, monkeypatch):
+    """Un servidor en UTC a las 22:00Z (19:00 en Argentina) está DENTRO de una promo de 18 a 20 hs."""
+    from libracommerce.erp import promociones as modulo
+
+    class _RelojEnUtc(datetime.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            instante = datetime.datetime(2026, 9, 28, 22, 0, 0, tzinfo=datetime.UTC)
+            return instante.astimezone(tz) if tz else instante.replace(tzinfo=None)
+
+    monkeypatch.setattr(modulo, "datetime", _RelojEnUtc)
+    pid = _producto(client, "Alfajor")
+    _nxm(client, pid, desde="2026-09-28T18:00:00", hasta="2026-09-28T20:00:00")
+    assert _calcular(client, [_linea(pid, 2)])["ahorro"] == 100.0
