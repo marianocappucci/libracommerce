@@ -117,3 +117,34 @@ Verificado que LibraCore no importa este motor en runtime, así que el extra
 tratarlo como el producto principal mientras dure. Cada módulo (M1..M4) entra
 con tres PR —motor, libra-ui, adopción— y el gate es la suite de cada producto
 sin tocar.
+
+## ADR-009 — Actualización masiva de precios: recalcular el margen, nunca aceptar el precio ya calculado (2026-09-28)
+
+**Contexto.** Primer ítem del roadmap de producto de VentaLibra (no una
+adopción de Contalibra/Restolibra: no existía en ningún producto de la
+familia, ver `wiki/analyses/ventalibra-gaps-despensa.md`). Un proveedor manda
+una planilla con costos nuevos; decisión del humano (2026-09-28): el precio de
+venta se recalcula solo, manteniendo el margen que cada producto ya tenía —no
+todos los proveedores mandan un precio de venta sugerido, y lo que hay que
+conservar es el margen que el dueño ya venía aplicando.
+
+**Decisión.** `erp.actualizacion_masiva.calcular(conn, filas)` es la única
+fuente de verdad del cálculo (no escribe nada); `aplicar(conn,
+actualizaciones)` escribe exactamente lo que `calcular` devolvió, reutilizando
+`catalogo.update_producto` fila por fila —una actualización masiva es, para el
+motor, una `PUT` por producto, no un camino paralelo. El router
+(`web/planillas_router.build_actualizacion_precios_router`) **no acepta del
+cliente una lista de precios ya resueltos**: los dos endpoints (`/preview` y
+`/aplicar`) reciben la MISMA planilla y recalculan desde cero, así que
+`aplicar` nunca puede escribir un número que no salga de recalcular el margen,
+y una edición manual hecha entre la vista previa y el clic de aplicar se lee
+fresca. `openpyxl` entra por un extra nuevo, `[planillas]`, separado de
+`[web]`: sólo este router lo necesita, y sumarlo a `[web]` se lo impondría a
+cualquier producto que monte cualquier otra factory de esa capa.
+
+**Consecuencias.** Un producto con `precio_costo=0` (recién creado, sin costo
+cargado todavía) no tiene margen del que partir: la actualización masiva le
+cambia el costo pero no toca el precio de venta, y lo marca (`margen_calculado
+= False`) para que la pantalla lo distinga. El matcheo es por cualquier código
+del producto (`item_codes`, no sólo el principal): una planilla con el código
+de barra de una presentación secundaria también encuentra el producto.
