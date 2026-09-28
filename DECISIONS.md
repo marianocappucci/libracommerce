@@ -216,7 +216,101 @@ vigente(conn, producto_id, vigencia_id)` y `DELETE /items/{producto_id}/
 vigencias/{vigencia_id}`, con `item_id` en el `WHERE` (no alcanza con acertar
 el id: tiene que ser del producto que dice la URL).
 
-## ADR-012 — Promociones: "llevá N pagá M" y combos como pieza del motor (2026-09-28)
+## ADR-012 — Sucursal es una tabla propia del motor (`branches`), no una columna de producto (2026-09-28)
+
+**Contexto.** El humano encontró, revisando VentaLibra, dos modelos
+incompatibles conviviendo en la familia: VentaLibra (PR `ventalibra#314`,
+2026-09-26) modela sucursal y depósito como pares planos del mismo
+`locations.location_type` (`store`/`warehouse`), sin jerarquía — cualquiera
+puede tener stock. [[libradesk]] (capa de producto sobre Contalibra,
+2026-08-14) ya tenía construida la jerarquía real: una tabla `sucursales`
+propia del producto, con `locations.branch_id` apuntando a ella (columna
+suelta del motor desde Fase 4, sin FK — Contalibra la deja en `NULL`
+siempre). Decisión del humano: el modelo de LibraDesk queda como estándar,
+y sube al motor para que los cuatro consumidores lo reciban en vez de que
+cada uno lo porte por su cuenta — mismo criterio que la convergencia de
+`verificar_disponibilidad()`/`transfer_stock()` (ver
+`wiki/analyses/donde-vive-el-stock-familia-libra.md`). Detalle completo y
+las fuentes cruzadas: `wiki/analyses/jerarquia-sucursal-deposito-libracommerce.md`.
+
+Se evaluaron dos caminos: (A) auto-referencial sobre `locations` (una fila
+`location_type='store'` ES la sucursal, sin tabla nueva) o (B) una tabla
+`branches` propia, con `locations.branch_id` apuntando a ella. El humano
+eligió (B): sucursal y depósito son tipos de entidad distintos, no la misma
+tabla con un flag, y es el modelo que LibraDesk ya tiene probado en
+producción.
+
+**Decisión.** Tabla `branches` nueva (`id`, `name`, `code`, `address`,
+`active`, `is_default`, `created_at`), puramente aditiva — no migra ninguna
+tabla existente. `locations.branch_id` sigue **sin FK real** contra
+`branches.id`: es la misma columna suelta que ya existía desde Fase 4 (ahora
+con contenido del otro lado), y agregarle la FK es una migración de datos
+sobre las bases ya desplegadas de Contalibra/VentaLibra/LibraDesk, fuera de
+este alcance. `erp.catalogo` gana la sección "Sucursales"
+(`create_sucursal`/`update_sucursal`/`validar_sucursal`/...), con
+`_verificar_baja_de_sucursal` portada **literal** de
+`libradesk/app/services/comercial.py::_verificar_baja_de_sucursal` —incluida
+su corrección del 2026-08-16 (mira existencias `<> 0`, no sólo depósitos
+`active=1`)—, y `web/catalogo_router.build_sucursales_router` con
+`OpcionesSucursales`, mismo patrón de extensión que `OpcionesDepositos`.
+`create_deposito` suma un `branch_id` opcional, validado contra `branches`.
+Un producto que no monta el router (Contalibra) sigue exactamente igual que
+antes.
+
+**Consecuencias.** Esto es sólo el motor (fase 0 de la migración). Quedan
+afuera, cada uno su propia tanda con datos reales: (1) VentaLibra tiene que
+migrar del modelo plano de `location_type` al jerárquico sin perder el
+historial de stock de dev/demo; (2) LibraDesk tiene que migrar su tabla
+`sucursales` de producto a la del motor, sin duplicar el concepto; (3)
+Contalibra base tiene que prender el sustrato, hoy apagado a propósito
+(`branch_id=None` hardcodeado, 9 consultas de listas de precio con
+`AND branch_id IS NULL` como invariante — prenderlo no es aditivo).
+Restolibra queda afuera mientras no adopte este motor.
+
+## ADR-013 — Toda sucursal activa tiene al menos un depósito activo, y uno es el de venta (2026-09-28)
+
+**Contexto.** La regla que originó ADR-012 —«toda sucursal declara como mínimo un
+depósito, y el stock vive sólo en depósitos»— quedó sin imponer en la Fase 0:
+`create_sucursal` no creaba depósito y nada protegía al último depósito de una
+sucursal; sólo estaba guardada la baja de la sucursal. Además, con varios
+depósitos por sucursal, «de cuál descuenta una venta» no tenía respuesta: la
+única marca (`locations.is_default`) es global a la instancia. Decisiones del
+humano (2026-09-28): el motor impone la invariante, y el depósito de venta es un
+**predeterminado por sucursal**, no «el de menor id».
+
+**Decisión.** `create_sucursal` crea la sucursal **y su primer depósito**
+(parámetros `deposito`/`deposito_tipo`; sin nombre, «Depósito <sucursal>»), que
+queda como predeterminado. `branches.default_location_id` guarda cuál es (sin FK,
+mismo criterio que `locations.branch_id`; la tabla es nueva en ADR-012 y no había
+salido en ningún tag, así que la columna entra en su `CREATE TABLE` y no en una
+migración). `get_deposito_de_venta(conn, sucursal_id)` lo resuelve y repara solo
+un predeterminado ausente o inactivo (el activo de menor id);
+`set_deposito_predeterminado` y `POST /api/sucursales/{id}/deposito-predeterminado`
+lo cambian. No se puede desactivar ni eliminar el **último depósito activo de una
+sucursal activa** (`update_deposito`/`delete_deposito`); si se quita el
+predeterminado, pasa a otro activo.
+
+**Diferencia deliberada con LibraDesk.** Esa invariante hace imposible su guarda
+«no se da de baja una sucursal con depósitos activos»: no se podría desactivar el
+último depósito antes que la sucursal, ni la sucursal antes que sus depósitos. Lo
+que esa guarda protegía —que el stock no quede invisible— lo cubre el chequeo de
+**existencias** (`<> 0`, incluidos los depósitos ya inactivos), que se conserva.
+Un depósito activo pero vacío ya no bloquea: **la baja de la sucursal da de baja
+sus depósitos**, y **reactivarla reactiva su predeterminado** (o el de menor id,
+o crea uno si no tuviera ninguno). La baja también se planta si la sucursal
+contiene el depósito por defecto de la instancia (`is_default`), que `update_deposito` no deja
+desactivar.
+
+**Consecuencias.** Las sucursales que ya existan sin depósito (datos de LibraDesk
+o de una migración) no se reparan solas: `get_deposito_de_venta` devuelve `None`
+para una sin ningún depósito activo y quien llama decide, y las pantallas ven
+`depositos = 0` en el listado. Al migrar VentaLibra y LibraDesk (fases siguientes)
+esas sucursales tienen que recibir su depósito en la propia migración. Un depósito
+sin sucursal (Contalibra, Restolibra) conserva exactamente las guardas de antes.
+`OpcionesSucursales.al_guardar` recibe la sucursal ya con su depósito
+(`deposito_predeterminado_id`).
+
+## ADR-014 — Promociones: "llevá N pagá M" y combos como pieza del motor (2026-09-28)
 
 **Contexto.** Roadmap de producto de VentaLibra, segundo ítem: "promociones y
 combos". A diferencia de las listas de precio o el enganche cliente↔lista, no
@@ -259,3 +353,4 @@ promoción de 18 a 20 hs se activaba a las 15 en Argentina. Ahora un instante co
 zona se pasa a hora de Argentina antes de comparar (`a_hora_local`, desfase fijo
 de −3: no hay horario de verano y no se depende de la base de zonas de la
 imagen). Lo introdujo el cableado del POS de la tanda anterior (ADR-011).
+

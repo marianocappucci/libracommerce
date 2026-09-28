@@ -1,6 +1,6 @@
 # motor: postgresql
 
-## tablas (167)
+## tablas (175)
 actividad_log|accion|text|NN|
 actividad_log|cambios|text||
 actividad_log|descripcion|text|NN|''::text
@@ -9,6 +9,14 @@ actividad_log|entidad|text|NN|
 actividad_log|id|bigint|NN|nextval('actividad_log_id_seq'::regclass)
 actividad_log|ts|text|NN|
 actividad_log|usuario|text|NN|'Sistema'::text
+branches|active|integer|NN|1
+branches|address|text|NN|''::text
+branches|code|text|NN|''::text
+branches|created_at|text|NN|to_char(((CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text) + '-03:00:00'::interval), 'YYYY-MM-DD HH24:MI:SS'::text)
+branches|default_location_id|integer||
+branches|id|bigint|NN|nextval('branches_id_seq'::regclass)
+branches|is_default|integer|NN|0
+branches|name|text|NN|
 catalog_items|active|integer|NN|1
 catalog_items|category_id|integer||
 catalog_items|created_at|text|NN|to_char(((CURRENT_TIMESTAMP AT TIME ZONE 'UTC'::text) + '-03:00:00'::interval), 'YYYY-MM-DD HH24:MI:SS'::text)
@@ -169,8 +177,9 @@ units|code|text|NN|
 units|decimal_scale|integer|NN|0
 units|name|text|NN|
 
-## claves primarias (20)
+## claves primarias (21)
 actividad_log|PRIMARY KEY (id)
+branches|PRIMARY KEY (id)
 catalog_items|PRIMARY KEY (id)
 categories|PRIMARY KEY (id)
 commerce_settings|PRIMARY KEY (key)
@@ -215,11 +224,13 @@ stock_movements|stock_movements_item_id_fkey|FOREIGN KEY (item_id) REFERENCES ca
 stock_movements|stock_movements_location_id_fkey|FOREIGN KEY (location_id) REFERENCES locations(id)
 stock_movements|stock_movements_variant_id_fkey|FOREIGN KEY (variant_id) REFERENCES item_variants(id)
 
-## índices (40)
+## índices (42)
 actividad_log|actividad_log_pkey|CREATE UNIQUE INDEX actividad_log_pkey ON public.actividad_log USING btree (id)
 actividad_log|ix_actividad_log_accion|CREATE INDEX ix_actividad_log_accion ON public.actividad_log USING btree (accion)
 actividad_log|ix_actividad_log_entidad|CREATE INDEX ix_actividad_log_entidad ON public.actividad_log USING btree (entidad)
 actividad_log|ix_actividad_log_ts|CREATE INDEX ix_actividad_log_ts ON public.actividad_log USING btree (ts)
+branches|branches_pkey|CREATE UNIQUE INDEX branches_pkey ON public.branches USING btree (id)
+branches|idx_branches_one_default|CREATE UNIQUE INDEX idx_branches_one_default ON public.branches USING btree (is_default) WHERE (is_default = 1)
 catalog_items|catalog_items_pkey|CREATE UNIQUE INDEX catalog_items_pkey ON public.catalog_items USING btree (id)
 categories|categories_parent_id_name_key|CREATE UNIQUE INDEX categories_parent_id_name_key ON public.categories USING btree (parent_id, name)
 categories|categories_pkey|CREATE UNIQUE INDEX categories_pkey ON public.categories USING btree (id)
