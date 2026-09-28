@@ -57,3 +57,27 @@ def crear_venta_links(conn) -> None:
     y `turnos_caja` (LibraCore).
     """
     conn.execute(VENTA_LINKS_DDL)
+
+
+#: El `CREATE TABLE` de `cliente_lista_precio`, extraído de Contalibra
+#: (`app/db_mayorista.py`, add-on mayorista, P9-M2 lo había dejado atrás por
+#: error: sólo se llevó `price_lists`/`item_prices`, no el enganche con el
+#: cliente). Una fila por cliente —PK sobre `cliente_id`—, con las dos FK
+#: `ON DELETE CASCADE` para que la asociación se vaya sola si se borra el
+#: cliente o la lista, en vez de quedar colgada.
+CLIENTE_LISTA_PRECIO_DDL = """
+    CREATE TABLE IF NOT EXISTS cliente_lista_precio (
+        cliente_id INTEGER PRIMARY KEY REFERENCES clients(id) ON DELETE CASCADE,
+        lista_id   INTEGER NOT NULL REFERENCES price_lists(id) ON DELETE CASCADE
+    )
+"""
+
+
+def crear_cliente_lista_precio(conn) -> None:
+    """Crea `cliente_lista_precio` si no está. Idempotente.
+
+    La llama el `init_schema_propio()` de cada producto, **después** de los dos
+    motores: las FKs apuntan a `clients` (LibraCore) y a `price_lists`
+    (LibraCommerce). Mismo criterio que `crear_venta_links`.
+    """
+    conn.execute(CLIENTE_LISTA_PRECIO_DDL)

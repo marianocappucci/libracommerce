@@ -23,6 +23,18 @@ Remitos, que tienen cada uno su gate).
   `build_quiebres_router` siguen resolviendo exactamente igual que antes;
   `precio_por_cantidad` (`GET /{lista_id}/precio`) sólo cambia de comportamiento
   si se le pasan `sucursal_id`, `en` o `variante_id`.
+- `build_cliente_lista_router` (2026-09-28): la lista de precios asignada a un
+  cliente (`cliente_lista_precio`, `erp.schema.crear_cliente_lista_precio`).
+  Extraído del add-on mayorista de Contalibra (`app/db_mayorista.py` +
+  `app/web/api/mayorista.py`), que P9-M2 había dejado atrás por error —se
+  llevó `price_lists`/`item_prices` pero no este enganche—. Aparte de
+  `build_listas_precio_router` por el mismo motivo que los quiebres: el
+  producto lo gatea distinto (Contalibra, por el add-on `mayorista`; VentaLibra
+  no lo gatea, es un módulo siempre libre). Prefijo `/api/clientes`, no
+  `/api/listas-precio`: queda al lado del resto de la ficha del cliente. Existencia
+  del cliente contra `libracore.db.clients.get_client` directo, mismo patrón que
+  `ventas_router._nombre_de_cliente_default` — no un gancho, porque los dos
+  productos que lo montan ya usan el `clients.id` de LibraCore tal cual.
 """
 
 from collections.abc import Callable
@@ -81,6 +93,11 @@ class PrecioVigentePayload(BaseModel):
     cantidad_minima: float | None = None
 
 
+class ListaDeClientePayload(BaseModel):
+    #: `None` limpia la asignación (el cliente vuelve a cotizar con el precio base).
+    lista_id: int | None
+
+
 def build_listas_precio_router(
     *,
     conexion: Conexion | None = None,
@@ -125,6 +142,16 @@ def build_listas_precio_router(
             _exigir(conn, lista_id)
             lp.delete_lista_precio(conn, lista_id)
         return {"ok": True}
+
+    @router.post("/{lista_id}/set-default")
+    def set_default(lista_id: int):
+        with abrir() as conn:
+            _exigir(conn, lista_id)
+            try:
+                lp.set_lista_precio_default(conn, lista_id)
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
+            return lp.get_lista_precio(conn, lista_id)
 
     @router.get("/{lista_id}/items")
     def items(lista_id: int, categoria: str = ""):
@@ -256,6 +283,59 @@ def build_precios_vigentes_router(
     def listar(producto_id: int, lista_id: int | None = None):
         with abrir() as conn:
             return lp.get_precios_vigentes(conn, producto_id, lista_id=lista_id)
+
+    @router.delete("/items/{producto_id}/vigencias/{vigencia_id}")
+    def borrar(producto_id: int, vigencia_id: int):
+        with abrir() as conn:
+            if not lp.delete_precio_vigente(conn, producto_id, vigencia_id):
+                raise HTTPException(404, "No se encontró esa vigencia para este producto.")
+        return {"ok": True}
+
+    return router
+
+
+def build_cliente_lista_router(
+    *,
+    conexion: Conexion | None = None,
+    prefix: str = "/api/clientes",
+):
+    """La lista de precios asignada a un cliente: `GET`/`PUT
+    /api/clientes/{id}/lista-precio`. El producto la gatea al montarla (en
+    Contalibra, detrás del add-on `mayorista`); acá no hay gate, sólo el CRUD."""
+    abrir, _ = _deps(None, conexion)
+    router = APIRouter(prefix=prefix, tags=["cliente_lista_precio"])
+
+    def _exigir_cliente(cliente_id: int) -> None:
+        from libracore.db.clients import get_client
+
+        if not get_client(cliente_id):
+            raise HTTPException(404, "cliente no encontrado")
+
+    def _respuesta(conn, lista_id: int | None) -> dict:
+        return {
+            "lista_id": lista_id,
+            "lista": lp.get_lista_precio(conn, lista_id) if lista_id is not None else None,
+        }
+
+    @router.get("/{cliente_id}/lista-precio")
+    def obtener(cliente_id: int):
+        _exigir_cliente(cliente_id)
+        with abrir() as conn:
+            return _respuesta(conn, lp.get_lista_de_cliente(conn, cliente_id))
+
+    @router.put("/{cliente_id}/lista-precio")
+    def asignar(cliente_id: int, payload: ListaDeClientePayload):
+        _exigir_cliente(cliente_id)
+        with abrir() as conn:
+            if payload.lista_id is None:
+                lp.quitar_lista_de_cliente(conn, cliente_id)
+                return _respuesta(conn, None)
+            # La lista tiene que existir: sin este chequeo, la FK lo rechazaría
+            # con un 500 opaco en vez de un 422 que dice qué pasó.
+            if lp.get_lista_precio(conn, payload.lista_id) is None:
+                raise HTTPException(422, "la lista de precios no existe")
+            lp.set_lista_de_cliente(conn, cliente_id, payload.lista_id)
+            return _respuesta(conn, payload.lista_id)
 
     return router
 
