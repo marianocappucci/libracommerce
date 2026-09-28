@@ -148,3 +148,70 @@ cambia el costo pero no toca el precio de venta, y lo marca (`margen_calculado
 = False`) para que la pantalla lo distinga. El matcheo es por cualquier código
 del producto (`item_codes`, no sólo el principal): una planilla con el código
 de barra de una presentación secundaria también encuentra el producto.
+
+## ADR-010 — Lista de precios de un cliente: el enganche entra al motor, no sólo la lista (2026-09-28)
+
+**Contexto.** ADR-008/P9-M2 movió `price_lists`/`item_prices` a este motor,
+pero dejó afuera el enganche cliente→lista del add-on mayorista de Contalibra
+(`app/db_mayorista.py` + `app/web/api/mayorista.py`): una tabla
+`cliente_lista_precio` y su router quedaron como código propio de Contalibra,
+sin que VentaLibra tuviera dónde montar lo mismo pese a tener listas de precio
+propias desde F1 (2026-09-14). El pedido del humano fue explícito: no quiere
+dos formas de resolver esto, una por producto — si se corrige algo, tiene que
+impactar en el motor, sin importar que cada producto muestre una pantalla más
+o menos.
+
+**Decisión.** `erp.schema.crear_cliente_lista_precio` (mismo criterio que
+`crear_venta_links`, ADR-008: la tabla tiene FK a `clients` de LibraCore y a
+`price_lists` de este motor, así que vive en `erp/` y la crea el
+`init_schema_propio()` del producto, no una migración de este repo).
+`erp.listas_precio.get/set/quitar_lista_de_cliente` son la extracción literal
+de `db_mayorista.py`. `web.listas_router.build_cliente_lista_router` expone
+`GET`/`PUT /api/clientes/{id}/lista-precio`, aparte de
+`build_listas_precio_router` por el mismo motivo que los quiebres: cada
+producto lo gatea distinto. La existencia del cliente se resuelve contra
+`libracore.db.clients.get_client` directo (mismo patrón que
+`ventas_router._nombre_de_cliente_default`), no con un gancho nuevo: los dos
+productos que lo montan ya usan el `clients.id` de LibraCore sin traducir.
+
+**Consecuencias.** Contalibra retira `db_mayorista.py`/`mayorista.py` y monta
+esto con el mismo gate por add-on que ya tenía; su tabla `cliente_lista_precio`
+existente no se toca (mismo nombre, mismas columnas, mismas FK). VentaLibra lo
+monta sin gate (módulo siempre libre) y gana la card "Lista de precios
+(mayorista)" que la ficha del kit (`libra-ui/comercio/ClienteDetalle`) ya tenía
+lista con la prop `conListaDePrecio`, apagada por falta de este endpoint. Si
+Restolibra alguna vez vende por volumen, monta el mismo router sin escribir
+nada nuevo.
+
+## ADR-011 — Listas de precio: marcar una como predeterminada, cerrando una capacidad muerta desde P9-M2 (2026-09-28)
+
+**Contexto.** `repository.resolve_price` ya sabía resolver sin `price_list_id`
+explícito cayendo a la lista `is_default=1 AND active=1` (probado desde
+`test_repository.py`), pero **nunca hubo forma de marcar una lista como
+default**: `create_lista_precio` no la setea y `update_lista_precio` sólo la
+preserva. Hallazgo hecho investigando el roadmap de producto de VentaLibra
+(promociones y combos): ningún producto de la familia usa `resolve_price` sin
+pasar el `lista_id` a mano, así que esa rama de código estaba escrita, probada
+al nivel del repositorio, y completamente inalcanzable desde la capa HTTP.
+
+**Decisión.** `erp.listas_precio.set_lista_precio_default(conn, lista_id)` y
+`POST /{lista_id}/set-default` en `build_listas_precio_router`, mismo patrón
+exacto que `catalogo.set_default_deposito`/`POST /{did}/set-default` de este
+mismo repo: limpia el default anterior antes de marcar el nuevo (el índice
+único parcial de `price_lists` no admite dos a la vez), y no deja marcar como
+default una lista inactiva (dejaría a `resolve_price` sin ninguna lista que
+resolver, no cae en silencio a la inactiva).
+
+**Consecuencias.** Recién con esto un producto puede, por primera vez,
+resolver "el precio de este producto ahora" sin conocer de antemano el id de
+una lista — la pieza que faltaba para que un carrito (POS) consulte precio por
+cantidad y vigencia en vivo. VentaLibra es quien lo va a consumir primero (ver
+su propio `DECISIONS.md`); Contalibra y Restolibra no se tocan.
+
+De paso, mismo hallazgo de "capacidad escrita y nunca alcanzable": `set_precio_
+vigente` sólo sabía insertar (nunca reemplazaba una fila de `item_prices`
+existente), así que no había forma de cancelar una promoción con vigencia
+antes de que venciera sola. Se agrega `erp.listas_precio.delete_precio_
+vigente(conn, producto_id, vigencia_id)` y `DELETE /items/{producto_id}/
+vigencias/{vigencia_id}`, con `item_id` en el `WHERE` (no alcanza con acertar
+el id: tiene que ser del producto que dice la URL).

@@ -41,6 +41,37 @@ def get_all_listas_precio(conn, solo_activas: bool = False) -> list[dict]:
     return [_lista_dict(r) for r in rows]
 
 
+def get_lista_de_cliente(conn, cliente_id: int) -> int | None:
+    """El `lista_id` asignado al cliente, o `None` si no tiene ninguno.
+
+    Extraído del add-on mayorista de Contalibra (`app/db_mayorista.py`):
+    lo único que cambia es que recibe la conexión, mismo criterio que el
+    resto de este módulo. Necesita `cliente_lista_precio`
+    (`erp.schema.crear_cliente_lista_precio`)."""
+    row = conn.execute(
+        "SELECT lista_id FROM cliente_lista_precio WHERE cliente_id=?",
+        (cliente_id,),
+    ).fetchone()
+    return row["lista_id"] if row else None
+
+
+def set_lista_de_cliente(conn, cliente_id: int, lista_id: int) -> None:
+    """Asigna (o reasigna) la lista del cliente.
+
+    Upsert por `DELETE` + `INSERT` en una sola transacción, para no depender de
+    la sintaxis de `ON CONFLICT` (que difiere entre SQLite y PostgreSQL)."""
+    conn.execute("DELETE FROM cliente_lista_precio WHERE cliente_id=?", (cliente_id,))
+    conn.execute(
+        "INSERT INTO cliente_lista_precio (cliente_id, lista_id) VALUES (?,?)",
+        (cliente_id, lista_id),
+    )
+
+
+def quitar_lista_de_cliente(conn, cliente_id: int) -> None:
+    """Saca la asignación del cliente (vuelve a cotizar con el precio base)."""
+    conn.execute("DELETE FROM cliente_lista_precio WHERE cliente_id=?", (cliente_id,))
+
+
 def get_lista_precio(conn, lista_id: int) -> dict | None:
     row = conn.execute(
         "SELECT id, name, description, active, is_default, created_at FROM price_lists WHERE id=?",
@@ -62,6 +93,23 @@ def update_lista_precio(conn, lista_id: int, nombre: str, descripcion: str, acti
     repo.save_price_list(
         PriceList(id=lista_id, name=nombre, description=descripcion, active=bool(activa), is_default=lista.is_default)
     )
+
+
+def set_lista_precio_default(conn, lista_id: int) -> None:
+    """🔴 **No se puede marcar como default una lista inactiva** — mismo
+    motivo que `catalogo.set_default_deposito`: `resolve_price` sin
+    `price_list_id` explícito filtra por `is_default=1 AND active=1`, así
+    que un default inactivo dejaría a `resolve_price` sin ninguna lista (no
+    cae a la inactiva en silencio: simplemente no resuelve nada)."""
+    row = conn.execute("SELECT active FROM price_lists WHERE id=?", (lista_id,)).fetchone()
+    if row is not None and not row[0]:
+        raise ValueError(
+            "No se puede marcar como predeterminada una lista inactiva: activala primero."
+        )
+    # El índice único parcial de `price_lists` no admite dos defaults a la
+    # vez, así que primero se limpia el anterior y recién después se marca el nuevo.
+    conn.execute("UPDATE price_lists SET is_default=0")
+    conn.execute("UPDATE price_lists SET is_default=1 WHERE id=?", (lista_id,))
 
 
 def delete_lista_precio(conn, lista_id: int):
@@ -223,6 +271,18 @@ def get_precios_vigentes(conn, producto_id: int, lista_id: int | None = None) ->
     if lista_id is not None:
         precios = [p for p in precios if p.price_list_id == lista_id]
     return [_item_price_dict(p) for p in precios]
+
+
+def delete_precio_vigente(conn, producto_id: int, vigencia_id: int) -> bool:
+    """Da de baja una fila puntual de `item_prices` (una promoción con
+    vigencia) -- `set_precio_vigente` sólo sabe insertar, nunca reemplaza una
+    fila existente, así que cancelar una promoción antes de que venza natural-
+    mente necesita esto. Devuelve `False` si no existía (o era de otro
+    producto: `item_id` va en el `WHERE`, no confía en que el id alcance)."""
+    cur = conn.execute(
+        "DELETE FROM item_prices WHERE id=? AND item_id=?", (vigencia_id, producto_id),
+    )
+    return cur.rowcount > 0
 
 
 # ── Escritura del flat ───────────────────────────────────────────────────
