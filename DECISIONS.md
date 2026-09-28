@@ -148,3 +148,37 @@ cambia el costo pero no toca el precio de venta, y lo marca (`margen_calculado
 = False`) para que la pantalla lo distinga. El matcheo es por cualquier código
 del producto (`item_codes`, no sólo el principal): una planilla con el código
 de barra de una presentación secundaria también encuentra el producto.
+
+## ADR-010 — Lista de precios de un cliente: el enganche entra al motor, no sólo la lista (2026-09-28)
+
+**Contexto.** ADR-008/P9-M2 movió `price_lists`/`item_prices` a este motor,
+pero dejó afuera el enganche cliente→lista del add-on mayorista de Contalibra
+(`app/db_mayorista.py` + `app/web/api/mayorista.py`): una tabla
+`cliente_lista_precio` y su router quedaron como código propio de Contalibra,
+sin que VentaLibra tuviera dónde montar lo mismo pese a tener listas de precio
+propias desde F1 (2026-09-14). El pedido del humano fue explícito: no quiere
+dos formas de resolver esto, una por producto — si se corrige algo, tiene que
+impactar en el motor, sin importar que cada producto muestre una pantalla más
+o menos.
+
+**Decisión.** `erp.schema.crear_cliente_lista_precio` (mismo criterio que
+`crear_venta_links`, ADR-008: la tabla tiene FK a `clients` de LibraCore y a
+`price_lists` de este motor, así que vive en `erp/` y la crea el
+`init_schema_propio()` del producto, no una migración de este repo).
+`erp.listas_precio.get/set/quitar_lista_de_cliente` son la extracción literal
+de `db_mayorista.py`. `web.listas_router.build_cliente_lista_router` expone
+`GET`/`PUT /api/clientes/{id}/lista-precio`, aparte de
+`build_listas_precio_router` por el mismo motivo que los quiebres: cada
+producto lo gatea distinto. La existencia del cliente se resuelve contra
+`libracore.db.clients.get_client` directo (mismo patrón que
+`ventas_router._nombre_de_cliente_default`), no con un gancho nuevo: los dos
+productos que lo montan ya usan el `clients.id` de LibraCore sin traducir.
+
+**Consecuencias.** Contalibra retira `db_mayorista.py`/`mayorista.py` y monta
+esto con el mismo gate por add-on que ya tenía; su tabla `cliente_lista_precio`
+existente no se toca (mismo nombre, mismas columnas, mismas FK). VentaLibra lo
+monta sin gate (módulo siempre libre) y gana la card "Lista de precios
+(mayorista)" que la ficha del kit (`libra-ui/comercio/ClienteDetalle`) ya tenía
+lista con la prop `conListaDePrecio`, apagada por falta de este endpoint. Si
+Restolibra alguna vez vende por volumen, monta el mismo router sin escribir
+nada nuevo.
