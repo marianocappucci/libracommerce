@@ -141,13 +141,18 @@ def _schema_de_producto(conn):
     `sales`, y las semillas mínimas (usuario, caja, depósito)."""
     from libracore.db.schema import init_core_schema
 
-    from libracommerce.erp.schema import crear_cliente_lista_precio, crear_venta_links
+    from libracommerce.erp.schema import (
+        crear_cliente_lista_precio,
+        crear_promociones,
+        crear_venta_links,
+    )
     from libracommerce.erp.ventas import repuntar_fk_ventas_pagos
 
     init_core_schema(conn)
     init_schema(conn)
     crear_venta_links(conn)
     crear_cliente_lista_precio(conn)
+    crear_promociones(conn)
     conn.commit()
     assert repuntar_fk_ventas_pagos(conn) is True
     assert repuntar_fk_ventas_pagos(conn) is False  # idempotente

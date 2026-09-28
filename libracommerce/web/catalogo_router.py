@@ -145,6 +145,21 @@ class OpcionesDepositos:
     al_guardar: Callable[[dict], None] | None = None
 
 
+@dataclass(frozen=True)
+class OpcionesSucursales:
+    """Lo que un producto le agrega a las sucursales. Sin `build_sucursales_router` montado, un producto no
+    tiene sucursales (Contalibra) — mismo criterio que `OpcionesDepositos`.
+
+    La baja de una sucursal ya trae su propia guarda (`catalogo._verificar_baja_de_sucursal`, portada de
+    LibraDesk): esto es sólo lo que un producto le agrega ENCIMA de esa guarda. `al_guardar` recibe la sucursal
+    con `deposito_predeterminado_id`: al crearla, el depósito que el motor ya le creó."""
+
+    autorizar_escritura: Any = None
+    validar_alta: Callable[["SucursalCreatePayload"], None] | None = None
+    validar_edicion: Callable[["SucursalUpdatePayload", dict], None] | None = None
+    al_guardar: Callable[[dict], None] | None = None
+
+
 # ── Payloads (a nivel de módulo: FastAPI los resuelve por anotación) ─────
 
 
@@ -180,12 +195,36 @@ class DepositoCreatePayload(BaseModel):
     descripcion: str = ""
     #: `locations.location_type`, sólo al crear (el tipo no se cambia después). `None` = el default del dominio.
     tipo: str | None = None
+    #: `locations.branch_id`: la sucursal a la que pertenece este depósito. `None` = sin sucursal (Contalibra,
+    #: la mayoría de las instancias de un solo local).
+    branch_id: int | None = None
 
 
 class DepositoUpdatePayload(BaseModel):
     nombre: str
     descripcion: str = ""
     activo: bool = True
+
+
+class SucursalCreatePayload(BaseModel):
+    nombre: str
+    codigo: str = ""
+    direccion: str = ""
+    #: El primer depósito de la sucursal (toda sucursal tiene uno). Vacío = «Depósito <nombre>».
+    deposito: str = ""
+    #: `location_type` del depósito que se crea con la sucursal. `None` = el default del dominio.
+    deposito_tipo: str | None = None
+
+
+class DepositoPredeterminadoPayload(BaseModel):
+    deposito_id: int
+
+
+class SucursalUpdatePayload(BaseModel):
+    nombre: str
+    codigo: str = ""
+    direccion: str = ""
+    activa: bool = True
 
 
 class TransferenciaPayload(BaseModel):
@@ -479,7 +518,12 @@ def build_depositos_router(
         if opt.validar_alta:
             opt.validar_alta(payload)
         with abrir() as conn:
-            did = catalogo.create_deposito(conn, nombre, payload.descripcion.strip(), payload.tipo)
+            try:
+                did = catalogo.create_deposito(
+                    conn, nombre, payload.descripcion.strip(), payload.tipo, payload.branch_id
+                )
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
             creado = catalogo.get_deposito(conn, did)
             if opt.al_guardar:
                 opt.al_guardar(creado)
@@ -587,6 +631,101 @@ def _lado(conn, deposito_id: int, producto_id: int, variant_id: int | None) -> d
         "id": deposito_id, "nombre": deposito["nombre"] if deposito else f"#{deposito_id}",
         "stock": stock.get_stock_actual(conn, producto_id, deposito_id, variant_id),
     }
+
+
+# ── Sucursales ───────────────────────────────────────────────────────────
+
+
+def build_sucursales_router(
+    *,
+    conexion: Conexion | None = None,
+    usuario_actual: Callable[..., Any] | None = None,
+    prefix: str = "/api/sucursales",
+    opciones: OpcionesSucursales | None = None,
+):
+    """Sucursales, portado de LibraDesk (`app/services/comercial.py`) al motor. Un producto sin sucursales
+    (Contalibra) no lo monta y `locations.branch_id` sigue en `None` siempre, como hasta ahora.
+
+    Baja lógica únicamente (nunca `DELETE`): ver el encabezado de la sección "Sucursales" en `erp/catalogo.py`
+    sobre por qué no hay FK contra `locations.branch_id`."""
+    abrir, _ = _deps(usuario_actual, conexion)
+    opt = opciones or OpcionesSucursales()
+    escribe = [opt.autorizar_escritura] if opt.autorizar_escritura is not None else []
+
+    router = APIRouter(prefix=prefix, tags=["sucursales"])
+
+    @router.get("")
+    def listar(solo_activas: bool = True):
+        with abrir() as conn:
+            return catalogo.get_all_sucursales(conn, solo_activas)
+
+    @router.get("/{sid}")
+    def obtener(sid: int):
+        with abrir() as conn:
+            sucursal = catalogo.get_sucursal(conn, sid)
+            if not sucursal:
+                raise HTTPException(404, "Sucursal no encontrada")
+            return sucursal
+
+    @router.post("", dependencies=escribe)
+    def crear(payload: SucursalCreatePayload):
+        nombre = payload.nombre.strip()
+        if not nombre:
+            raise HTTPException(422, "El nombre es obligatorio.")
+        if opt.validar_alta:
+            opt.validar_alta(payload)
+        with abrir() as conn:
+            sid = catalogo.create_sucursal(
+                conn, nombre, payload.codigo, payload.direccion, payload.deposito, payload.deposito_tipo
+            )
+            creada = catalogo.get_sucursal(conn, sid)
+            if opt.al_guardar:
+                opt.al_guardar(creada)
+            return creada
+
+    @router.put("/{sid}", dependencies=escribe)
+    def actualizar(sid: int, payload: SucursalUpdatePayload):
+        nombre = payload.nombre.strip()
+        with abrir() as conn:
+            actual = catalogo.get_sucursal(conn, sid)
+            if not actual:
+                raise HTTPException(404, "Sucursal no encontrada")
+            if not nombre:
+                raise HTTPException(422, "El nombre es obligatorio.")
+            if opt.validar_edicion:
+                opt.validar_edicion(payload, actual)
+            try:
+                catalogo.update_sucursal(conn, sid, nombre, payload.codigo, payload.direccion, payload.activa)
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
+            guardada = catalogo.get_sucursal(conn, sid)
+            if opt.al_guardar:
+                opt.al_guardar(guardada)
+            return guardada
+
+    @router.post("/{sid}/set-default", dependencies=escribe)
+    def set_default(sid: int):
+        with abrir() as conn:
+            if not catalogo.get_sucursal(conn, sid):
+                raise HTTPException(404, "Sucursal no encontrada")
+            try:
+                catalogo.set_default_sucursal(conn, sid)
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
+            return catalogo.get_sucursal(conn, sid)
+
+    @router.post("/{sid}/deposito-predeterminado", dependencies=escribe)
+    def deposito_predeterminado(sid: int, payload: DepositoPredeterminadoPayload):
+        with abrir() as conn:
+            if not catalogo.get_sucursal(conn, sid):
+                raise HTTPException(404, "Sucursal no encontrada")
+            try:
+                catalogo.set_deposito_predeterminado(conn, sid, payload.deposito_id)
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
+            return catalogo.get_sucursal(conn, sid)
+
+    return router
 
 
 # ── Stock ────────────────────────────────────────────────────────────────

@@ -15,6 +15,16 @@ class StockMovementType(StrEnum):
 
 
 @dataclass(frozen=True)
+class Branch:
+    id: int | None
+    name: str
+    code: str = ""
+    address: str = ""
+    active: bool = True
+    is_default: bool = False
+
+
+@dataclass(frozen=True)
 class Location:
     id: int | None
     name: str
