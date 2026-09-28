@@ -96,6 +96,7 @@ AUDITABLES: dict[str, _Auditable] = {
     "save_price_list": _Auditable("lista de precios", "get_price_list", "name"),
     "save_item_price": _Auditable("precio", None, None),
     "save_location": _Auditable("deposito", "get_location", "name"),
+    "save_branch": _Auditable("sucursal", "get_branch", "name"),
     "save_sale": _Auditable("venta", "get_sale", "number"),
     "save_purchase_order": _Auditable("orden de compra", "get_purchase_order", "number"),
     "save_purchase_receipt": _Auditable("recepcion de compra", "get_purchase_receipt", None),

@@ -17,7 +17,7 @@ from libracommerce.domain.catalog import (
     Unit,
 )
 from libracommerce.domain.entities import Party, PartyType
-from libracommerce.domain.inventory import Location, StockMovement, StockMovementType
+from libracommerce.domain.inventory import Branch, Location, StockMovement, StockMovementType
 from libracommerce.domain.purchasing import (
     PurchaseOrder,
     PurchaseOrderItem,
@@ -598,6 +598,47 @@ class SqliteCommerceRepository:
 
         best = max(rows, key=sort_key)
         return _to_decimal(best[0])
+
+    # branches
+
+    def save_branch(self, branch: Branch) -> Branch:
+        cur = self._conn.cursor()
+        if branch.id is None:
+            cur.execute(
+                "INSERT INTO branches (name, code, address, active, is_default) VALUES (?, ?, ?, ?, ?)",
+                (branch.name, branch.code, branch.address, int(branch.active), int(branch.is_default)),
+            )
+            self._commit()
+            return replace(branch, id=cur.lastrowid)
+        cur.execute(
+            "UPDATE branches SET name = ?, code = ?, address = ?, active = ?, is_default = ? WHERE id = ?",
+            (branch.name, branch.code, branch.address, int(branch.active), int(branch.is_default), branch.id),
+        )
+        self._commit()
+        return branch
+
+    def get_branch(self, branch_id: int) -> Branch | None:
+        row = self._conn.execute(
+            "SELECT id, name, code, address, active, is_default FROM branches WHERE id = ?",
+            (branch_id,),
+        ).fetchone()
+        return self._branch_from_row(row)
+
+    def list_branches(self, *, active_only: bool = False) -> Sequence[Branch]:
+        sql = "SELECT id, name, code, address, active, is_default FROM branches"
+        if active_only:
+            sql += " WHERE active = 1"
+        sql += " ORDER BY is_default DESC, name"
+        rows = self._conn.execute(sql).fetchall()
+        return [self._branch_from_row(row) for row in rows]
+
+    def _branch_from_row(self, row) -> Branch | None:
+        if row is None:
+            return None
+        return Branch(
+            id=row[0], name=row[1], code=row[2], address=row[3],
+            active=_to_bool(row[4]), is_default=_to_bool(row[5]),
+        )
 
     # locations
 

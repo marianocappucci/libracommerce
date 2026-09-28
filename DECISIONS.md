@@ -215,3 +215,54 @@ antes de que venciera sola. Se agrega `erp.listas_precio.delete_precio_
 vigente(conn, producto_id, vigencia_id)` y `DELETE /items/{producto_id}/
 vigencias/{vigencia_id}`, con `item_id` en el `WHERE` (no alcanza con acertar
 el id: tiene que ser del producto que dice la URL).
+
+## ADR-012 — Sucursal es una tabla propia del motor (`branches`), no una columna de producto (2026-09-28)
+
+**Contexto.** El humano encontró, revisando VentaLibra, dos modelos
+incompatibles conviviendo en la familia: VentaLibra (PR `ventalibra#314`,
+2026-09-26) modela sucursal y depósito como pares planos del mismo
+`locations.location_type` (`store`/`warehouse`), sin jerarquía — cualquiera
+puede tener stock. [[libradesk]] (capa de producto sobre Contalibra,
+2026-08-14) ya tenía construida la jerarquía real: una tabla `sucursales`
+propia del producto, con `locations.branch_id` apuntando a ella (columna
+suelta del motor desde Fase 4, sin FK — Contalibra la deja en `NULL`
+siempre). Decisión del humano: el modelo de LibraDesk queda como estándar,
+y sube al motor para que los cuatro consumidores lo reciban en vez de que
+cada uno lo porte por su cuenta — mismo criterio que la convergencia de
+`verificar_disponibilidad()`/`transfer_stock()` (ver
+`wiki/analyses/donde-vive-el-stock-familia-libra.md`). Detalle completo y
+las fuentes cruzadas: `wiki/analyses/jerarquia-sucursal-deposito-libracommerce.md`.
+
+Se evaluaron dos caminos: (A) auto-referencial sobre `locations` (una fila
+`location_type='store'` ES la sucursal, sin tabla nueva) o (B) una tabla
+`branches` propia, con `locations.branch_id` apuntando a ella. El humano
+eligió (B): sucursal y depósito son tipos de entidad distintos, no la misma
+tabla con un flag, y es el modelo que LibraDesk ya tiene probado en
+producción.
+
+**Decisión.** Tabla `branches` nueva (`id`, `name`, `code`, `address`,
+`active`, `is_default`, `created_at`), puramente aditiva — no migra ninguna
+tabla existente. `locations.branch_id` sigue **sin FK real** contra
+`branches.id`: es la misma columna suelta que ya existía desde Fase 4 (ahora
+con contenido del otro lado), y agregarle la FK es una migración de datos
+sobre las bases ya desplegadas de Contalibra/VentaLibra/LibraDesk, fuera de
+este alcance. `erp.catalogo` gana la sección "Sucursales"
+(`create_sucursal`/`update_sucursal`/`validar_sucursal`/...), con
+`_verificar_baja_de_sucursal` portada **literal** de
+`libradesk/app/services/comercial.py::_verificar_baja_de_sucursal` —incluida
+su corrección del 2026-08-16 (mira existencias `<> 0`, no sólo depósitos
+`active=1`)—, y `web/catalogo_router.build_sucursales_router` con
+`OpcionesSucursales`, mismo patrón de extensión que `OpcionesDepositos`.
+`create_deposito` suma un `branch_id` opcional, validado contra `branches`.
+Un producto que no monta el router (Contalibra) sigue exactamente igual que
+antes.
+
+**Consecuencias.** Esto es sólo el motor (fase 0 de la migración). Quedan
+afuera, cada uno su propia tanda con datos reales: (1) VentaLibra tiene que
+migrar del modelo plano de `location_type` al jerárquico sin perder el
+historial de stock de dev/demo; (2) LibraDesk tiene que migrar su tabla
+`sucursales` de producto a la del motor, sin duplicar el concepto; (3)
+Contalibra base tiene que prender el sustrato, hoy apagado a propósito
+(`branch_id=None` hardcodeado, 9 consultas de listas de precio con
+`AND branch_id IS NULL` como invariante — prenderlo no es aditivo).
+Restolibra queda afuera mientras no adopte este motor.

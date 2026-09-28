@@ -108,6 +108,19 @@ def init_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_item_prices_item_list
             ON item_prices(item_id, price_list_id);
 
+        CREATE TABLE IF NOT EXISTS branches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            code TEXT NOT NULL DEFAULT '',
+            address TEXT NOT NULL DEFAULT '',
+            active INTEGER NOT NULL DEFAULT 1,
+            is_default INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now','-3 hours'))
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_branches_one_default
+            ON branches(is_default) WHERE is_default = 1;
+
         CREATE TABLE IF NOT EXISTS locations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,

@@ -1,6 +1,6 @@
 # motor: sqlite
 
-## tablas (167)
+## tablas (174)
 actividad_log|accion|TEXT|NN|
 actividad_log|cambios|TEXT||
 actividad_log|descripcion|TEXT|NN|''
@@ -9,6 +9,13 @@ actividad_log|entidad|TEXT|NN|
 actividad_log|id|INTEGER||
 actividad_log|ts|TEXT|NN|
 actividad_log|usuario|TEXT|NN|'Sistema'
+branches|active|INTEGER|NN|1
+branches|address|TEXT|NN|''
+branches|code|TEXT|NN|''
+branches|created_at|TEXT|NN|datetime('now','-3 hours')
+branches|id|INTEGER||
+branches|is_default|INTEGER|NN|0
+branches|name|TEXT|NN|
 catalog_items|active|INTEGER|NN|1
 catalog_items|category_id|INTEGER||
 catalog_items|created_at|TEXT|NN|datetime('now','-3 hours')
@@ -169,8 +176,9 @@ units|code|TEXT||
 units|decimal_scale|INTEGER|NN|0
 units|name|TEXT|NN|
 
-## claves primarias (20)
+## claves primarias (21)
 actividad_log|id
+branches|id
 catalog_items|id
 categories|id
 commerce_settings|key
@@ -215,10 +223,11 @@ stock_movements|item_id|catalog_items|id|NO ACTION|NO ACTION
 stock_movements|location_id|locations|id|NO ACTION|NO ACTION
 stock_movements|variant_id|item_variants|id|NO ACTION|NO ACTION
 
-## índices (22)
+## índices (23)
 actividad_log|ix_actividad_log_accion|CREATE INDEX ix_actividad_log_accion ON actividad_log(accion)
 actividad_log|ix_actividad_log_entidad|CREATE INDEX ix_actividad_log_entidad ON actividad_log(entidad)
 actividad_log|ix_actividad_log_ts|CREATE INDEX ix_actividad_log_ts ON actividad_log(ts)
+branches|idx_branches_one_default|CREATE UNIQUE INDEX idx_branches_one_default ON branches(is_default) WHERE is_default = 1
 categories|sqlite_autoindex_categories_1|UNIQUE implícito (parent_id,name)
 commerce_settings|sqlite_autoindex_commerce_settings_1|UNIQUE implícito (key)
 item_codes|idx_item_codes_item|CREATE INDEX idx_item_codes_item ON item_codes(item_id)

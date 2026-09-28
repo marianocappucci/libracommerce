@@ -130,10 +130,16 @@ def get_default_deposito_id(conn) -> int | None:
     return row[0] if row else None
 
 
-def create_deposito(conn, nombre: str, descripcion: str = "", tipo: str | None = None) -> int:
+def create_deposito(
+    conn, nombre: str, descripcion: str = "", tipo: str | None = None, branch_id: int | None = None
+) -> int:
     """`tipo` es el `location_type` (sin él, el default del dominio, como siempre). El motor no valida el
-    vocabulario: es del producto (`OpcionesDepositos.validar_alta`)."""
-    location = Location(None, nombre, description=descripcion)
+    vocabulario: es del producto (`OpcionesDepositos.validar_alta`).
+
+    `branch_id`, si se pasa, tiene que resolver a una sucursal existente y activa (`validar_sucursal`) —
+    un producto sin sucursales (Contalibra) nunca lo manda y sigue en `None`, como siempre."""
+    validar_sucursal(conn, branch_id)
+    location = Location(None, nombre, branch_id=branch_id, description=descripcion)
     if tipo:
         location = replace(location, location_type=tipo)
     saved = repositorio_de(conn).save_location(location)
@@ -327,6 +333,169 @@ def get_transferencias(conn, deposito_id: int | None = None, limite: int = 200) 
         }
         for r in rows
     ]
+
+
+# ── Sucursales ───────────────────────────────────────────────────────────
+#
+# Portado desde LibraDesk (`app/services/comercial.py`), el primer y hasta
+# ahora único consumidor con sucursales reales (decidido el 2026-08-14: "eje
+# transversal, no instancia aparte"). `locations.branch_id` es la columna del
+# motor a la que esto apunta — existía sin tabla propia desde Fase 4
+# (2026-07-26); Contalibra la deja en NULL siempre.
+#
+# Igual que `sucursales` en LibraDesk, esta tabla **no tiene FK** contra
+# `locations.branch_id`/`sales.branch_id`/`purchase_orders.branch_id`/
+# `item_prices.branch_id`: son columnas sueltas desde antes de que existiera
+# esta tabla, y agregar la FK ahora es una migración de datos sobre las bases
+# ya desplegadas de Contalibra/VentaLibra/LibraDesk (fuera de este alcance,
+# ver `wiki/analyses/jerarquia-sucursal-deposito-libracommerce.md`). Por eso
+# la baja es **lógica, nunca DELETE**: sin FK no hay cascada, y un DELETE
+# dejaría esas cuatro tablas apuntando a un id inexistente.
+
+
+class SucursalInexistente(ValueError):
+    """Un `branch_id` (depósito, venta, orden de compra o precio) no existe o
+    no está activo en `branches`. Mismo mecanismo que `DepositoInexistente`:
+    hereda de `ValueError` para que el 422 del router sea el mismo camino."""
+
+
+def _sucursal_dict(row) -> dict:
+    return {
+        "id": row["id"], "nombre": row["name"], "codigo": row["code"],
+        "direccion": row["address"], "activa": bool(row["active"]),
+        "es_default": bool(row["is_default"]),
+    }
+
+
+def get_all_sucursales(conn, solo_activas: bool = False) -> list[dict]:
+    """Cada fila trae `depositos`: cuántos depósitos activos tiene, igual que
+    `listar_sucursales` de LibraDesk — es lo que la pantalla necesita para no
+    mostrar una sucursal sin ningún lugar donde cargar stock."""
+    sql = "SELECT id, name, code, address, active, is_default FROM branches"
+    if solo_activas:
+        sql += " WHERE active = 1"
+    sql += " ORDER BY is_default DESC, name"
+    rows = conn.execute(sql).fetchall()
+    resultado = []
+    for r in rows:
+        d = _sucursal_dict(r)
+        d["depositos"] = conn.execute(
+            "SELECT COUNT(*) FROM locations WHERE branch_id = ? AND active = 1", (r["id"],)
+        ).fetchone()[0]
+        resultado.append(d)
+    return resultado
+
+
+def get_sucursal(conn, sid: int) -> dict | None:
+    row = conn.execute(
+        "SELECT id, name, code, address, active, is_default FROM branches WHERE id=?", (sid,)
+    ).fetchone()
+    return _sucursal_dict(row) if row else None
+
+
+def validar_sucursal(conn, sucursal_id: int | None) -> None:
+    """Levanta `SucursalInexistente` si `sucursal_id` no es `None` y no
+    resuelve a una sucursal existente y activa. `None` es válido: "sin
+    sucursal", el caso de una empresa de un solo local.
+
+    Sin esto la falta de FK se paga en el alta: un `branch_id` inventado
+    entra sin chistar y el depósito desaparece de toda pantalla filtrada por
+    sucursal (mismo defecto que `verificar_sucursal` cierra en LibraDesk)."""
+    if sucursal_id is None:
+        return
+    sucursal = get_sucursal(conn, sucursal_id)
+    if sucursal is None or not sucursal["activa"]:
+        raise SucursalInexistente(
+            f"La sucursal {sucursal_id} no existe o no está activa."
+        )
+
+
+def get_default_sucursal_id(conn) -> int | None:
+    row = conn.execute("SELECT id FROM branches WHERE is_default=1 LIMIT 1").fetchone()
+    return row[0] if row else None
+
+
+def create_sucursal(conn, nombre: str, codigo: str = "", direccion: str = "") -> int:
+    """Crea sólo la sucursal — no crea un depósito. Un depósito se crea aparte
+    con `create_deposito(..., branch_id=sid)`, igual que en LibraDesk."""
+    cur = conn.execute(
+        "INSERT INTO branches (name, code, address) VALUES (?, ?, ?)",
+        (nombre.strip(), codigo, direccion),
+    )
+    return cur.lastrowid
+
+
+def update_sucursal(conn, sid: int, nombre: str, codigo: str, direccion: str, activo: int):
+    """🔴 **No se puede desactivar la sucursal por defecto** (mismo criterio
+    que `update_deposito`) **ni una sucursal con algo vivo colgando** —ver
+    `_verificar_baja_de_sucursal`, portada literal de LibraDesk."""
+    actual = get_sucursal(conn, sid)
+    if actual is None:
+        raise ValueError("La sucursal no existe.")
+    if actual["es_default"] and not activo:
+        raise ValueError(
+            "No se puede desactivar la sucursal por defecto: primero hay que "
+            "marcar otra sucursal como default."
+        )
+    if actual["activa"] and not activo:
+        _verificar_baja_de_sucursal(conn, sid)
+    conn.execute(
+        "UPDATE branches SET name=?, code=?, address=?, active=? WHERE id=?",
+        (nombre.strip(), codigo, direccion, int(activo), sid),
+    )
+
+
+def _verificar_baja_de_sucursal(conn, sucursal_id: int) -> None:
+    """Se planta si la sucursal todavía tiene algo vivo colgando.
+
+    Portado literal de `_verificar_baja_de_sucursal` de LibraDesk
+    (`app/services/comercial.py`), incluida la corrección del 2026-08-16: se
+    miran las EXISTENCIAS (pares item/depósito con saldo `<> 0`, no `> 0` —
+    un stock negativo tampoco es "nada que mover"), no sólo los depósitos
+    `active=1` — un depósito desactivado con stock adentro también cuenta. La
+    historia (`sales`/`purchase_orders`/`item_prices` con este `branch_id`)
+    **no bloquea**: bloquear por eso haría imposible cerrar una sucursal que
+    alguna vez vendió algo, nunca."""
+    problemas = []
+
+    depositos = conn.execute(
+        "SELECT COUNT(*) AS n FROM locations WHERE branch_id=? AND active=1", (sucursal_id,)
+    ).fetchone()["n"]
+    if depositos:
+        problemas.append(f"{depositos} depósito(s) de stock activo(s)")
+
+    con_saldo = conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM (
+            SELECT sm.item_id, sm.location_id
+            FROM stock_movements sm
+            JOIN locations l ON l.id = sm.location_id
+            WHERE l.branch_id = ?
+            GROUP BY sm.item_id, sm.location_id
+            HAVING SUM(sm.quantity_delta) <> 0
+        ) x
+        """,
+        (sucursal_id,),
+    ).fetchone()["n"]
+    if con_saldo:
+        problemas.append(f"{con_saldo} producto(s) con existencias en sus depósitos")
+
+    if problemas:
+        raise ValueError(
+            "La sucursal todavía tiene " + " y ".join(problemas) + ". "
+            "Transferí el stock a otra sucursal y desactivá los depósitos antes "
+            "de dar de baja la sucursal."
+        )
+
+
+def set_default_sucursal(conn, sid: int):
+    row = conn.execute("SELECT active FROM branches WHERE id=?", (sid,)).fetchone()
+    if row is None:
+        raise ValueError("La sucursal no existe.")
+    if not row[0]:
+        raise ValueError("No se puede marcar como default una sucursal inactiva: activala primero.")
+    conn.execute("UPDATE branches SET is_default=0")
+    conn.execute("UPDATE branches SET is_default=1 WHERE id=?", (sid,))
 
 
 # ── Categorías de producto ───────────────────────────────────────────────
