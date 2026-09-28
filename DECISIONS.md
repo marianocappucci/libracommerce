@@ -215,3 +215,47 @@ antes de que venciera sola. Se agrega `erp.listas_precio.delete_precio_
 vigente(conn, producto_id, vigencia_id)` y `DELETE /items/{producto_id}/
 vigencias/{vigencia_id}`, con `item_id` en el `WHERE` (no alcanza con acertar
 el id: tiene que ser del producto que dice la URL).
+
+## ADR-012 — Promociones: "llevá N pagá M" y combos como pieza del motor (2026-09-28)
+
+**Contexto.** Roadmap de producto de VentaLibra, segundo ítem: "promociones y
+combos". A diferencia de las listas de precio o el enganche cliente↔lista, no
+hay nada que extraer: ningún producto de la familia tenía promociones por regla,
+sólo precio por cantidad y por vigencia (`erp.listas_precio`). Se construye en el
+motor, no en el producto, para que Contalibra y Restolibra puedan montarlas.
+
+**Decisión.**
+- Dos tipos, un solo modelo (`promotions` + `promotion_items`): `nxm` (un producto,
+  `cantidad` = las que se llevan, `paga` = las que se pagan; 2x1 es `2/1`) y `combo`
+  (dos o más productos distintos a un `precio` cerrado del paquete).
+  `erp.promociones` (CRUD, `calcular`, `registrar_aplicadas`) y las factories
+  `build_promociones_router` (CRUD, de admin) y `build_promociones_calculo_router`
+  (`POST /calcular`, sólo lee, para el cajero). El DDL sale por
+  `erp.schema.crear_promociones`, mismo criterio que `crear_cliente_lista_precio`.
+- **La promoción no toca las líneas.** Sigue habiendo una línea por producto a su
+  precio de lista; el ahorro viaja en el `descuento` de la venta, y `sale_promotions`
+  anota qué promoción se aplicó, cuántas veces y cuánto ahorró (con el nombre y el
+  monto de ese momento: borrar o editar la promoción después no reescribe lo
+  vendido). Así el stock, el costo por línea y las devoluciones siguen veraces por
+  producto, que es lo que repartir el ahorro en el precio de cada línea rompía.
+- **El servidor es la autoridad.** `OpcionesVentas.promociones` (default `False`:
+  Contalibra y Restolibra no cambian) hace que `POST /api/ventas` calcule las
+  promociones con las líneas que llegan y las sume al descuento (con tope en el
+  subtotal), en la misma transacción. `POST /calcular` es la vista previa del
+  cajero y usa la misma función. `registrar_venta`/`crear_venta_directa` reciben
+  `promociones=` (aditivo, `None` no escribe nada).
+- **Cuando compiten, gana la de mayor ahorro por paquete** (empate: la más vieja),
+  consume las unidades y las demás se calculan con lo que sobra. Predecible, no
+  óptimo global.
+
+**Consecuencias.** Hay que llamar a `crear_promociones(conn)` desde el schema del
+producto (VentaLibra: migración `0006`). Una promoción con horario se compara en
+hora local, igual que las vigencias de precio.
+
+**Arreglo que viaja con esto.** `erp.listas_precio.precio_vigente` recibía `en`
+tal cual: un instante en UTC (`...Z`, lo que manda `new Date().toISOString()`) se
+comparaba como texto contra vigencias guardadas en hora local, así que una
+promoción de 18 a 20 hs se activaba a las 15 en Argentina. Ahora un instante con
+zona se pasa a hora de Argentina antes de comparar (`a_hora_local`, desfase fijo
+de −3: no hay horario de verano y no se depende de la base de zonas de la
+imagen). Lo introdujo el cableado del POS de la tanda anterior (ADR-011).

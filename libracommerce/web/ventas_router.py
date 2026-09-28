@@ -179,6 +179,13 @@ class OpcionesVentas:
     #: de escribir nada — una deuda que no es de nadie no se puede cobrar.
     #: Default `False` (el comportamiento de hoy).
     exigir_cliente_para_fiar: bool = False
+    #: Aplicar las promociones vigentes (`erp.promociones`, "llevá N pagá M" y
+    #: combos) a la venta. **El servidor las calcula con las líneas que llegan**,
+    #: no confía en un descuento del cliente: el ahorro se SUMA al `descuento`
+    #: del pedido (con tope en el subtotal) y queda registrado en
+    #: `sale_promotions`. Requiere `erp.schema.crear_promociones`. Default
+    #: `False` (el comportamiento de hoy: Contalibra y Restolibra no cambian).
+    promociones: bool = False
 
 
 def build_ventas_router(
@@ -225,7 +232,16 @@ def build_ventas_router(
             raise HTTPException(422, "Debe agregar al menos un ítem.")
 
         subtotal = round(sum(i["subtotal"] for i in items), 2)
-        descuento = min(max(0.0, payload.descuento), subtotal)
+        aplicadas: list[dict] | None = None
+        ahorro = 0.0
+        if opciones.promociones:
+            from ..erp import promociones as promos
+
+            with abrir() as conn:
+                calculo = promos.calcular(conn, items)
+            aplicadas = calculo["aplicadas"] or None
+            ahorro = calculo["ahorro"]
+        descuento = min(max(0.0, payload.descuento) + ahorro, subtotal)
         total = round(subtotal - descuento, 2)
 
         # 🔑 El mostrador declara si la plata entró o todavía no. Que el estado
@@ -279,7 +295,7 @@ def build_ventas_router(
                 estado=ventas.estado_segun_pagos(total, pagos), pagos=pagos,
                 stock_habilitado=bool(opciones.stock_habilitado()), hooks=opciones.hooks,
                 exigir_turno=opciones.exigir_turno, caja_con_turno=opciones.caja_con_turno,
-                deposito_id=payload.deposito_id,
+                deposito_id=payload.deposito_id, promociones=aplicadas,
             )
         except ventas.SinTurno as exc:
             raise HTTPException(409, str(exc)) from None
@@ -302,12 +318,19 @@ def build_ventas_router(
             ) from None
 
         with abrir() as conn:
-            return ventas.obtener_venta(conn, venta_id)
+            venta = ventas.obtener_venta(conn, venta_id)
+            if opciones.promociones:
+                venta["promociones"] = promos.promociones_de_venta(conn, venta_id)
+            return venta
 
     @router.get("/{vid}")
     def detalle(vid: int):
         with abrir() as conn:
             venta = ventas.obtener_venta(conn, vid)
+            if venta and opciones.promociones:
+                from ..erp import promociones as promos
+
+                venta["promociones"] = promos.promociones_de_venta(conn, vid)
         if not venta:
             raise HTTPException(404, "Venta no encontrada")
         return venta

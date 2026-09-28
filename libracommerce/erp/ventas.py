@@ -256,7 +256,8 @@ def registrar_venta(conn, *, fecha: str, items: list, subtotal: float, descuento
                     pagos: list[dict], stock_habilitado: bool,
                     hooks: Hooks = SIN_GANCHOS, exigir_turno: bool = False,
                     caja_con_turno: bool = False,
-                    deposito_id: int | None = None) -> int:
+                    deposito_id: int | None = None,
+                    promociones: list[dict] | None = None) -> int:
     """Una venta de mostrador completa, dentro de la transacción de `conn`:
     número, encabezado, líneas, pagos, caja, stock, turno y el gancho.
 
@@ -290,6 +291,12 @@ def registrar_venta(conn, *, fecha: str, items: list, subtotal: float, descuento
     turno abierto), levantando `DepositoNoPermitido` — también ANTES de
     escribir nada, mismo criterio.
 
+    🔴 **`promociones` es ADITIVO (2026-09-28).** `None` (el default, y lo único
+    que mandan Contalibra y Restolibra hoy) no escribe nada extra. Con la lista
+    de `erp.promociones.calcular(...)["aplicadas"]`, deja en `sale_promotions`
+    qué promoción se aplicó y cuánto ahorró, en la misma transacción de la venta.
+    El ahorro ya viaja dentro de `descuento`: lo suma el caller.
+
     No commitea: es del caller (`crear_venta_directa`, o el cobro de un pedido
     en Restolibra, que arma la venta con estas mismas piezas).
     """
@@ -312,6 +319,10 @@ def registrar_venta(conn, *, fecha: str, items: list, subtotal: float, descuento
         cliente_nombre=cliente_nombre, usuario_id=usuario_id,
         observaciones=observaciones, estado=estado,
     )
+    if promociones:
+        from . import promociones as _promociones
+
+        _promociones.registrar_aplicadas(conn, venta_id, promociones)
     for p in pagos:
         estado_del_pago = acreditacion.estado_de(p)
         agregar_pago(conn, venta_id, p["medio"], p["monto"], p.get("referencia", ""),
@@ -387,6 +398,7 @@ def crear_venta_directa(conexion: Conexion, *, fecha: str, items: list, subtotal
                         hooks: Hooks = SIN_GANCHOS, exigir_turno: bool = False,
                         caja_con_turno: bool = False,
                         deposito_id: int | None = None,
+                        promociones: list[dict] | None = None,
                         intentos: int = INTENTOS_POR_NUMERO) -> int:
     """`registrar_venta` con su transacción y el reintento por número repetido.
 
@@ -411,7 +423,7 @@ def crear_venta_directa(conexion: Conexion, *, fecha: str, items: list, subtotal
                     usuario_id=usuario_id, observaciones=observaciones, estado=estado,
                     pagos=pagos, stock_habilitado=stock_habilitado, hooks=hooks,
                     exigir_turno=exigir_turno, caja_con_turno=caja_con_turno,
-                    deposito_id=deposito_id,
+                    deposito_id=deposito_id, promociones=promociones,
                 )
                 conn.commit()
                 return venta_id

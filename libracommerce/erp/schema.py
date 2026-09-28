@@ -81,3 +81,57 @@ def crear_cliente_lista_precio(conn) -> None:
     (LibraCommerce). Mismo criterio que `crear_venta_links`.
     """
     conn.execute(CLIENTE_LISTA_PRECIO_DDL)
+
+
+#: Las promociones (2026-09-28, roadmap de producto de VentaLibra: "combos y 2x1"):
+#: la regla (`promotions` + `promotion_items`) y el registro de qué promoción se
+#: aplicó en cada venta (`sale_promotions`). Es construcción nueva, no extracción:
+#: ningún producto de la familia las tenía. `sale_promotions` guarda el nombre y
+#: el ahorro de ese momento, no sólo la FK: borrar o editar la promoción después
+#: no reescribe lo que ya se vendió (`promotion_id` queda en NULL si se borra).
+PROMOCIONES_DDL = (
+    """
+    CREATE TABLE IF NOT EXISTS promotions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('nxm', 'combo')),
+        pay_quantity NUMERIC,
+        combo_price NUMERIC,
+        valid_from TEXT,
+        valid_until TEXT,
+        active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS promotion_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        promotion_id INTEGER NOT NULL REFERENCES promotions(id) ON DELETE CASCADE,
+        item_id INTEGER NOT NULL REFERENCES catalog_items(id),
+        quantity NUMERIC NOT NULL CHECK (quantity > 0)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_promotion_items_promotion ON promotion_items(promotion_id)",
+    """
+    CREATE TABLE IF NOT EXISTS sale_promotions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sale_id INTEGER NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
+        promotion_id INTEGER REFERENCES promotions(id) ON DELETE SET NULL,
+        name TEXT NOT NULL,
+        times INTEGER NOT NULL,
+        amount NUMERIC NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_sale_promotions_sale ON sale_promotions(sale_id)",
+)
+
+
+def crear_promociones(conn) -> None:
+    """Crea las tablas de promociones si no están. Idempotente.
+
+    La llama el `init_schema_propio()` de cada producto, **después** de los dos
+    motores: las FK apuntan a `catalog_items` y `sales` (LibraCommerce). Mismo
+    criterio que `crear_cliente_lista_precio`.
+    """
+    for ddl in PROMOCIONES_DDL:
+        conn.execute(ddl)
