@@ -87,12 +87,14 @@ def _deposito_dict(row) -> dict:
         # `locations.location_type`: el motor no lo interpreta; lo usa un producto
         # con sucursales y depósitos (VentaLibra: `store`/`warehouse`).
         "tipo": row["location_type"],
+        # `locations.branch_id`: la sucursal del depósito (`None` en un producto sin sucursales).
+        "branch_id": row["branch_id"],
     }
 
 
 def get_all_depositos(conn) -> list[dict]:
     rows = conn.execute(
-        "SELECT id, name, description, active, is_default, created_at, location_type FROM locations "
+        "SELECT id, name, description, active, is_default, created_at, location_type, branch_id FROM locations "
         "ORDER BY is_default DESC, name"
     ).fetchall()
     return [_deposito_dict(r) for r in rows]
@@ -100,7 +102,8 @@ def get_all_depositos(conn) -> list[dict]:
 
 def get_deposito(conn, did: int) -> dict | None:
     row = conn.execute(
-        "SELECT id, name, description, active, is_default, created_at, location_type FROM locations WHERE id=?",
+        "SELECT id, name, description, active, is_default, created_at, location_type, branch_id FROM locations "
+        "WHERE id=?",
         (did,),
     ).fetchone()
     return _deposito_dict(row) if row else None
@@ -487,7 +490,7 @@ def _verificar_baja_de_sucursal(conn, sucursal_id: int) -> None:
 
     Portado de `_verificar_baja_de_sucursal` de LibraDesk
     (`app/services/comercial.py`), incluida la corrección del 2026-08-16: se
-    miran las EXISTENCIAS (pares item/depósito con saldo `<> 0`, no `> 0` —
+    miran las EXISTENCIAS (ternas ítem/variante/depósito con saldo `<> 0`, no `> 0` —
     un stock negativo tampoco es "nada que mover"), y un depósito desactivado
     con stock adentro también cuenta.
 
@@ -510,11 +513,11 @@ def _verificar_baja_de_sucursal(conn, sucursal_id: int) -> None:
     con_saldo = conn.execute(
         """
         SELECT COUNT(*) AS n FROM (
-            SELECT sm.item_id, sm.location_id
+            SELECT sm.item_id, sm.variant_id, sm.location_id
             FROM stock_movements sm
             JOIN locations l ON l.id = sm.location_id
             WHERE l.branch_id = ?
-            GROUP BY sm.item_id, sm.location_id
+            GROUP BY sm.item_id, sm.variant_id, sm.location_id
             HAVING SUM(sm.quantity_delta) <> 0
         ) x
         """,

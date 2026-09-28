@@ -10,11 +10,16 @@ depósitos `active=1`). Estos tests son, en gran parte, los mismos casos que
 
 from __future__ import annotations
 
+from datetime import datetime
+from decimal import Decimal
+
 import pytest
 from conftest import _usuario  # noqa: F401  (y la fixture `abrir`, que pytest carga sola)
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from libracommerce.db.repository import repositorio_de
+from libracommerce.domain.inventory import StockMovement, StockMovementType
 from libracommerce.erp import catalogo
 from libracommerce.web.catalogo_router import (
     OpcionesStock,
@@ -313,3 +318,39 @@ def test_deposito_de_venta_repara_una_sucursal_de_antes_de_la_invariante(client,
 def test_deposito_de_venta_de_una_sucursal_inexistente_es_none(abrir):
     with abrir() as conn:
         assert catalogo.get_deposito_de_venta(conn, 999) is None
+
+
+# ── Hallazgos de la revisión de Codex (2026-09-28) ────────────────────────
+
+
+def test_la_baja_mira_el_saldo_de_cada_variante_y_no_el_total_del_producto(client, abrir):
+    """+5 de una variante y -5 de otra suman 0 a nivel producto pero son existencias distintas de cero: la
+    baja no puede dejarlas invisibles."""
+    s = _crear_sucursal(client, "Con variantes")
+    did = s["deposito_predeterminado_id"]
+    p = client.post("/api/productos", json={"nombre": "Remera", "precio_venta": 10.0, "precio_costo": 5.0}).json()
+    va = client.post(f"/api/productos/{p['id']}/variantes", json={"sku": "R-A", "nombre": "A"}).json()
+    vb = client.post(f"/api/productos/{p['id']}/variantes", json={"sku": "R-B", "nombre": "B"}).json()
+    ajuste = client.post(f"/api/stock/{p['id']}/ajuste", json={
+        "modo": "entrada", "cantidad": 5, "deposito_id": did, "variant_id": va["id"]})
+    assert ajuste.status_code == 200, ajuste.text
+    with abrir() as conn:
+        repositorio_de(conn).append_stock_movement(StockMovement(
+            None, p["id"], did, StockMovementType.ADJUSTMENT, Decimal("-5"), datetime(2026, 9, 28, 10, 0),
+            variant_id=vb["id"],
+        ))
+    resp = client.put(f"/api/sucursales/{s['id']}", json={"nombre": "X", "activa": False})
+    assert resp.status_code == 422
+    assert "existencias" in resp.json()["detail"]
+
+
+def test_las_respuestas_de_deposito_traen_la_sucursal(client):
+    s = _crear_sucursal(client, "Dueña")
+    suelto = _crear_deposito(client, "Suelto")
+    extra = _crear_deposito(client, "Extra", branch_id=s["id"])
+    assert suelto["branch_id"] is None
+    assert extra["branch_id"] == s["id"]
+    por_id = {d["id"]: d for d in client.get("/api/depositos").json()}
+    assert por_id[extra["id"]]["branch_id"] == s["id"]
+    assert por_id[s["deposito_predeterminado_id"]]["branch_id"] == s["id"]
+    assert por_id[suelto["id"]]["branch_id"] is None
