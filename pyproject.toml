@@ -53,10 +53,16 @@ web = [
     "fastapi>=0.115,<1",
     "pydantic>=2,<3",
 ]
+planillas = [
+    # Sólo lo necesita `web/planillas_router.py` (actualización masiva de
+    # precios): un extra aparte, no sumado a `[web]`, para no imponerle
+    # openpyxl a un producto que monte cualquier otra factory de esta capa.
+    "openpyxl>=3.1,<4",
+]
 dev = [
-    # Los tres extras entran a la suite: la cadena se ejercita en
+    # Los cuatro extras entran a la suite: la cadena se ejercita en
     # tests/test_migraciones_alembic.py, los contratos en test_erp_hooks.py.
-    "libracommerce[migrations,erp,web]",
+    "libracommerce[migrations,erp,web,planillas]",
     # Para el test que construye el wheel y lo abre (test_migrar_modulo.py).
     "build>=1.2",
     # TestClient de FastAPI para ejercitar las factories de router por HTTP.
