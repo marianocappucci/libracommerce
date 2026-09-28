@@ -41,6 +41,37 @@ def get_all_listas_precio(conn, solo_activas: bool = False) -> list[dict]:
     return [_lista_dict(r) for r in rows]
 
 
+def get_lista_de_cliente(conn, cliente_id: int) -> int | None:
+    """El `lista_id` asignado al cliente, o `None` si no tiene ninguno.
+
+    Extraído del add-on mayorista de Contalibra (`app/db_mayorista.py`):
+    lo único que cambia es que recibe la conexión, mismo criterio que el
+    resto de este módulo. Necesita `cliente_lista_precio`
+    (`erp.schema.crear_cliente_lista_precio`)."""
+    row = conn.execute(
+        "SELECT lista_id FROM cliente_lista_precio WHERE cliente_id=?",
+        (cliente_id,),
+    ).fetchone()
+    return row["lista_id"] if row else None
+
+
+def set_lista_de_cliente(conn, cliente_id: int, lista_id: int) -> None:
+    """Asigna (o reasigna) la lista del cliente.
+
+    Upsert por `DELETE` + `INSERT` en una sola transacción, para no depender de
+    la sintaxis de `ON CONFLICT` (que difiere entre SQLite y PostgreSQL)."""
+    conn.execute("DELETE FROM cliente_lista_precio WHERE cliente_id=?", (cliente_id,))
+    conn.execute(
+        "INSERT INTO cliente_lista_precio (cliente_id, lista_id) VALUES (?,?)",
+        (cliente_id, lista_id),
+    )
+
+
+def quitar_lista_de_cliente(conn, cliente_id: int) -> None:
+    """Saca la asignación del cliente (vuelve a cotizar con el precio base)."""
+    conn.execute("DELETE FROM cliente_lista_precio WHERE cliente_id=?", (cliente_id,))
+
+
 def get_lista_precio(conn, lista_id: int) -> dict | None:
     row = conn.execute(
         "SELECT id, name, description, active, is_default, created_at FROM price_lists WHERE id=?",
