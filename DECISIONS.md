@@ -354,3 +354,38 @@ zona se pasa a hora de Argentina antes de comparar (`a_hora_local`, desfase fijo
 de −3: no hay horario de verano y no se depende de la base de zonas de la
 imagen). Lo introdujo el cableado del POS de la tanda anterior (ADR-011).
 
+
+## ADR-016 — La venta de mostrador puede guardar el costo de cada línea, y sólo si se lo pide (2026-09-29)
+
+**Contexto.** ADR-015 (margen y rotación) dejó dicho que `erp.ventas.crear_venta` —el
+camino de `POST /api/ventas`— no escribe `sale_items.unit_cost_snapshot`, así que todo
+costo de una venta de mostrador sale como estimado (el `default_cost` de HOY, no el de
+aquella venta), y anotó "guardar el snapshot al vender" como decisión aparte. Es esa
+decisión. La columna ya existe (sin migración): la llena `db.repository.save_sale` con un
+`SaleItem` del dominio, pero no la venta del POS.
+
+**Decisión.**
+- **Opt-in, aditivo.** `crear_venta`, `registrar_venta` y `crear_venta_directa` reciben
+  `guardar_costo: bool = False`, y `OpcionesVentas.guardar_costo` (default `False`) lo
+  propaga desde `POST /api/ventas`: mismo patrón que `caja_con_turno` y `promociones`.
+  Con `False` el `INSERT` de `sale_items` es carácter por carácter el de siempre —
+  Contalibra y Restolibra, que no lo mandan, no ven ninguna diferencia—.
+- **Qué se guarda.** Por cada línea con `producto_id`, el `catalog_items.default_cost`
+  vigente en el momento de la venta, leído en la misma transacción (una consulta por
+  venta, no una por línea). El costo **no** vive en la variante (`item_variants` no tiene
+  columna de costo): una línea con `variante_id` toma el del producto.
+- **Qué NO se guarda.** Las líneas de servicio o ad-hoc (sin `producto_id`) quedan en NULL.
+  Un producto sin costo cargado también: `default_cost` es `NOT NULL DEFAULT 0`, y ese 0
+  significa "nadie lo cargó", no "costó cero"; guardarlo daría un margen de 100% con cara
+  de dato real. NULL deja que `erp.margen` lo trate como lo que es (`sin_costo`).
+- **El margen no cambia de semántica.** `erp.margen._lineas_netas` ya prefería
+  `unit_cost_snapshot` cuando no es NULL y marcaba `costo_estimado` sólo si caía al
+  `default_cost`: con el snapshot guardado la línea deja de estar estimada y no se mueve
+  si el costo cambia después. Sin opt-in, todo sigue igual.
+
+**Consecuencias.** Un producto que quiera márgenes reales en las ventas nuevas monta
+`OpcionesVentas(guardar_costo=True)`. **No hay backfill**: las ventas ya hechas siguen con
+NULL (y con costo estimado en el margen) porque el costo de aquel día no se puede
+reconstruir; un backfill con el costo de hoy sería exactamente la estimación de siempre,
+pero sin avisarlo. Un producto con receta se costea con su propio `default_cost`, no con la suma de
+sus insumos: es lo que hoy guarda el catálogo.
