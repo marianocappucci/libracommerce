@@ -15,7 +15,21 @@ solo_confirmadas=True)`—. Las devoluciones no viven en `sale_items`: la venta 
 así que lo devuelto se resta leyendo el ledger de stock (`_devuelto_por_clave`), por
 las dos formas que tiene el motor de escribirlo (la nueva y la de `usecases.sales.
 return_sale_items`). Una línea devuelta a medias cuenta la parte que se quedó el
-cliente: unidades, ingreso y costo, en la misma proporción.
+cliente: unidades, ingreso y costo, en la misma proporción. Una línea devuelta entera
+no cuenta nada, tampoco sus avisos de costo (`costo_estimado`, `sin_costo`).
+
+🔴 **Límite conocido: la devolución se reparte por (ítem, variante), no por línea.** El
+ledger de `devolver_items` no dice de qué línea volvió lo devuelto (`source_id` es la venta,
+`reason_code='devolucion'`, sin `sale_item_id`; el propio motor trata las líneas de una
+clave como un pozo común), así que con dos líneas del mismo producto y variante a distinto
+precio (o distinto snapshot de costo) lo devuelto se prorratea por cantidad: devolver la de
+$100 de una venta de $100 + $200 deja $150 de ingreso, no $200. Con el mismo precio y costo
+en las líneas —lo habitual— el resultado es exacto. Sólo el camino viejo (`sale_return`) guarda
+la posición de la línea, en `reason_code`; no se usa para no tener dos criterios en el mismo
+reporte. Arreglarlo de verdad es guardar la línea en el ledger (escritura, decisión aparte).
+
+**El rango es por día.** `sales.occurred_on` es texto libre y puede traer hora: `desde` se
+compara por su fecha y `hasta` con la cota exclusiva del día siguiente (`_filtro_de_ventas`).
 
 🔴 **De dónde sale el costo.** `sale_items.unit_cost_snapshot` cuando existe. Pero
 `erp.ventas.crear_venta` —el camino de `POST /api/ventas`— **no lo escribe**: sólo lo
@@ -100,6 +114,14 @@ def _periodo(occurred_on, agrupacion: str) -> str:
     return texto or SIN_FECHA
 
 
+def _dia(texto: str) -> datetime.date | None:
+    """La parte fecha de `texto` (`2026-09-29` o `2026-09-29 13:00:00`), o `None` si no es una fecha."""
+    try:
+        return datetime.date.fromisoformat(texto[:10])
+    except ValueError:
+        return None
+
+
 def _dias(desde: str, hasta: str) -> int | None:
     """Cuántos días abarca el rango, ambos extremos incluidos; `None` si alguno falta o no es
     una fecha (sin rango cerrado no hay "por día" que calcular)."""
@@ -112,14 +134,24 @@ def _dias(desde: str, hasta: str) -> int | None:
 
 
 def _filtro_de_ventas(desde: str, hasta: str) -> tuple[str, list]:
+    """El `WHERE` de las ventas del rango, por **día**: `sales.occurred_on` es texto libre (`POST /api/ventas`
+    acepta `fecha` con hora, `2026-09-29 13:00:00`), y un `<= '2026-09-29'` contra el texto deja afuera todo lo
+    del 29 que traiga hora. Por eso `desde` se compara por su parte fecha y `hasta` como cota exclusiva del día
+    siguiente (`< '2026-09-30'`): sólo comparaciones de texto, el mismo SQL en SQLite y en PostgreSQL. Un extremo
+    que no es una fecha se usa tal cual, como antes. Lo usan las ventas y el ledger de devoluciones
+    (`_devuelto_por_clave`), así que las dos miran el mismo rango."""
     donde = ["s.status IN (" + ",".join("?" for _ in _STATUS_DE_VENTA) + ")"]
     params: list = list(_STATUS_DE_VENTA)
     if desde:
         donde.append("s.occurred_on >= ?")
-        params.append(desde)
+        params.append(dia.isoformat() if (dia := _dia(desde)) else desde)
     if hasta:
-        donde.append("s.occurred_on <= ?")
-        params.append(hasta)
+        if dia := _dia(hasta):
+            donde.append("s.occurred_on < ?")
+            params.append((dia + datetime.timedelta(days=1)).isoformat())
+        else:
+            donde.append("s.occurred_on <= ?")
+            params.append(hasta)
     return " AND ".join(donde), params
 
 
@@ -191,6 +223,10 @@ def _lineas_netas(conn, desde: str, hasta: str):
             de_esa_clave = vendido[clave]
             devuelta = min(devuelto.get((venta_id, *clave), _CERO), de_esa_clave)
             queda = (de_esa_clave - devuelta) / de_esa_clave if de_esa_clave > 0 else _CERO
+            if queda <= 0:
+                # Devuelta entera: no aporta unidades, ingreso ni costo, y tampoco puede avisar de un costo
+                # estimado o faltante en el producto, el período o el resumen.
+                continue
 
             cantidad = _dec(f["quantity"])
             ingreso = valor - (de_la_venta * valor / base if base > 0 else _CERO)
