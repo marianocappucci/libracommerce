@@ -174,13 +174,25 @@ def siguiente_numero(conn) -> str:
 def crear_venta(conn, *, numero: str, fecha: str, items: list, subtotal: float,
                 descuento: float, total: float, cliente_id: int | None,
                 cliente_nombre: str, usuario_id: int | None,
-                observaciones: str = "", estado: str = "cobrada") -> int:
+                observaciones: str = "", estado: str = "cobrada",
+                guardar_costo: bool = False) -> int:
     """Inserta el encabezado en `sales` y las líneas en `sale_items`.
 
     Una línea con `producto_id` es de tipo 'product'; una ad-hoc (texto libre,
     sin producto del catálogo — el "Envío" de un delivery) es 'service' sin
     `item_id`: la misma regla que enforcean el dominio y el `CHECK` de
     `sale_items`.
+
+    🔴 **`guardar_costo` es ADITIVO (ADR-016).** `False` (el default, y lo único
+    que mandan Contalibra y Restolibra hoy) deja `sale_items.unit_cost_snapshot`
+    en NULL: el `INSERT` es carácter por carácter el de siempre. Con `True`, cada
+    línea con `producto_id` guarda el `catalog_items.default_cost` vigente —el
+    costo vive en el producto: `item_variants` no tiene columna de costo, así que
+    una línea con `variante_id` toma el del producto—, que es lo que
+    `erp.margen` prefiere al costo de hoy. Quedan en NULL las líneas de servicio
+    y los productos sin costo cargado: `default_cost` es `NOT NULL DEFAULT 0` y
+    ese 0 significa "nadie lo cargó", no "costó cero" —un 0 guardado daría un
+    margen de 100% con cara de dato real—.
     """
     cur = conn.execute(
         """INSERT INTO sales
@@ -193,16 +205,49 @@ def crear_venta(conn, *, numero: str, fecha: str, items: list, subtotal: float,
          subtotal, descuento, total),
     )
     venta_id = cur.lastrowid
+    costos = _costos_vigentes(conn, items) if guardar_costo else {}
     for it in items:
         producto_id = it.get("producto_id")
+        if not guardar_costo:
+            conn.execute(
+                """INSERT INTO sale_items
+                   (sale_id, kind, item_id, variant_id, description_snapshot, quantity, unit_price)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (venta_id, "product" if producto_id else "service", producto_id,
+                 it.get("variante_id"), it.get("nombre", ""), it.get("qty", 0), it.get("precio", 0)),
+            )
+            continue
         conn.execute(
             """INSERT INTO sale_items
-               (sale_id, kind, item_id, variant_id, description_snapshot, quantity, unit_price)
-               VALUES (?,?,?,?,?,?,?)""",
+               (sale_id, kind, item_id, variant_id, description_snapshot, quantity, unit_price,
+                unit_cost_snapshot)
+               VALUES (?,?,?,?,?,?,?,?)""",
             (venta_id, "product" if producto_id else "service", producto_id,
-             it.get("variante_id"), it.get("nombre", ""), it.get("qty", 0), it.get("precio", 0)),
+             it.get("variante_id"), it.get("nombre", ""), it.get("qty", 0), it.get("precio", 0),
+             costos.get(producto_id)),
         )
     return venta_id
+
+
+def _costos_vigentes(conn, items: list) -> dict[int, str]:
+    """`{producto_id: costo}` de los productos de `items` que tienen costo cargado.
+
+    Una sola consulta por venta, dentro de su transacción: el costo que se guarda
+    es el de este momento. Un producto sin costo (`default_cost` en 0 o NULL) o que
+    no existe **no aparece**: la línea queda con NULL, y el de un producto
+    inexistente lo sigue levantando la FK de `sale_items.item_id`
+    (`ProductoInexistente`), no esta lectura. El costo va como texto —igual que
+    `db.repository.save_sale`— para que SQLite no lo pase por `float` ni el motor
+    de PostgreSQL por un tipo que no espera."""
+    ids = sorted({it["producto_id"] for it in items if it.get("producto_id")})
+    if not ids:
+        return {}
+    marcadores = ",".join("?" for _ in ids)
+    filas = conn.execute(
+        f"SELECT id, default_cost FROM catalog_items WHERE id IN ({marcadores})", ids
+    ).fetchall()
+    costos = {f[0]: Decimal(str(f[1])) for f in filas if f[1] is not None}
+    return {pid: str(costo) for pid, costo in costos.items() if costo > 0}
 
 
 def agregar_pago(conn, venta_id: int, medio: str, monto: float, referencia: str = "",
@@ -257,7 +302,8 @@ def registrar_venta(conn, *, fecha: str, items: list, subtotal: float, descuento
                     hooks: Hooks = SIN_GANCHOS, exigir_turno: bool = False,
                     caja_con_turno: bool = False,
                     deposito_id: int | None = None,
-                    promociones: list[dict] | None = None) -> int:
+                    promociones: list[dict] | None = None,
+                    guardar_costo: bool = False) -> int:
     """Una venta de mostrador completa, dentro de la transacción de `conn`:
     número, encabezado, líneas, pagos, caja, stock, turno y el gancho.
 
@@ -297,6 +343,11 @@ def registrar_venta(conn, *, fecha: str, items: list, subtotal: float, descuento
     qué promoción se aplicó y cuánto ahorró, en la misma transacción de la venta.
     El ahorro ya viaja dentro de `descuento`: lo suma el caller.
 
+    🔴 **`guardar_costo` es ADITIVO (ADR-016).** `False` (el default, y lo único
+    que mandan Contalibra y Restolibra hoy) no escribe `unit_cost_snapshot`: la
+    venta queda como siempre. Con `True`, cada línea de producto guarda el costo
+    vigente para que el margen no dependa del costo de hoy (ver `crear_venta`).
+
     No commitea: es del caller (`crear_venta_directa`, o el cobro de un pedido
     en Restolibra, que arma la venta con estas mismas piezas).
     """
@@ -317,7 +368,7 @@ def registrar_venta(conn, *, fecha: str, items: list, subtotal: float, descuento
         conn, numero=numero, fecha=fecha, items=items, subtotal=subtotal,
         descuento=descuento, total=total, cliente_id=cliente_id,
         cliente_nombre=cliente_nombre, usuario_id=usuario_id,
-        observaciones=observaciones, estado=estado,
+        observaciones=observaciones, estado=estado, guardar_costo=guardar_costo,
     )
     if promociones:
         from . import promociones as _promociones
@@ -399,6 +450,7 @@ def crear_venta_directa(conexion: Conexion, *, fecha: str, items: list, subtotal
                         caja_con_turno: bool = False,
                         deposito_id: int | None = None,
                         promociones: list[dict] | None = None,
+                        guardar_costo: bool = False,
                         intentos: int = INTENTOS_POR_NUMERO) -> int:
     """`registrar_venta` con su transacción y el reintento por número repetido.
 
@@ -424,6 +476,7 @@ def crear_venta_directa(conexion: Conexion, *, fecha: str, items: list, subtotal
                     pagos=pagos, stock_habilitado=stock_habilitado, hooks=hooks,
                     exigir_turno=exigir_turno, caja_con_turno=caja_con_turno,
                     deposito_id=deposito_id, promociones=promociones,
+                    guardar_costo=guardar_costo,
                 )
                 conn.commit()
                 return venta_id

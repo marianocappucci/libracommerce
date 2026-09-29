@@ -186,6 +186,12 @@ class OpcionesVentas:
     #: `sale_promotions`. Requiere `erp.schema.crear_promociones`. Default
     #: `False` (el comportamiento de hoy: Contalibra y Restolibra no cambian).
     promociones: bool = False
+    #: Guardar el costo vigente de cada línea de producto en
+    #: `sale_items.unit_cost_snapshot` (ADR-016), para que el reporte de margen
+    #: (`erp.margen`) use el costo de aquella venta y no el de hoy. Default
+    #: `False` (el comportamiento de hoy: queda NULL; Contalibra y Restolibra no
+    #: cambian). Sin migración: la columna ya existe.
+    guardar_costo: bool = False
 
 
 def build_ventas_router(
@@ -296,6 +302,7 @@ def build_ventas_router(
                 stock_habilitado=bool(opciones.stock_habilitado()), hooks=opciones.hooks,
                 exigir_turno=opciones.exigir_turno, caja_con_turno=opciones.caja_con_turno,
                 deposito_id=payload.deposito_id, promociones=aplicadas,
+                guardar_costo=opciones.guardar_costo,
             )
         except ventas.SinTurno as exc:
             raise HTTPException(409, str(exc)) from None
