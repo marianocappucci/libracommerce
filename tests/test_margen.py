@@ -190,6 +190,86 @@ def test_la_devolucion_del_camino_viejo_tambien_se_resta(abrir_ventas):
     assert p["costo_estimado"] is False  # el costo es el de la venta (60), no el de hoy (999)
 
 
+@pytest.mark.parametrize("hora", [" 13:00:00", "T13:00:00"])
+def test_una_venta_con_hora_entra_en_el_dia_que_se_pide(abrir_ventas, hora):
+    """`POST /api/ventas` acepta `fecha` como texto libre: `2026-09-02 13:00:00` es del 2 de septiembre, y
+    `hasta=2026-09-02` no la puede dejar afuera (un `<=` contra el texto la dejaba: `'... 13:00:00' > '2026-09-02'`).
+    Lo mismo para la devolución de esa venta: se resta con el mismo filtro."""
+    abrir = abrir_ventas
+    with abrir() as conn:
+        yerba = _producto(conn, "Yerba", 100.0, 60.0)
+    con_hora = _venta(abrir, [(yerba, "Yerba", 4, 100.0)], fecha=D2 + hora)
+    _venta(abrir, [(yerba, "Yerba", 1, 100.0)], fecha=D1)
+    _venta(abrir, [(yerba, "Yerba", 8, 100.0)], fecha=D3 + hora)  # es del 3: afuera de ..D2
+    linea, deposito = _linea_de(abrir, con_hora)
+    with abrir() as conn:
+        ventas.devolver_items(conn, con_hora, {linea: 1}, deposito_id=deposito, usuario_id=USUARIO["id"])
+        conn.commit()
+
+    r = _reporte(abrir, desde=D1, hasta=D2)
+    assert _por_nombre(r)["Yerba"]["unidades"] == 4.0  # 1 del 1 + (4 - 1 devuelta) del 2
+    assert [x["periodo"] for x in r["periodos"]] == [D1, D2]
+    # Un solo día, el de la venta con hora, con `desde` y `hasta` iguales.
+    assert _por_nombre(_reporte(abrir, desde=D2, hasta=D2))["Yerba"]["unidades"] == 3.0
+    # Y `desde` con la hora de la venta en el mismo día no la deja afuera: se compara por día.
+    assert _por_nombre(_reporte(abrir, desde=D3 + " 20:00:00", hasta=D3))["Yerba"]["unidades"] == 8.0
+
+
+def test_una_devolucion_se_reparte_entre_las_lineas_de_la_misma_clave(abrir_ventas):
+    """Límite conocido (ADR-015): el ledger de `devolver_items` NO trae la línea (`source_id` es la venta y
+    `reason_code='devolucion'`), así que con dos líneas del mismo producto a distinto precio no se puede saber
+    de cuál volvió: se reparte por cantidad. Devolver la de $100 de una venta de $100 + $200 deja $150, no $200.
+    Si algún día el ledger guarda la línea, este test es el que hay que dar vuelta."""
+    abrir = abrir_ventas
+    with abrir() as conn:
+        yerba = _producto(conn, "Yerba", 100.0, 60.0)
+    venta = _venta(abrir, [(yerba, "Yerba", 1, 100.0), (yerba, "Yerba", 1, 200.0)])
+    with abrir() as conn:
+        primera = conn.execute("SELECT id FROM sale_items WHERE sale_id=? ORDER BY id", (venta,)).fetchone()["id"]
+        _, deposito = _linea_de(abrir, venta)
+        ventas.devolver_items(conn, venta, {primera: 1}, deposito_id=deposito, usuario_id=USUARIO["id"])
+        conn.commit()
+        filas = conn.execute(
+            "SELECT * FROM stock_movements WHERE source_id=? AND reason_code='devolucion'", (venta,)
+        ).fetchall()
+        # El ledger no dice de qué línea: ninguna columna lo lleva.
+        assert len(filas) == 1 and "sale_item_id" not in filas[0].keys()
+        assert filas[0]["source_type"] == "venta" and filas[0]["note"] == f"Devolución venta ID {venta}"
+
+    p = _por_nombre(_reporte(abrir, desde=D1, hasta=D3))["Yerba"]
+    assert (p["unidades"], p["ingreso"]) == (1.0, 150.0)
+
+
+def test_una_linea_devuelta_entera_no_arrastra_sus_avisos_de_costo(abrir_ventas):
+    """Lo que se devolvió todo no aporta nada al margen: que su costo sea estimado o falte no puede avisar nada en
+    el resumen ni en el período, donde el resto de las líneas tiene costo de verdad."""
+    abrir = abrir_ventas
+    with abrir() as conn:
+        sin_costo = _producto(conn, "Sin costo", 100.0, 0.0)
+        estimado = _producto(conn, "Estimado", 100.0, 70.0)
+        firme = _producto(conn, "Firme", 100.0, 60.0)
+    venta = _venta(abrir, [(sin_costo, "Sin costo", 2, 100.0), (estimado, "Estimado", 1, 100.0),
+                           (firme, "Firme", 3, 100.0)])
+    with abrir() as conn:
+        conn.execute("UPDATE sale_items SET unit_cost_snapshot=? WHERE sale_id=? AND item_id=?", (60, venta, firme))
+        conn.commit()
+    with abrir() as conn:
+        lineas = {f["item_id"]: f["id"] for f in conn.execute("SELECT id, item_id FROM sale_items WHERE sale_id=?",
+                                                              (venta,)).fetchall()}
+        _, deposito = _linea_de(abrir, venta)
+        ventas.devolver_items(conn, venta, {lineas[sin_costo]: 2, lineas[estimado]: 1},
+                              deposito_id=deposito, usuario_id=USUARIO["id"])
+        conn.commit()
+
+    r = _reporte(abrir, desde=D1, hasta=D3)
+    assert [p["nombre"] for p in r["productos"]] == ["Firme"]
+    assert (r["resumen"]["ingreso"], r["resumen"]["costo"]) == (300.0, 180.0)
+    assert r["resumen"]["sin_costo"] is False and r["resumen"]["costo_estimado"] is False
+    assert r["resumen"]["productos_sin_costo"] == 0 and r["resumen"]["productos_costo_estimado"] == 0
+    assert [(x["periodo"], x["sin_costo"], x["costo_estimado"]) for x in r["periodos"]] == [(D1, False, False)]
+    assert _reporte(abrir, desde=D1, hasta=D3, producto_id=sin_costo)["resumen"]["sin_costo"] is False
+
+
 def test_costo_del_snapshot_o_el_de_hoy_avisando(abrir_ventas):
     abrir = abrir_ventas
     with abrir() as conn:

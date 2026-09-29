@@ -388,3 +388,51 @@ la factory (y la pantalla es del kit, `libra-ui`).
 
 **Consecuencias.** Un producto lo monta con `app.include_router(build_margen_router(conexion=...), dependencies=admin_only)`.
 Agrupa por producto, no por variante. No incluye stock ni cobertura en días (rotación = unidades vendidas).
+
+**Nota (2026-09-29, revisión de Codex sobre v0.26.0).** Tres ajustes a `erp.margen`, sin cambiar lo decidido arriba:
+(1) el rango se compara **por día**: `sales.occurred_on` es texto libre y `POST /api/ventas` acepta `fecha` con hora, y
+`occurred_on <= 'AAAA-MM-DD'` dejaba afuera las ventas de ese último día que traían hora; ahora `desde` va por su
+fecha y `hasta` como cota exclusiva del día siguiente (mismo SQL en SQLite y PostgreSQL; también rige para el ledger de
+devoluciones, que usa el mismo filtro). (2) Una línea devuelta entera se saltea antes de acumular, así que ya no arrastra
+`costo_estimado` ni `sin_costo` al producto, al período ni al resumen. (3) **Límite conocido, no arreglado:** la
+devolución se prorratea por cantidad entre las líneas del mismo (ítem, variante). El ledger de `devolver_items` no trae
+la línea (ni `sale_item_id` ni la posición: `source_id` es la venta y `reason_code='devolucion'`), y el motor trata esas
+líneas como un pozo común; con dos líneas del mismo producto a distinto precio o snapshot, devolver la de $100 de una
+venta de $100 + $200 da $150 de ingreso en vez de $200. Atribuirla por línea exige que el ledger guarde la línea al
+devolver (un cambio de escritura de `devolver_items`), y queda como decisión aparte. `listar_ventas` y `erp.reportes`
+tienen el mismo `<=` sobre `occurred_on`; no se tocaron acá.
+
+## ADR-016 — La venta de mostrador puede guardar el costo de cada línea, y sólo si se lo pide (2026-09-29)
+
+**Contexto.** ADR-015 (margen y rotación) dejó dicho que `erp.ventas.crear_venta` —el
+camino de `POST /api/ventas`— no escribe `sale_items.unit_cost_snapshot`, así que todo
+costo de una venta de mostrador sale como estimado (el `default_cost` de HOY, no el de
+aquella venta), y anotó "guardar el snapshot al vender" como decisión aparte. Es esa
+decisión. La columna ya existe (sin migración): la llena `db.repository.save_sale` con un
+`SaleItem` del dominio, pero no la venta del POS.
+
+**Decisión.**
+- **Opt-in, aditivo.** `crear_venta`, `registrar_venta` y `crear_venta_directa` reciben
+  `guardar_costo: bool = False`, y `OpcionesVentas.guardar_costo` (default `False`) lo
+  propaga desde `POST /api/ventas`: mismo patrón que `caja_con_turno` y `promociones`.
+  Con `False` el `INSERT` de `sale_items` es carácter por carácter el de siempre —
+  Contalibra y Restolibra, que no lo mandan, no ven ninguna diferencia—.
+- **Qué se guarda.** Por cada línea con `producto_id`, el `catalog_items.default_cost`
+  vigente en el momento de la venta, leído en la misma transacción (una consulta por
+  venta, no una por línea). El costo **no** vive en la variante (`item_variants` no tiene
+  columna de costo): una línea con `variante_id` toma el del producto.
+- **Qué NO se guarda.** Las líneas de servicio o ad-hoc (sin `producto_id`) quedan en NULL.
+  Un producto sin costo cargado también: `default_cost` es `NOT NULL DEFAULT 0`, y ese 0
+  significa "nadie lo cargó", no "costó cero"; guardarlo daría un margen de 100% con cara
+  de dato real. NULL deja que `erp.margen` lo trate como lo que es (`sin_costo`).
+- **El margen no cambia de semántica.** `erp.margen._lineas_netas` ya prefería
+  `unit_cost_snapshot` cuando no es NULL y marcaba `costo_estimado` sólo si caía al
+  `default_cost`: con el snapshot guardado la línea deja de estar estimada y no se mueve
+  si el costo cambia después. Sin opt-in, todo sigue igual.
+
+**Consecuencias.** Un producto que quiera márgenes reales en las ventas nuevas monta
+`OpcionesVentas(guardar_costo=True)`. **No hay backfill**: las ventas ya hechas siguen con
+NULL (y con costo estimado en el margen) porque el costo de aquel día no se puede
+reconstruir; un backfill con el costo de hoy sería exactamente la estimación de siempre,
+pero sin avisarlo. Un producto con receta se costea con su propio `default_cost`, no con la suma de
+sus insumos: es lo que hoy guarda el catálogo.
