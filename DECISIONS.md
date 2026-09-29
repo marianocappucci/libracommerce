@@ -355,6 +355,40 @@ de −3: no hay horario de verano y no se depende de la base de zonas de la
 imagen). Lo introdujo el cableado del POS de la tanda anterior (ADR-011).
 
 
+## ADR-015 — Margen y rotación: una lectura del motor, con el costo que haya y avisando cuál (2026-09-29, v0.26.0)
+
+**Contexto.** Roadmap de producto de VentaLibra, tanda 1: "reportes de margen y rotación".
+`erp.reportes.reporte_productos_top` suma cantidad y total por producto; nadie restaba el costo.
+Decisión vigente: el motor es el origen, así que la agregación vive acá y el producto sólo monta
+la factory (y la pantalla es del kit, `libra-ui`).
+
+**Decisión.**
+- `erp.margen.reporte_margen` (sólo lee, sin migraciones) y `web.margen_router.build_margen_router`:
+  `GET /api/reportes/margen` (resumen, productos y períodos), y los CSV en `/export/productos` y
+  `/export/periodos` bajo el mismo prefijo. Ingreso, costo, margen ($ y %) y unidades (la rotación:
+  del rango, por día y por período) por producto y por período; orden por `orden`/`sentido`; `producto_id`
+  deja las tres partes sobre un producto. El gate (admin) lo pone el producto al montarlo.
+- **Qué es una venta.** `sales.status` en `confirmed`, `partially_returned` y `returned`; una anulada
+  (`cancelled`) y una pendiente de cobro (`draft`) no cuentan, igual que `puerto_de_reportes(solo_confirmadas=True)`.
+- **Las devoluciones se restan del ledger.** `devolver_items` no toca `sale_items` ni `sales.status`
+  (la venta sigue `confirmed`; sólo cambia `status_detail`, el stock y la caja), así que lo devuelto se lee de
+  `stock_movements` por las dos formas de anotarlo (`reason_code='devolucion'` y `source_type='sale_return'`) y se
+  descuenta de unidades, ingreso y costo en la misma proporción. Un producto devuelto entero no aparece.
+- **El costo.** `sale_items.unit_cost_snapshot` si existe; si no, el `default_cost` de hoy **marcado como
+  estimado** (`costo_estimado`); si tampoco hay, la línea cuenta con costo 0 y queda marcada (`sin_costo`), porque un
+  margen de 100% que no lo es no debe leerse como real. 🔴 **`erp.ventas.crear_venta` —el camino de `POST /api/ventas`—
+  no escribe `unit_cost_snapshot`**: sólo lo llena `db.repository.save_sale` con un `SaleItem` del dominio. Hoy, para las
+  ventas de mostrador, todo costo sale como estimado. Guardar el snapshot al vender es un cambio de escritura de la
+  venta (una columna que ya existe, sin migración) que **no se hizo acá**: queda como decisión aparte.
+- **El descuento.** El de línea se resta de la línea; el de la venta (`sales.discount_total`, donde viajan el
+  descuento manual y el ahorro de las promociones) se reparte entre las líneas en proporción a lo que valen, sin volver
+  a restar lo que ya explican los descuentos de línea. No se descuenta IVA (`crear_venta` guarda `tax_amount` en 0).
+- Se agrega en Python (Decimal) y no en SQL, para que el reparto y el neto de devoluciones no dependan de SQL que
+  corra distinto en SQLite y PostgreSQL. Costo: recorre las líneas del rango; para el volumen de un comercio alcanza.
+
+**Consecuencias.** Un producto lo monta con `app.include_router(build_margen_router(conexion=...), dependencies=admin_only)`.
+Agrupa por producto, no por variante. No incluye stock ni cobertura en días (rotación = unidades vendidas).
+
 ## ADR-016 — La venta de mostrador puede guardar el costo de cada línea, y sólo si se lo pide (2026-09-29)
 
 **Contexto.** ADR-015 (margen y rotación) dejó dicho que `erp.ventas.crear_venta` —el
