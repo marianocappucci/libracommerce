@@ -75,6 +75,10 @@ _ESTADOS_EN_CAMINO = ("draft", "sent", "partial")
 _MIN_DIAS_DE_MUESTRA = 7
 #: Decimales de una unidad que admite fracciones y no declara `decimal_scale`.
 _ESCALA_FRACCION = 3
+#: Decimales con que se limpia el ruido de `float` de un saldo (ver `_stock`).
+_ESCALA_RUIDO = 10
+#: Mínimo de decimales con que se informa una cantidad de una unidad entera o de escala baja.
+_ESCALA_MINIMA_DE_INFORME = 3
 
 _CERO = Decimal("0")
 
@@ -84,8 +88,9 @@ def _dec(valor) -> Decimal:
 
 
 def _stock(valor) -> Decimal:
-    """Un saldo o un movimiento como `Decimal`, sin el ruido de la suma en `float` (`0.1 + 0.2`)."""
-    return round(_dec(valor), 4)
+    """Un saldo o un movimiento como `Decimal`, sin el ruido de la suma en `float` (`0.1 + 0.2`). Se redondea a 10
+    decimales, mucho más fino que cualquier `decimal_scale`: sólo saca el ruido, no toca la precisión guardada."""
+    return round(_dec(valor), _ESCALA_RUIDO)
 
 
 def _techo(valor: Decimal, escala: int) -> Decimal:
@@ -94,7 +99,7 @@ def _techo(valor: Decimal, escala: int) -> Decimal:
     return (valor * paso).to_integral_value(rounding=ROUND_CEILING) / paso
 
 
-def _cantidad(valor: Decimal, escala: int = 3):
+def _cantidad(valor: Decimal, escala: int):
     """Un `int` para lo que se pide de una unidad entera (`escala` 0), un `float` redondeado para el resto."""
     return int(valor) if escala == 0 else float(round(valor, escala))
 
@@ -240,6 +245,9 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
     for p in productos:
         pid = p["id"]
         escala = (int(p["decimal_scale"] or 0) or _ESCALA_FRACCION) if p["allows_fraction"] else 0
+        # Todas las cantidades se informan con la escala de la unidad (una de 6 decimales no puede mostrar 0,0004 como
+        # 0,0); una entera, o de menos de 3, conserva los 3 de siempre por si el saldo trae fracción. `sugerido` va con `escala`.
+        informe = max(escala, _ESCALA_MINIMA_DE_INFORME)
         stock = saldos.get(pid, _CERO)
         pedido = en_camino.get(pid, _CERO)
         minimo = _dec(p["min_stock"])
@@ -265,10 +273,10 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
         cobertura = None if sin_ventas else float(round(max(stock, _CERO) * dias_de_muestra / unidades, 1))
         filas.append({
             "producto_id": pid, "codigo": p["codigo"], "nombre": p["name"], "unidad": p["unit_code"],
-            "categoria": p["categoria"], "stock": _cantidad(stock), "en_camino": _cantidad(pedido),
-            "en_camino_sin_sucursal": _cantidad(en_camino_sin_sucursal.get(pid, _CERO)),
-            "stock_minimo": _cantidad(minimo), "unidades_vendidas": _cantidad(unidades),
-            "dias_con_stock": dias_con_stock, "rotacion_diaria": _cantidad(unidades / dias_de_muestra),
+            "categoria": p["categoria"], "stock": _cantidad(stock, informe), "en_camino": _cantidad(pedido, informe),
+            "en_camino_sin_sucursal": _cantidad(en_camino_sin_sucursal.get(pid, _CERO), informe),
+            "stock_minimo": _cantidad(minimo, informe), "unidades_vendidas": _cantidad(unidades, informe),
+            "dias_con_stock": dias_con_stock, "rotacion_diaria": _cantidad(unidades / dias_de_muestra, informe),
             "cobertura_dias": cobertura, "sugerido": _cantidad(sugerido, escala), "motivo": motivo,
             "sin_ventas": sin_ventas, "posible_quiebre": stock <= 0 or sin_stock > 0,
             "variantes": variantes.get(pid, 0),

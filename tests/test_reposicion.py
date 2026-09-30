@@ -409,6 +409,52 @@ def test_una_unidad_entera_se_pide_entera_y_una_fraccionable_no(abrir_ventas):
     assert filas["Queso"]["sugerido"] == 1.8
 
 
+def _unidad_fina(conn, nombre, *, inicial, minimo=0.0, escala=6):
+    """Un producto en una unidad fraccionable de `escala` decimales, con `inicial` cargado por el ledger directo
+    (`ajustar_stock` redondea el delta a 4 decimales y no sirve para cantidades más finas)."""
+    pid = catalogo.create_producto(conn, nombre, precio_venta=100000.0, precio_costo=1.0, stock_minimo=minimo,
+                                   unidad="mg", permite_fraccion=True)
+    conn.execute("UPDATE units SET decimal_scale=? WHERE code='mg'", (escala,))
+    if inicial:
+        stock.add_movimiento_stock(conn, pid, "entrada", inicial, "inicial", fecha=PREVIA)
+    return pid
+
+
+def test_el_saldo_no_se_redondea_antes_de_la_cuenta(abrir_ventas):
+    """Una unidad de 6 decimales con stock 0,00001 y mínimo 0,00001: el mínimo está cubierto. Redondear el saldo a 4
+    decimales antes de comparar lo dejaba en 0 y pedía 0,00001."""
+    abrir = abrir_ventas
+    with abrir() as conn:
+        _unidad_fina(conn, "Fino", inicial=0.00001, minimo=0.00001)
+    assert _reporte(abrir) == []
+    [fila] = _reporte(abrir, solo_a_pedir=False)
+    assert (fila["stock"], fila["sugerido"], fila["motivo"]) == (0.00001, 0, None)
+    # Y un mínimo apenas mayor sí falta, por lo que falta (0,00002 − 0,00001).
+    with abrir() as conn:
+        conn.execute("UPDATE catalog_items SET min_stock=0.00003")
+    assert _reporte(abrir)[0]["sugerido"] == 0.00002
+
+
+def test_todas_las_cantidades_se_informan_con_la_escala_de_la_unidad(abrir_ventas):
+    """Con una unidad de 6 decimales un saldo real de 0,0004 no puede salir como 0,0: `stock`, `en_camino`, el mínimo, lo
+    vendido y la rotación se formatean con la escala de la unidad, igual que `sugerido`."""
+    abrir = abrir_ventas
+    with abrir() as conn:
+        fino = _unidad_fina(conn, "Fino", inicial=0.0004, minimo=0.0002)
+    proveedor = _proveedor(abrir)
+    _orden(abrir, proveedor, [(fino, 0.00025)])
+    _venta(abrir, [(fino, "Fino", 0.00003, 100000.0)], "2026-09-10")  # 3,00 de venta
+    [fila] = _reporte(abrir, solo_a_pedir=False)
+    assert fila["stock"] == 0.00037  # 0,0004 − 0,00003
+    assert fila["en_camino"] == 0.00025 and fila["en_camino_sin_sucursal"] == 0.00025
+    assert fila["stock_minimo"] == 0.0002 and fila["unidades_vendidas"] == 0.00003
+    assert fila["rotacion_diaria"] == 0.000001  # 0,00003 / 30
+    # Una unidad de la escala de siempre (3 decimales) se informa como antes.
+    with abrir() as conn:
+        conn.execute("UPDATE units SET decimal_scale=3 WHERE code='mg'")
+    assert _reporte(abrir, solo_a_pedir=False)[0]["stock"] == 0.0
+
+
 def test_una_unidad_fraccionable_se_redondea_a_su_escala_decimal(abrir_ventas):
     abrir = abrir_ventas
     with abrir() as conn:
