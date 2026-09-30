@@ -25,10 +25,13 @@ from __future__ import annotations
 
 from datetime import date as _date
 from datetime import datetime as _datetime
+from decimal import Decimal
 from typing import Any
 
+from . import lotes
 from .catalogo import get_default_deposito_id
 from .hooks import SIN_GANCHOS, Hooks
+from .lotes import MAX_LARGO_LOTE, normalizar_lote, normalizar_vencimiento  # noqa: F401  (se reexportan)
 
 # Tipo del producto -> movement_type semántico del motor. El tipo original se
 # guarda aparte en `reason_code`, así que este mapeo puede ser muchos-a-uno.
@@ -80,38 +83,8 @@ def _tipo_de_row(movement_type: str, reason_code: str | None) -> str:
     return reason_code or _MOVEMENT_TYPE_A_TIPO.get(movement_type, movement_type)
 
 
-#: Largo máximo de un código de lote: es lo que se imprime en el envase, no un texto libre.
-MAX_LARGO_LOTE = 64
-
-
-def normalizar_lote(lot_code) -> str:
-    """El código de lote recortado. `ValueError` si no es un texto, si queda vacío o si pasa de `MAX_LARGO_LOTE`
-    caracteres: un lote sin código se expresa con `None` (no mandando el parámetro), no con una cadena vacía."""
-    if not isinstance(lot_code, str):
-        raise ValueError(f"lot_code tiene que ser un texto: {lot_code!r}")
-    lote = lot_code.strip()
-    if not lote:
-        raise ValueError("lot_code no puede estar vacío; para un movimiento sin lote no se manda")
-    if len(lote) > MAX_LARGO_LOTE:
-        raise ValueError(f"lot_code no puede pasar de {MAX_LARGO_LOTE} caracteres: {lote[:20]!r}...")
-    return lote
-
-
-def normalizar_vencimiento(expires_at) -> str:
-    """Un vencimiento como `'AAAA-MM-DD'`. Acepta un `date`, un `datetime` (se toma su fecha, tal como viene: sin
-    convertir de zona) o un texto ISO 8601, con o sin hora (`'2026-10-05'`, `'2026-10-05T00:00:00'`,
-    `'2026-10-05 10:30'`, `'...Z'`). Cualquier otra cosa es un `ValueError` con el valor a la vista."""
-    if isinstance(expires_at, _datetime):
-        return expires_at.date().isoformat()
-    if isinstance(expires_at, _date):
-        return expires_at.isoformat()
-    if isinstance(expires_at, str) and expires_at.strip():
-        texto = expires_at.strip()
-        try:
-            return _datetime.fromisoformat(texto).date().isoformat()  # 3.11+: acepta también la fecha sola
-        except ValueError:
-            pass
-    raise ValueError(f"expires_at no es una fecha válida (AAAA-MM-DD o ISO 8601): {expires_at!r}")
+# `MAX_LARGO_LOTE`, `normalizar_lote` y `normalizar_vencimiento` viven ahora en `erp.lotes` (A-4 PR-2: `erp.lotes` no
+# puede importar este módulo y los dos las necesitan); se reexportan acá con el mismo nombre.
 
 
 def add_movimiento_stock(conn, producto_id: int, tipo: str, cantidad: float,
@@ -300,6 +273,34 @@ def _es_servicio(conn, producto_id: int) -> bool:
     return bool(row) and row[0] == "service"
 
 
+def _salida_por_lote(conn, *, producto_id: int, cantidad: float, referencia: str, venta_id: int,
+                     usuario_id: int | None, fecha: str, deposito_id: int | None, variant_id: int | None = None):
+    """La salida por venta de `cantidad` (negativa) de un producto **marcado** (`tracks_expiry=1`, ya tomado con
+    `lotes.tomar_productos`): una fila por bucket en orden FEFO (`lotes.plan_fefo`), cada una con el `lot_code` y el
+    `expires_at` de su bucket. Un marcado sin lotes da un único tramo «sin lote» y entonces la llamada es, argumento por
+    argumento, la de siempre (incluida la cantidad original en `float`, sin pasar por `Decimal`)."""
+    if not cantidad:
+        return add_movimiento_stock(conn, producto_id=producto_id, tipo="venta", cantidad=cantidad,
+                                    referencia=referencia, venta_id=venta_id, usuario_id=usuario_id, fecha=fecha,
+                                    variant_id=variant_id, deposito_id=deposito_id)
+    deposito = deposito_id if deposito_id is not None else get_default_deposito_id(conn)
+    tramos = lotes.plan_fefo(conn, producto_id, deposito, variant_id, Decimal(str(abs(cantidad))))
+    for t in tramos:
+        if t.sin_lote:
+            add_movimiento_stock(
+                conn, producto_id=producto_id, tipo="venta",
+                cantidad=cantidad if len(tramos) == 1 else -float(t.cantidad),
+                referencia=referencia, venta_id=venta_id, usuario_id=usuario_id, fecha=fecha,
+                variant_id=variant_id, deposito_id=deposito_id,
+            )
+        else:
+            add_movimiento_stock(
+                conn, producto_id=producto_id, tipo="venta", cantidad=-float(t.cantidad),
+                referencia=referencia, venta_id=venta_id, usuario_id=usuario_id, fecha=fecha,
+                variant_id=variant_id, deposito_id=deposito_id, lot_code=t.lote, expires_at=t.vence,
+            )
+
+
 def descontar_stock_venta(conn, venta_id: int, items: list, fecha: str = "",
                           usuario_id: int | None = None,
                           hooks: Hooks = SIN_GANCHOS,
@@ -321,26 +322,60 @@ def descontar_stock_venta(conn, venta_id: int, items: list, fecha: str = "",
     default) deja que `add_movimiento_stock` resuelva el depósito por
     defecto, exactamente como hoy. Con un valor, se descuenta de ESE depósito
     — el ítem, o sus insumos si tiene receta.
+
+    🔑 **FEFO para los productos marcados (ADR-018, A-4 PR-2).** Un producto (o un insumo de receta) con
+    `catalog_items.tracks_expiry = 1` no sale del bucket «sin lote»: sale de los lotes en orden FEFO, **una fila `sale`
+    por lote consumido** con su `lot_code` y `expires_at` (ver `erp.lotes`: con fecha por vencimiento, con código sin
+    fecha, «sin lote» último; el faltante va a una fila más del «sin lote»). Antes de leer los saldos se toman los
+    productos marcados (`lotes.tomar_productos`, en orden de id), así dos ventas simultáneas no consumen dos veces el
+    mismo lote. **Un producto sin marcar, y uno marcado sin lotes, escriben EXACTAMENTE las filas de siempre**; y si
+    ningún producto de la venta está marcado (una sola consulta lo dice) el código es el de antes. Los insumos sin
+    marcar y los platos de una receta no cambian.
     """
+    # Primero se resuelve qué descuenta cada línea (servicio, receta) y se sondea UNA vez si algún producto que va a
+    # salir está marcado (`tracks_expiry = 1`): sin ninguno, el resto es EXACTAMENTE el código de siempre.
+    lineas = []
     for item in items:
         pid = item.get("producto_id")
         if not pid:
             continue
         if _es_servicio(conn, pid):
             continue
+        lineas.append((item, pid, hooks.resolver_receta(pid, item)))
+    marcados = lotes.ids_marcados(conn, _ids_que_salen(lineas))
+    if marcados:
+        # FEFO: se toman los productos marcados (en orden de id) ANTES de leer saldos; `plan_fefo` relee después.
+        lotes.tomar_productos(conn, marcados)
+    for item, pid, insumos in lineas:
         qty = abs(float(item.get("qty", 0)))
-        insumos = hooks.resolver_receta(pid, item)
         if insumos:
             # La receta se resuelve en OTROS ítems (los insumos): la variante
             # del plato vendido no tiene sentido acá, así que no viaja.
             for insumo in insumos:
+                cantidad = -(float(insumo.cantidad) * qty)
+                if insumo.item_id in marcados:
+                    _salida_por_lote(
+                        conn, producto_id=insumo.item_id, cantidad=cantidad,
+                        referencia=f"Venta ID {venta_id} (receta)",
+                        venta_id=venta_id, usuario_id=usuario_id, fecha=fecha,
+                        deposito_id=deposito_id,
+                    )
+                    continue
                 add_movimiento_stock(
                     conn, producto_id=insumo.item_id, tipo="venta",
-                    cantidad=-(float(insumo.cantidad) * qty),
+                    cantidad=cantidad,
                     referencia=f"Venta ID {venta_id} (receta)",
                     venta_id=venta_id, usuario_id=usuario_id, fecha=fecha,
                     deposito_id=deposito_id,
                 )
+        elif pid in marcados:
+            _salida_por_lote(
+                conn, producto_id=pid, cantidad=-qty,
+                referencia=f"Venta ID {venta_id}",
+                venta_id=venta_id, usuario_id=usuario_id, fecha=fecha,
+                variant_id=item.get("variante_id"),
+                deposito_id=deposito_id,
+            )
         else:
             add_movimiento_stock(
                 conn, producto_id=pid, tipo="venta",
@@ -350,3 +385,10 @@ def descontar_stock_venta(conn, venta_id: int, items: list, fecha: str = "",
                 variant_id=item.get("variante_id"),
                 deposito_id=deposito_id,
             )
+
+
+def _ids_que_salen(lineas) -> list[int]:
+    """Los productos que van a escribir una fila: el ítem si no tiene receta, y sus insumos si la tiene."""
+    return [i.item_id for _, _, insumos in lineas if insumos for i in insumos] + [
+        pid for _, pid, insumos in lineas if not insumos
+    ]
