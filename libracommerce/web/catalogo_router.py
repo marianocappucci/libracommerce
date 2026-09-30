@@ -49,6 +49,27 @@ cambian de comportamiento:
   `item_variants`.
 - **`incluir_variantes`** en `GET /api/productos`: opcional, default `False`.
   Sin él, la respuesta es exactamente la de siempre.
+
+## Carga de vencimientos (2026-09-30, ADR-018): la marca `vence` en el producto
+
+**Opt-in** con `OpcionesCatalogo.con_vencimientos` (default `False`): apagada, el router es **byte a byte** el de
+siempre (Contalibra y Restolibra no cambian; hay un test que compara el JSON). Prendida:
+
+- el listado (`GET /api/productos`), el escaneo (`GET /escanear`, dentro de `producto`) y la respuesta del alta y la
+  edición devuelven `vence: bool` (`catalog_items.tracks_expiry`) en el producto. **Una sola consulta auxiliar por
+  pedido** para todo el listado, no una por producto, y **tolera una base sin la revisión `0002`** (`vence` es `false`
+  y nada se rompe: se sondea por metadatos, `erp.vencimientos.tiene_revision`).
+- el alta y la edición aceptan `vence` (`true`/`false`, estricto). **Si no viene, la marca no se toca** (editar otros
+  campos nunca la pierde: `save_catalog_item` no la escribe). Si viene y cambió, se marca o desmarca con
+  `erp.vencimientos.marcar_vence`. `OpcionesCatalogo.autorizar_marcar_vence(usuario) -> bool` decide quién puede
+  cambiarla: si devuelve `False`, **403** y no se guarda nada del resto de la edición (la autorización y las reglas se
+  resuelven **antes** de escribir); sin gancho, cualquiera que pueda editar el producto puede marcar. Sin la revisión
+  `0002` (y `vence` distinto de lo que hay), **409** con el comando que falta; un servicio no se puede marcar (409).
+  Con el gancho puesto el router resuelve `usuario_actual` en el alta y la edición.
+- 🔵 `save_catalog_item` commitea por su cuenta (es del repositorio, que no se toca acá), así que no hay una única
+  transacción SQL con el guardado: en su lugar, **todo lo que puede rechazar el cambio de marca se resuelve antes de
+  escribir** (autorización, revisión, servicio) y la marca se escribe **después** del guardado, en la misma conexión y
+  sin commit propio (la confirma el cierre del pedido). Un guardado que falla (422) nunca deja la marca cambiada.
 """
 
 import sqlite3
@@ -58,7 +79,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Literal
 
-from ..erp import catalogo, stock
+from ..erp import catalogo, stock, vencimientos
 from . import fastapi as _fastapi
 
 # La guarda traduce la ausencia del extra `[web]` a un error que lo nombra;
@@ -67,7 +88,7 @@ from . import fastapi as _fastapi
 # y FastAPI no resuelve un modelo definido adentro de una closure).
 _fastapi()
 from fastapi import APIRouter, Depends, HTTPException  # noqa: E402
-from pydantic import BaseModel  # noqa: E402
+from pydantic import BaseModel, StrictBool  # noqa: E402
 
 #: La lista cerrada de motivos de merma de Restolibra (`web/templates/stock/ajuste.html`).
 MOTIVOS_MERMA_GASTRONOMICOS = (
@@ -110,6 +131,15 @@ class OpcionesCatalogo:
     validar_producto: Callable[["ProductoPayload", dict | None], None] | None = None
     #: Antes de borrar un producto (`actual`): un producto con historial no se borra, se desactiva.
     validar_eliminacion: Callable[[dict], None] | None = None
+    #: Carga de vencimientos (ADR-018, 2026-09-30): el producto lleva la marca `vence` (`catalog_items.tracks_expiry`).
+    #: Apagada (el default) el router es byte a byte el de siempre. Prendida: listado, escaneo, alta y edición devuelven
+    #: `vence: bool`, y el alta y la edición aceptan `vence` para marcar o desmarcar. Hace falta la revisión `0002`
+    #: para marcar; sin ella `vence` es `false` y leer no se rompe.
+    con_vencimientos: bool = False
+    #: Quién puede marcar o desmarcar (con `con_vencimientos`): recibe el usuario de la sesión (`usuario_actual`) y
+    #: devuelve si puede. `False` es un 403 y no se guarda nada de la edición. `None` = cualquiera que pueda editar el
+    #: producto.
+    autorizar_marcar_vence: Callable[[dict], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -184,6 +214,13 @@ class ProductoPayload(BaseModel):
     #: `False` desde siempre) quedan exactamente igual. Ver
     #: `catalogo._resolver_permite_fraccion`.
     permite_fraccion: bool | None = None
+
+
+class ProductoConVencePayload(ProductoPayload):
+    """`ProductoPayload` más la marca `vence`, sólo con `OpcionesCatalogo.con_vencimientos` (apagada, el payload es el
+    de siempre). `None` (ausente) NO toca la marca; estricto: `"si"` o `1` no son un booleano."""
+
+    vence: StrictBool | None = None
 
 
 class CategoriaPayload(BaseModel):
@@ -276,6 +313,11 @@ def _deps(usuario_actual, conexion):
     return (conexion or _conexion_default()), (usuario_actual or _sin_usuario)
 
 
+def _nadie() -> None:
+    """Sin opción de vencimientos (o sin gancho) el router no resuelve la sesión: una dependencia vacía."""
+    return None
+
+
 # ── Productos y categorías ───────────────────────────────────────────────
 
 
@@ -289,8 +331,12 @@ def build_productos_router(
     """`GET`/`POST` de productos, `PUT`/`DELETE /{pid}`, y las categorías
     (`GET`/`POST /categorias`, `DELETE /categorias/{cid}`). Sin gate propio: lo
     pone el producto al montarlo."""
-    abrir, _ = _deps(usuario_actual, conexion)
+    abrir, usuario = _deps(usuario_actual, conexion)
     opciones = opciones or OpcionesCatalogo()
+    con_vence = opciones.con_vencimientos
+    # Sin la opción (Contalibra, Restolibra) el payload, las respuestas y las dependencias son los de siempre.
+    Payload = ProductoConVencePayload if con_vence else ProductoPayload
+    sesion = Depends(usuario) if con_vence and opciones.autorizar_marcar_vence is not None else Depends(_nadie)
     categorias_escriben = [opciones.autorizar_categorias] if opciones.autorizar_categorias is not None else []
 
     router = APIRouter(prefix=prefix, tags=["productos"])
@@ -306,6 +352,10 @@ def build_productos_router(
             if incluir_variantes:
                 for p in productos:
                     p["variantes"] = catalogo.get_variantes_producto(conn, p["id"])
+            if con_vence:
+                marcados = vencimientos.ids_que_vencen(conn)  # una consulta para todo el listado
+                for p in productos:
+                    p["vence"] = p["id"] in marcados
             return productos
 
     @router.get("/unidades")
@@ -328,6 +378,8 @@ def build_productos_router(
                 raise HTTPException(422, str(e)) from e
             if resultado is None:
                 raise HTTPException(404, "No hay ningún ítem con ese código.")
+            if con_vence and resultado.get("producto"):
+                resultado["producto"]["vence"] = bool(vencimientos.ids_que_vencen(conn, resultado["producto"]["id"]))
             return resultado
 
     @router.get("/categorias")
@@ -350,8 +402,32 @@ def build_productos_router(
             catalogo.delete_categoria_producto(conn, cid)
             return catalogo.get_categorias_producto(conn)
 
+    def _cambio_de_marca(conn, payload, user: dict | None, vence_actual: bool) -> bool | None:
+        """El valor al que hay que llevar la marca `vence`, o `None` si no hay que tocarla (no vino o no cambió). Todo
+        lo que puede rechazar el cambio se resuelve **antes** de escribir: autorización (403), la revisión `0002` que
+        falta (409) y un servicio, que no tiene inventario (409)."""
+        if payload.vence is None or payload.vence == vence_actual:
+            return None
+        if opciones.autorizar_marcar_vence is not None and not opciones.autorizar_marcar_vence(user or {}):
+            raise HTTPException(403, "No tenés permiso para marcar o desmarcar productos que vencen.")
+        try:
+            vencimientos._exigir_revision(conn)
+        except vencimientos.SinRevision as e:
+            raise HTTPException(409, str(e)) from e
+        if payload.tipo == "servicio":
+            raise HTTPException(409, "Un servicio no tiene inventario: no lleva marca de vencimiento.")
+        return payload.vence
+
+    def _marcar(conn, pid: int, vence: bool) -> None:
+        try:
+            vencimientos.marcar_vence(conn, pid, vence)
+        except vencimientos.ProductoNoEncontrado as e:
+            raise HTTPException(404, str(e)) from e
+        except vencimientos.VencimientosError as e:
+            raise HTTPException(409, str(e)) from e
+
     @router.post("")
-    def crear(payload: ProductoPayload):
+    def crear(payload: Payload, user: dict | None = sesion):
         nombre = payload.nombre.strip()
         if not nombre:
             raise HTTPException(422, "El nombre es obligatorio.")
@@ -360,6 +436,7 @@ def build_productos_router(
         if opciones.validar_producto:
             opciones.validar_producto(payload, None)
         with abrir() as conn:
+            marca = _cambio_de_marca(conn, payload, user, False) if con_vence else None
             if not codigo and opciones.generar_codigo_si_falta:
                 codigo = catalogo.generar_codigo_producto(conn, categoria)
             try:
@@ -375,10 +452,15 @@ def build_productos_router(
                 )
             except Exception as e:
                 raise HTTPException(422, str(e)) from e
-            return catalogo.get_producto(conn, pid)
+            producto = catalogo.get_producto(conn, pid)
+            if con_vence:
+                if marca is not None:
+                    _marcar(conn, pid, marca)
+                producto["vence"] = bool(marca)
+            return producto
 
     @router.put("/{pid}")
-    def actualizar(pid: int, payload: ProductoPayload):
+    def actualizar(pid: int, payload: Payload, user: dict | None = sesion):
         nombre = payload.nombre.strip()
         if not nombre:
             raise HTTPException(422, "El nombre es obligatorio.")
@@ -386,8 +468,13 @@ def build_productos_router(
             actual = catalogo.get_producto(conn, pid)
             if not actual:
                 raise HTTPException(404, "Producto no encontrado")
+            marca = None
+            if con_vence:
+                actual["vence"] = pid in vencimientos.ids_que_vencen(conn, pid)
             if opciones.validar_producto:
                 opciones.validar_producto(payload, actual)
+            if con_vence:
+                marca = _cambio_de_marca(conn, payload, user, actual["vence"])   # todo lo rechazable, antes de escribir
             try:
                 catalogo.update_producto(
                     conn, pid=pid, nombre=nombre, codigo=payload.codigo.strip(),
@@ -401,7 +488,12 @@ def build_productos_router(
                 )
             except Exception as e:
                 raise HTTPException(422, str(e)) from e
-            return catalogo.get_producto(conn, pid)
+            if marca is not None:
+                _marcar(conn, pid, marca)   # después del guardado: un guardado que falla no deja la marca cambiada
+            producto = catalogo.get_producto(conn, pid)
+            if con_vence:
+                producto["vence"] = actual["vence"] if marca is None else marca
+            return producto
 
     @router.delete("/{pid}")
     def eliminar(pid: int):
