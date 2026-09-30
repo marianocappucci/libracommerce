@@ -51,6 +51,8 @@ MAX_DIAS_AVISO = 365
 #: Decimales con que se limpia el ruido de `float` de una suma (mismo criterio que `erp.reposicion`).
 ESCALA_RUIDO = 10
 CERO = Decimal("0")
+#: Diferencia relativa por debajo de la cual una suma de tramos cuenta como igual a lo pedido (ruido de `float`).
+UMBRAL_DE_RUIDO = Decimal("1e-12")
 
 TIPO_LOTE_VENCIDO = "lote_vencido"
 TIPO_POR_VENCER = "por_vencer"
@@ -211,7 +213,8 @@ class Tramo:
 
 
 def _cantidad(valor) -> Decimal:
-    """La cantidad pedida como `Decimal` a 10 decimales (los `float` de una receta traen ruido: `0.1 * 3`)."""
+    """La cantidad pedida como `Decimal` **exacto** (la representación más corta del `float`, sin redondear): una
+    cantidad positiva nunca se convierte en cero ni pierde decimales por el camino."""
     if isinstance(valor, bool):
         raise ValueError(f"cantidad tiene que ser un número: {valor!r}")
     try:
@@ -220,7 +223,7 @@ def _cantidad(valor) -> Decimal:
         raise ValueError(f"cantidad tiene que ser un número: {valor!r}") from None
     if not cant.is_finite():
         raise ValueError(f"cantidad tiene que ser un número finito: {valor!r}")
-    return saldo_limpio(cant)
+    return cant
 
 
 def _orden_fefo(clave: tuple[str | None, str | None]) -> tuple:
@@ -229,25 +232,46 @@ def _orden_fefo(clave: tuple[str | None, str | None]) -> tuple:
     return (0, vence, lote or "") if vence is not None else (1, "", lote or "")
 
 
-def _repartir(buckets: dict[tuple, Decimal], cantidad: Decimal) -> list[Tramo]:
-    """Reparte `cantidad` entre los buckets con saldo > 0 en orden FEFO y **descuenta** lo repartido de `buckets` (así
+def _repartir(buckets: dict[tuple, Decimal], exacta: Decimal) -> list[Tramo]:
+    """Reparte `exacta` entre los buckets con saldo > 0 en orden FEFO y **descuenta** lo repartido de `buckets` (así
     la siguiente línea del mismo producto ve lo que dejó la anterior). Sin lotes que consumir, el único tramo es el del
-    «sin lote» por la cantidad entera."""
+    «sin lote» por la cantidad entera.
+
+    Regla: **una cantidad positiva nunca se pierde.** Los lotes se reparten con la cantidad limpiada a 10 decimales (el
+    ruido de `float`, `0.1 + 0.2`, no deja restos ni filas de faltante), pero la **suma de los tramos es siempre igual
+    a la cantidad exacta** (salvo el ruido de `float`, menos de 1e-12 relativo): si la limpieza dejó una diferencia real
+    (menos de 1e-10) se suma al último tramo, y si dejó el
+    plan vacío (una cantidad de 4e-11) el único tramo es el «sin lote» con la cantidad original."""
     tramos: list[Tramo] = []
-    restante = cantidad
-    if restante <= 0:
+    if exacta <= 0:
         return tramos
-    for clave in sorted((k for k, s in buckets.items() if s > 0 and k != (None, None)), key=_orden_fefo):
-        toma = min(restante, buckets[clave])
-        tramos.append(Tramo(clave[0], clave[1], toma))
-        buckets[clave] -= toma
-        restante -= toma
-        if restante <= 0:
-            return tramos
-    # Lo que queda va TODO a una fila del «sin lote»: lo que ese bucket tenía y, si no alcanza, el faltante.
-    disponible = max(buckets.get((None, None), CERO), CERO)
-    tramos.append(Tramo(None, None, restante, faltante=max(restante - disponible, CERO)))
-    buckets[(None, None)] = buckets.get((None, None), CERO) - restante
+    restante = saldo_limpio(exacta)
+    if restante > 0:
+        for clave in sorted((k for k, s in buckets.items() if s > 0 and k != (None, None)), key=_orden_fefo):
+            toma = min(restante, buckets[clave])
+            tramos.append(Tramo(clave[0], clave[1], toma))
+            buckets[clave] -= toma
+            restante -= toma
+            if restante <= 0:
+                break
+        if restante > 0:
+            # Lo que queda va TODO a una fila del «sin lote»: lo que ese bucket tenía y, si no alcanza, el faltante.
+            disponible = max(buckets.get((None, None), CERO), CERO)
+            tramos.append(Tramo(None, None, restante, faltante=max(restante - disponible, CERO)))
+            buckets[(None, None)] = buckets.get((None, None), CERO) - restante
+    if not tramos:
+        # La limpieza dejó el plan vacío (una cantidad de 4e-11): nunca se vuelve cero, va entera y sin tocar al «sin lote».
+        disponible = max(buckets.get((None, None), CERO), CERO)
+        tramos.append(Tramo(None, None, exacta, faltante=max(exacta - disponible, CERO)))
+        buckets[(None, None)] = buckets.get((None, None), CERO) - exacta
+        return tramos
+    resto = exacta - sum((t.cantidad for t in tramos), CERO)
+    if abs(resto) > UMBRAL_DE_RUIDO * max(Decimal(1), exacta):
+        # Una diferencia real (1.00000000004 → 1.0 al limpiar): se suma al último tramo. El ruido del `float`
+        # (4e-17 de 0.1 + 0.2) queda afuera: no vale una fila ni un lote «0.20000000000000004».
+        ultimo = tramos[-1]
+        tramos[-1] = Tramo(ultimo.lote, ultimo.vence, ultimo.cantidad + resto, ultimo.faltante)
+        buckets[(ultimo.lote, ultimo.vence)] = buckets.get((ultimo.lote, ultimo.vence), CERO) - resto
     return tramos
 
 
@@ -336,7 +360,7 @@ def _juntar(avisos: list[dict]) -> list[dict]:
         clave = (a["tipo"], a["producto_id"], a["deposito_id"], a["variante_id"], a["lote"], a["vence"])
         if clave in juntos:
             total = dec(juntos[clave]["cantidad"]) + dec(a["cantidad"])
-            juntos[clave]["cantidad"] = _num(saldo_limpio(total))
+            juntos[clave]["cantidad"] = _num(total)
         else:
             juntos[clave] = dict(a)
     return list(juntos.values())
@@ -373,7 +397,7 @@ def avisos_de_venta(conn, venta_id: int, *, hoy: _date | None = None, dias: int 
     sin_lote: dict[tuple, dict] = {}     # (item, depósito, variante) -> {"cantidad", "hasta_id"}
     for f in filas:
         lote, vence = lote_de_fila(f["lot_code"]), vence_de_fila(f["expires_at"])
-        cantidad = -saldo_limpio(f["quantity_delta"])
+        cantidad = -dec(f["quantity_delta"])
         if cantidad <= 0:
             continue
         if lote is None and vence is None:

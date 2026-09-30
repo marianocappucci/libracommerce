@@ -319,6 +319,75 @@ def test_plan_fefo_es_una_lectura_y_una_cantidad_nula_no_planifica_nada(abrir_fe
     assert _ledger(abrir_fefo) == antes
 
 
+# ═══════════════════════════ Una cantidad positiva nunca se pierde (ni se vuelve cero) ═══════════════════════════
+
+#: Cantidades que el redondeo a 10 decimales (o un `float`) podría comerse: minúsculas, con ruido, enormes, fraccionarias.
+CANTIDADES = [5e-13, 4e-11, 1e-10, 5e-11, 1.4e-10, 1e-5, 0.1 + 0.2, 0.1 * 3, 0.333, 0.3333333333333333, 1.00000000004,
+              6.000000000049, 10.0000000001, 2.675, 0.7, 1.1, 123456.789012345, 1e9 + 0.5, 987654321.123456789]
+
+
+def _suma_de_filas(abrir, vid):
+    filas = _filas(abrir, vid)
+    assert all(f[3] < 0 for f in filas), filas
+    return sum((Decimal(str(-f[3])) for f in filas), Decimal(0))
+
+
+def test_una_cantidad_minuscula_de_un_marcado_escribe_una_fila_sin_lote_con_esa_cantidad(abrir_fefo):
+    """Regresión (revisión de Codex): con `qty=4e-11` el plan quedaba vacío y la venta no escribía NINGÚN movimiento."""
+    pid = _producto(abrir_fefo)
+    vid = _vender(abrir_fefo, [_linea(pid, 4e-11)])
+    assert _tramos(abrir_fefo, vid) == [(-4e-11, None, None)]
+    with abrir_fefo() as conn:
+        assert stock.get_stock_actual(conn, pid) == pytest.approx(10 - 4e-11, abs=1e-12)
+
+
+def test_una_cantidad_minuscula_sin_lotes_ni_stock_tambien_escribe(abrir_fefo):
+    pid = _producto(abrir_fefo, lotes_=())
+    vid = _vender(abrir_fefo, [_linea(pid, 4e-11)])
+    assert _tramos(abrir_fefo, vid) == [(-4e-11, None, None)]
+
+
+def test_la_suma_de_las_filas_escritas_es_siempre_la_cantidad_vendida(abrir_fefo):
+    """El barrido: para cada cantidad, una venta FEFO sobre lotes fraccionarios (0,1 + 0,2 + 0,7 y un poco sin lote)
+    escribe filas cuya suma es la cantidad vendida, sin perder ni una cifra, y nunca deja un lote con código en negativo."""
+    for n, q in enumerate(CANTIDADES):
+        pid = _producto(abrir_fefo, f"Q{n}", lotes_=(("L1", "2026-10-05", 0.1), ("L2", "2026-11-01", 0.2),
+                                                        ("L3", "2026-12-01", 0.7)), sin_lote=0.05, unidad="kg",
+                        fraccion=True)
+        with abrir_fefo() as conn:
+            stock.descontar_stock_venta(conn, 1000 + n, [{"producto_id": pid, "qty": q}], fecha=FECHA_VENTA)
+            conn.commit()
+        suma = _suma_de_filas(abrir_fefo, 1000 + n)
+        assert abs(suma - Decimal(str(q))) <= Decimal("1e-12") * max(Decimal(1), Decimal(str(q))), (q, suma)
+        assert all(saldo >= 0 for lote, saldo in _saldos(abrir_fefo, pid).items() if lote is not None), q
+
+
+def test_el_plan_suma_exactamente_la_cantidad_pedida(abrir_fefo):
+    pid = _producto(abrir_fefo, lotes_=(("L1", "2026-10-05", 0.1), ("L2", "2026-11-01", 0.2)), unidad="kg", fraccion=True)
+    dep = _principal(abrir_fefo)
+    with abrir_fefo() as conn:
+        for q in CANTIDADES:
+            tramos = lotes.plan_fefo(conn, pid, dep, None, q)
+            exacta = Decimal(str(q))
+            assert abs(sum(t.cantidad for t in tramos) - exacta) <= lotes.UMBRAL_DE_RUIDO * max(Decimal(1), exacta), q
+            assert q < 1e-12 or sum(t.cantidad for t in tramos) != 0, q
+            assert all(t.cantidad > 0 for t in tramos), q
+        for q in (0.0, -1.0):
+            assert lotes.plan_fefo(conn, pid, dep, None, q) == []
+
+
+def test_planificar_salida_y_avisos_no_pierden_una_cantidad_minuscula(abrir_fefo):
+    pid = _producto(abrir_fefo)
+    with abrir_fefo() as conn:
+        plan = lotes.planificar_salida(conn, [_linea(pid, 4e-11)], hoy=HOY)
+    assert [(s["lote"], s["cantidad"], s["faltante"]) for s in plan["salidas"]] == [(None, 4e-11, 4e-11)]
+    vid = _vender(abrir_fefo, [_linea(pid, 4e-11)])
+    with abrir_fefo() as conn:
+        # El saldo «sin lote» que queda (−4e-11) está por debajo de la precisión con que se miden los saldos (10
+        # decimales): el aviso posterior no lo ve; lo que importa es que la fila se escribió (primer test).
+        assert lotes.avisos_de_venta(conn, vid, hoy=HOY) == []
+
+
 # ═══════════════════════════════════════════════════ Varias líneas y productos ══
 
 
