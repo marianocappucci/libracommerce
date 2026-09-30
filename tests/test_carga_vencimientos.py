@@ -721,3 +721,110 @@ def test_la_marca_de_un_producto_marcado_se_ve_en_el_reporte_y_admite_la_entrada
     assert [(r["nombre"], r["lote"], r["saldo"]) for r in reporte["lotes"]] == [("Yogur", "L9", 6)]
     assert [p["vence"] for p in productos.get("/api/productos").json()] == [True]
     assert vencimientos.hoy_argentina() == HOY and datetime.date.fromisoformat(PREVIA) < HOY
+
+
+# ═══════════════════════════ Revisión de Codex: servicio marcado, depósito inactivo, edición no atómica
+
+
+def test_un_producto_marcado_no_pasa_a_servicio_quedando_marcado(abrir_vto):
+    """Se valida la combinación RESULTANTE (tipo pedido + marca efectiva), cambie o no la marca."""
+    c = _productos_app(abrir_vto, opciones=OpcionesCatalogo(con_vencimientos=True))
+    pid = _alta(c, "Yogur", vence=True)["id"]
+    antes = _foto_del_producto(abrir_vto, pid)
+    for extra in ({}, {"vence": True}, {"vence": None}):
+        r = c.put(f"/api/productos/{pid}", json={"nombre": "Flete", "precio_venta": 5.0, "tipo": "servicio", **extra})
+        assert r.status_code == 409 and "servicio no puede tener vencimiento" in r.json()["detail"], extra
+        assert _foto_del_producto(abrir_vto, pid) == antes, "se guardó algo"
+    with abrir_vto() as conn:
+        assert conn.execute("SELECT item_type FROM catalog_items WHERE id = ?", (pid,)).fetchone()[0] == "product"
+    # Desmarcándolo en la misma edición sí vale: queda servicio y sin marca.
+    r = c.put(f"/api/productos/{pid}", json={"nombre": "Flete", "precio_venta": 5.0, "tipo": "servicio",
+                                              "vence": False})
+    assert r.status_code == 200 and r.json()["vence"] is False and r.json()["tipo"] == "servicio"
+    assert _marca_en_la_base(abrir_vto, pid) is False
+    # Un servicio sin marca se edita sin problema, con o sin `vence: false`.
+    assert c.put(f"/api/productos/{pid}", json={"nombre": "Flete 2", "tipo": "servicio"}).status_code == 200
+    # El gancho no se consulta si el problema es la combinación.
+    llamadas = []
+    con_gancho = _productos_app(abrir_vto, opciones=OpcionesCatalogo(
+        con_vencimientos=True, autorizar_marcar_vence=lambda u: llamadas.append(u) or True))
+    otro = _alta(con_gancho, "Leche", vence=True)["id"]
+    llamadas.clear()
+    assert con_gancho.put(f"/api/productos/{otro}", json={"nombre": "x", "tipo": "servicio"}).status_code == 409
+    assert llamadas == []
+
+
+def test_desmarcar_un_servicio_vale_y_marcarlo_no(abrir_vto):
+    with abrir_vto() as conn:
+        servicio = catalogo.create_producto(conn, "Flete", precio_venta=1.0, tipo="servicio")
+        conn.execute("UPDATE catalog_items SET tracks_expiry = 1 WHERE id = ?", (servicio,))   # el estado heredado
+        assert vencimientos.marcar_vence(conn, servicio, False) == {"producto_id": servicio, "vence": False}
+        with pytest.raises(vencimientos.ReglaDeNegocio, match="servicio"):
+            vencimientos.marcar_vence(conn, servicio, True)
+
+
+def test_un_servicio_no_recibe_entradas_ni_asignaciones_aunque_este_marcado(abrir_vto):
+    with abrir_vto() as conn:
+        servicio = catalogo.create_producto(conn, "Flete", precio_venta=1.0, tipo="servicio")
+        conn.execute("UPDATE catalog_items SET tracks_expiry = 1 WHERE id = ?", (servicio,))
+        deposito = catalogo.get_default_deposito_id(conn)
+        antes = _sin_id(_todo_el_ledger(conn))
+        with pytest.raises(vencimientos.ReglaDeNegocio, match="servicio"):
+            _con_lote(conn, servicio, deposito, "L1", _dias(5), 1)
+        with pytest.raises(vencimientos.ReglaDeNegocio, match="servicio"):
+            _asignar(conn, servicio, deposito, "L1", _dias(5), 1)
+        assert _sin_id(_todo_el_ledger(conn)) == antes
+    c = _app(abrir_vto)
+    assert c.post("/api/vencimientos/entrada", json=_cuerpo_entrada(servicio, deposito, cantidad=1)).status_code == 409
+    with abrir_vto() as conn:
+        assert _sin_id(_todo_el_ledger(conn)) == antes
+
+
+def test_la_entrada_exige_deposito_activo_pero_leer_asignar_y_mermar_siguen_valiendo(abrir_vto):
+    """Stock NUEVO sólo a un depósito activo (`catalogo.validar_deposito`, 422 como en ventas y transferencias); lo que
+    ya hay en un depósito dado de baja se sigue pudiendo leer, asignar y dar de baja."""
+    with abrir_vto() as conn:
+        pid = _producto(conn)
+        activo = catalogo.get_default_deposito_id(conn)
+        viejo = catalogo.create_deposito(conn, "Cámara vieja")
+        _entrada(conn, pid, 10, deposito=viejo)
+        _entrada(conn, pid, 6, lote="L1", vence=_dias(5), deposito=viejo)
+        hecha = _con_lote(conn, pid, viejo, "L9", _dias(9), 2, clave_operacion="previa")   # cuando estaba activo
+        conn.execute("UPDATE locations SET active = 0 WHERE id = ?", (viejo,))
+        antes = _sin_id(_todo_el_ledger(conn))
+        with pytest.raises(catalogo.DepositoInexistente, match="no existe o no está activo"):
+            _con_lote(conn, pid, viejo, "L2", _dias(5), 1)
+        assert _sin_id(_todo_el_ledger(conn)) == antes
+        # Un reintento de la carga que ya estaba hecha devuelve lo de la primera vez aunque hoy esté inactivo.
+        assert _con_lote(conn, pid, viejo, "L9", _dias(9), 2, clave_operacion="previa") == {**hecha, "repetida": True}
+        # Lectura, asignar y merma sobre el depósito inactivo siguen andando.
+        assert {f["lote"]: f["saldo"] for f in vencimientos.lotes_de(conn, pid, deposito_id=viejo, hoy=HOY)} == {
+            None: 10, "L1": 6, "L9": 2}
+        assert _asignar(conn, pid, viejo, "A1", _dias(7), 3)["saldo_sin_lote"] == 7
+        assert _baja(conn, pid, viejo, "L1", _dias(5), 2)["saldo_restante"] == 4
+        assert _con_lote(conn, pid, activo, "L3", _dias(5), 1)["repetida"] is False        # y el activo sigue igual
+    c = _app(abrir_vto)
+    r = c.post("/api/vencimientos/entrada", json=_cuerpo_entrada(pid, viejo, cantidad=1))
+    assert r.status_code == 422 and "no está activo" in r.json()["detail"]
+    assert c.get(f"/api/vencimientos/productos/{pid}/lotes", params={"deposito_id": viejo}).status_code == 200
+
+
+def test_limitacion_preexistente_la_edicion_no_es_atomica_respecto_del_codigo_duplicado(abrir_vto):
+    """LIMITACIÓN PREEXISTENTE (no la introdujo la marca `vence`, y está fuera de alcance de C-1): `update_producto`
+    commitea los campos y DESPUÉS reemplaza el código; un código repetido falla tarde (422) y los demás campos ya
+    quedaron guardados, con o sin `vence`. Lo que sí se garantiza: la marca sólo se escribe si el guardado completo
+    tuvo éxito, así que acá no cambia. Este test fija el comportamiento actual; si algún día el guardado se hace
+    atómico, hay que invertir las dos primeras aserciones."""
+    c = _productos_app(abrir_vto, opciones=OpcionesCatalogo(con_vencimientos=True))
+    pid = _alta(c, "Yogur")["id"]
+    _alta(c, "Leche", codigo="DUP-1")
+    r = c.put(f"/api/productos/{pid}", json={"nombre": "Yogur editado", "precio_venta": 77.0, "codigo": "DUP-1",
+                                              "vence": True})
+    assert r.status_code == 422
+    nombre, precio = _foto_del_producto(abrir_vto, pid)[0], _foto_del_producto(abrir_vto, pid)[3]
+    assert (nombre, float(precio)) == ("Yogur editado", 77.0), "los campos ya no persisten: el guardado ahora es atómico"
+    assert _marca_en_la_base(abrir_vto, pid) is False
+    # Sin `vence` (y con la opción apagada, el router de siempre) pasa exactamente lo mismo: no es cosa de la marca.
+    apagada = _productos_app(abrir_vto)
+    r = apagada.put(f"/api/productos/{pid}", json={"nombre": "Yogur otra vez", "precio_venta": 88.0, "codigo": "DUP-1"})
+    assert r.status_code == 422 and _foto_del_producto(abrir_vto, pid)[0] == "Yogur otra vez"

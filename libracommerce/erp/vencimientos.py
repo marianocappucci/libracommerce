@@ -50,6 +50,7 @@ import datetime
 import uuid
 from decimal import Decimal, InvalidOperation
 
+from .catalogo import validar_deposito
 from .listas_precio import _ZONA_LOCAL
 from .stock import add_movimiento_stock, normalizar_lote, normalizar_vencimiento
 
@@ -262,10 +263,19 @@ def marcar_vence(conn, item_id: int, vence: bool) -> dict:
         raise ValueError(f"vence tiene que ser verdadero o falso: {vence!r}")
     _exigir_revision(conn)
     producto = _fila_de_producto(conn, item_id)
-    if producto["item_type"] == "service":
+    if vence and producto["item_type"] == "service":
+        # Sólo MARCAR un servicio es un error: desmarcarlo limpia una marca que no debería tener (un producto marcado
+        # que se editó a servicio), y tiene que poder hacerse.
         raise ReglaDeNegocio("un servicio no tiene inventario: no se le puede marcar vencimiento")
     conn.execute("UPDATE catalog_items SET tracks_expiry = ? WHERE id = ?", (1 if vence else 0, item_id))
     return {"producto_id": item_id, "vence": vence}
+
+
+def _exigir_producto_con_inventario(producto, que: str) -> None:
+    """Sólo un producto (`item_type='product'`) tiene inventario: a un servicio no se le asigna ni se le carga stock,
+    esté o no marcado (un producto marcado puede haber pasado a servicio al editarlo). `ReglaDeNegocio` (409)."""
+    if producto["item_type"] != "product":
+        raise ReglaDeNegocio(f"el producto {producto['id']} es un servicio: no tiene inventario, no se le puede {que}")
 
 
 def ids_que_vencen(conn, item_id: int | None = None) -> set[int]:
@@ -566,6 +576,7 @@ def asignar_vencimiento_a_saldo(conn, item_id: int, deposito_id: int, lot_code: 
             "tipo": "asignar", "producto_id": item_id, "deposito_id": deposito_id, "variante_id": variante_id,
             "lote": lote, "vence": vence, "cantidad": _saldo(cant)})
     producto = _fila_de_producto(conn, item_id)
+    _exigir_producto_con_inventario(producto, "asignar un vencimiento")
     if not producto["tracks_expiry"]:
         raise ReglaDeNegocio(f"el producto {item_id} no está marcado como perecedero: marcalo antes de asignar un "
                              "vencimiento")
@@ -761,7 +772,9 @@ def registrar_entrada_con_lote(conn, item_id: int, deposito_id: int, lote: str, 
     `ValueError` con datos inválidos (lote vacío o de más de 64 caracteres, fecha ilegible, cantidad ≤ 0, clave inválida,
     depósito inexistente, una variante que no existe o es de otro producto, una cantidad de más de mil millones o que no
     respeta la unidad: entera si no admite fracciones, hasta `decimal_scale` decimales si sí); `ProductoNoEncontrado`; `ReglaDeNegocio` si el
-    producto no está marcado con `marcar_vence` (un servicio no se puede marcar, así que tampoco recibe entradas).
+    producto no es un producto (un servicio no tiene inventario, esté marcado o no) o no está marcado con `marcar_vence`;
+    `DepositoInexistente` (un `ValueError`: 422, como `validar_deposito` en ventas y transferencias) si el depósito no está
+    **activo** (al escribir; para leer, asignar o dar de baja un depósito inactivo sigue valiendo).
     `SinRevision` sin la revisión `0002`. Todo se valida antes de escribir. Devuelve `{producto_id, deposito_id,
     variante_id, lote, vence, cantidad, referencia, saldo_lote, repetida}`; `saldo_lote` es el saldo de ese lote (en ese
     depósito y variante) **tras la entrada** (en un reintento, el que tenía justo después de la primera vez)."""
@@ -779,9 +792,14 @@ def registrar_entrada_con_lote(conn, item_id: int, deposito_id: int, lote: str, 
             "tipo": "entrada", "producto_id": item_id, "deposito_id": deposito_id, "variante_id": variante_id,
             "lote": lote, "vence": vence, "cantidad": _saldo(cant)})
     producto = _fila_de_producto(conn, item_id)
+    _exigir_producto_con_inventario(producto, "cargar un lote")
     if not producto["tracks_expiry"]:
         raise ReglaDeNegocio(f"el producto {item_id} no está marcado como perecedero: marcalo antes de cargarle un "
                              "lote")
+    # Stock NUEVO: el depósito tiene que estar activo, como en la entrada manual ordinaria. No se exige en la lectura, ni
+    # en asignar ni en la merma: las existencias de un depósito dado de baja siguen existiendo. Va después de buscar la
+    # clave (un reintento de una carga hecha no falla porque el depósito se haya dado de baja).
+    validar_deposito(conn, deposito_id)
     _exigir_escala_de_la_unidad(conn, item_id, cant)
     referencia = nota.strip() or "Entrada con lote"
     add_movimiento_stock(conn, item_id, "entrada", float(cant),

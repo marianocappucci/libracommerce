@@ -64,7 +64,8 @@ siempre (Contalibra y Restolibra no cambian; hay un test que compara el JSON). P
   `erp.vencimientos.marcar_vence`. `OpcionesCatalogo.autorizar_marcar_vence(usuario) -> bool` decide quién puede
   cambiarla: si devuelve `False`, **403** y no se guarda nada del resto de la edición (la autorización y las reglas se
   resuelven **antes** de escribir); sin gancho, cualquiera que pueda editar el producto puede marcar. Sin la revisión
-  `0002` (y `vence` distinto de lo que hay), **409** con el comando que falta; un servicio no se puede marcar (409).
+  `0002` (y `vence` distinto de lo que hay), **409** con el comando que falta; la combinación resultante de la edición no puede ser un servicio marcado (409, cambie o no la marca; desmarcarlo
+  con `vence: false` en la misma edición vale).
   Con el gancho puesto el router resuelve `usuario_actual` en el alta y la edición.
 - 🔵 `save_catalog_item` commitea por su cuenta (es del repositorio, que no se toca acá), así que no hay una única
   transacción SQL con el guardado: en su lugar, **todo lo que puede rechazar el cambio de marca se resuelve antes de
@@ -406,6 +407,11 @@ def build_productos_router(
         """El valor al que hay que llevar la marca `vence`, o `None` si no hay que tocarla (no vino o no cambió). Todo
         lo que puede rechazar el cambio se resuelve **antes** de escribir: autorización (403), la revisión `0002` que
         falta (409) y un servicio, que no tiene inventario (409)."""
+        # La combinación resultante, cambie o no la marca: un servicio no puede quedar marcado (un producto marcado que
+        # se edita a servicio con `vence` omitido o `true`). Desmarcarlo en la misma edición sí vale.
+        efectiva = vence_actual if payload.vence is None else payload.vence
+        if payload.tipo == "servicio" and efectiva:
+            raise HTTPException(409, "Un servicio no puede tener vencimiento: desmarcalo (vence: false) al cambiar el tipo.")
         if payload.vence is None or payload.vence == vence_actual:
             return None
         if opciones.autorizar_marcar_vence is not None and not opciones.autorizar_marcar_vence(user or {}):
@@ -414,8 +420,6 @@ def build_productos_router(
             vencimientos._exigir_revision(conn)
         except vencimientos.SinRevision as e:
             raise HTTPException(409, str(e)) from e
-        if payload.tipo == "servicio":
-            raise HTTPException(409, "Un servicio no tiene inventario: no lleva marca de vencimiento.")
         return payload.vence
 
     def _marcar(conn, pid: int, vence: bool) -> None:

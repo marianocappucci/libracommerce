@@ -704,6 +704,22 @@ producto vienen después y se apoyan en estos dos contratos. Aditivo, sin tocar 
   escribir** (autorización, revisión, servicio) y la marca se escribe **después** del guardado, en la misma conexión y sin
   commit propio: un guardado que falla (p. ej. un código repetido, 422) no deja la marca cambiada (hay test). Lo único que
   queda fuera es una falla de la base entre el guardado y la marca.
+- **Revisión de Codex (2026-09-30), tres ajustes.** (1) **Un servicio no puede quedar marcado.** El alta y la edición validan la
+  combinación **resultante** (tipo pedido + marca efectiva), cambie o no la marca: un producto marcado que se edita a
+  `servicio` con `vence` omitido o `true` es **409** («un servicio no puede tener vencimiento…») sin guardar nada y sin consultar
+  el gancho; con `vence: false` en la misma edición vale. Para eso `marcar_vence(False)` ya no rechaza a un servicio (limpiar la
+  marca siempre puede hacerse; sólo marcar es error). Además `registrar_entrada_con_lote` y `asignar_vencimiento_a_saldo`
+  rechazan (409) un producto que no sea `item_type='product'`, marcado o no. La merma no: dar de baja existencias históricas de
+  algo que hoy es servicio es una limpieza legítima. (2) **La entrada exige depósito activo** (`catalogo.validar_deposito`,
+  `DepositoInexistente`, un `ValueError`: **422**, el mismo código que ventas y transferencias), porque es stock nuevo; va
+  **después** de buscar la clave (un reintento de una carga hecha no falla porque el depósito se haya dado de baja). Lectura,
+  asignar y merma sobre un depósito inactivo **no cambian** (sus existencias siguen existiendo). (3) **Limitación preexistente,
+  fuera de alcance y pendiente:** la edición de un producto **no es atómica respecto de un código duplicado**:
+  `update_producto` (`save_catalog_item`) commitea los campos y **después** reemplaza el código, así que un código repetido falla
+  (422) con los demás campos ya guardados, **con o sin `vence`**. No lo introdujo esta etapa y arreglarlo toca `db/repository.py` y
+  el camino de edición de los tres productos. Lo que sí se garantiza: **la marca `vence` sólo se escribe si el guardado completo tuvo
+  éxito**. Un test (`test_limitacion_preexistente_la_edicion_no_es_atomica_respecto_del_codigo_duplicado`) fija el comportamiento
+  actual.
 - **Límites.** No hay `GET /api/productos/{pid}` en el motor: la ficha suelta con `vence` es
   `GET /api/vencimientos/productos/{id}/lotes` (`producto.vence`); `GET /api/stock/{pid}` y la respuesta del ajuste siguen con el
   `producto` sin `vence` (prender eso sería una opción más en `OpcionesStock`). La entrada con lote no avisa si el mismo
