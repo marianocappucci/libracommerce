@@ -1719,3 +1719,23 @@ def test_el_sqlite_usado_tiene_la_funcion_de_borrar_columnas():
     """El `downgrade` usa `ALTER TABLE ... DROP COLUMN` (SQLite 3.35+): si el intérprete fuera más viejo, el test de
     bajada fallaría por eso y no por la revisión."""
     assert sqlite3.sqlite_version_info >= (3, 35, 0)
+
+
+def test_las_tres_escrituras_exigen_la_identidad_de_usuario_actual(abrir_vto):
+    """Hallazgo de Codex: `marcar` no ejecutaba `usuario_actual`, así que un gate que no autentica dejaba cambiar la
+    marca sin usuario identificado. Las tres rutas tienen que rechazar a quien `usuario_actual` rechaza."""
+    from fastapi import HTTPException
+
+    def _sin_sesion():
+        raise HTTPException(401, "sin sesión")
+
+    app = FastAPI()
+    app.include_router(build_vencimientos_escritura_router(
+        conexion=abrir_vto, usuario_actual=_sin_sesion,
+        dependencias_marcar=[Depends(_libre)], dependencias_movimientos=[Depends(_libre)]))
+    cliente = TestClient(app)
+    cuerpo = {"producto_id": 1, "deposito_id": 1, "lote": "L", "vence": "2026-12-01", "cantidad": 1,
+              "clave_operacion": "k"}
+    assert cliente.put("/api/vencimientos/productos/1", json={"vence": True}).status_code == 401
+    assert cliente.post("/api/vencimientos/asignar", json=cuerpo).status_code == 401
+    assert cliente.post("/api/vencimientos/merma", json=cuerpo).status_code == 401

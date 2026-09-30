@@ -191,7 +191,8 @@ def build_vencimientos_escritura_router(
     router = APIRouter(prefix=prefix, tags=["vencimientos"])
 
     @router.put("/productos/{producto_id}", dependencies=list(dependencias_marcar))
-    def marcar(producto_id: int, payload: MarcaPayload):
+    def marcar(producto_id: int, payload: MarcaPayload, _user: dict = Depends(usuario)):
+        # La identidad se exige en las tres rutas de escritura, no sólo en las que la usan de `created_by`.
         try:
             with abrir() as conn:
                 return vencimientos.marcar_vence(conn, producto_id, payload.vence)
