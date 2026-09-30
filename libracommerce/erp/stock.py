@@ -269,6 +269,11 @@ def ajustar_stock(conn, producto_id: int, stock_nuevo: float, referencia: str,
       último, el resto que ningún bucket respalda va a una fila «sin lote», que queda negativa como hoy); un delta
       **positivo** entra en el bucket «sin lote» (no se inventa un lote).
 
+    **Variantes:** un marcado ajustado SIN variante cuando tiene stock por variante en ese depósito es un
+    `lotes.VarianteRequerida` (`ValueError`; 422 por HTTP): el total que se compara incluye las variantes y el FEFO sólo
+    planifica la variante NULL. Con `variant_id` explícito, sin stock en variantes, o sin marcar, nada cambia. (Con lote
+    el bucket ya es de una variante: no aplica.)
+
     Pasar `lot_code` o `expires_at` de un producto que NO está marcado es un `ValueError` (no hay lote que contar; antes
     de A-4 el parámetro no existía, así que nadie lo manda hoy). Antes de leer saldos el producto marcado se toma
     (`lotes.tomar_productos`): dos ajustes, o un ajuste y una venta, del mismo producto se serializan en PostgreSQL.
@@ -302,6 +307,10 @@ def ajustar_stock(conn, producto_id: int, stock_nuevo: float, referencia: str,
             usuario_id=usuario_id, fecha=fecha, deposito_id=deposito_id, variant_id=variant_id,
             lot_code=lote, expires_at=vence,
         )
+    # Sin variante, el total que se compara incluye las variantes pero el FEFO sólo planifica la variante NULL: si hay stock
+    # por variante en ese depósito se pide la variante (lotes.VarianteRequerida), en vez de bajar el bucket equivocado.
+    lotes.exigir_variante(conn, producto_id, deposito_id if deposito_id is not None else get_default_deposito_id(conn),
+                          variant_id)
     actual = get_stock_actual(conn, producto_id, deposito_id, variant_id)
     delta = round(stock_nuevo - actual, 4)
     if delta < 0:
@@ -343,10 +352,13 @@ def salida_manual(conn, producto_id: int, tipo: str, cantidad: float, referencia
 
     Es el punto de entrada para CUALQUIER salida manual de un producto que puede estar marcado: llamar a
     `add_movimiento_stock` con una cantidad negativa y sin lote resta del bucket «sin lote» y deja sobreestimado el saldo
-    de los lotes."""
+    de los lotes. Un marcado SIN variante con stock por variante en ese depósito es `lotes.VarianteRequerida` (ver
+    `ajustar_stock`)."""
     cantidad = -abs(cantidad)
     if lotes.ids_marcados(conn, [producto_id]):
         lotes.tomar_productos(conn, [producto_id])
+        lotes.exigir_variante(conn, producto_id,
+                              deposito_id if deposito_id is not None else get_default_deposito_id(conn), variant_id)
         return _salida_por_lote(conn, producto_id=producto_id, cantidad=cantidad, referencia=referencia, venta_id=None,
                                 usuario_id=usuario_id, fecha=fecha, deposito_id=deposito_id, variant_id=variant_id,
                                 tipo=tipo)

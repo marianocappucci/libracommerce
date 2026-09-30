@@ -1411,6 +1411,109 @@ def test_la_entrada_manual_sin_lote_de_un_marcado_entra_sin_lote_y_con_lote_va_a
     assert _saldos(abrir_fefo, pid) == {"L1": 6, "L2": 4, None: 3, "L3": 12}
 
 
+# ═══════════ Sin variante, con stock por variante: el ajuste y la salida manual piden la variante ═══════════
+
+
+def _con_variante(abrir, *, marcado=True, cantidad=10, deposito=None):
+    """Un producto cuyo stock está SÓLO en la variante A (un lote `VA`), y A."""
+    pid = _producto(abrir, "Remera", lotes_=(), marcado=marcado)
+    with abrir() as conn:
+        v = catalogo.create_variante(conn, pid, "R-A", "A")["id"]
+        stock.add_movimiento_stock(conn, pid, "entrada", cantidad, "carga", fecha=PREVIA, lot_code="VA",
+                                   expires_at=LEJOS, variant_id=v, deposito_id=deposito)
+        conn.commit()
+    return pid, v
+
+
+def test_ajustar_un_marcado_sin_variante_con_stock_por_variante_es_un_error_y_no_escribe(abrir_fefo):
+    pid, v = _con_variante(abrir_fefo)
+    dep = _principal(abrir_fefo)
+    antes = _ledger(abrir_fefo)
+    with abrir_fefo() as conn:
+        for nuevo in (5, 15):                               # baja y sube
+            with pytest.raises(lotes.VarianteRequerida, match="indicá la variante"):
+                stock.ajustar_stock(conn, pid, nuevo, "conteo", deposito_id=dep)
+        with pytest.raises(lotes.VarianteRequerida):
+            stock.ajustar_stock(conn, pid, 5, "conteo")      # sin depósito: el por defecto
+        with pytest.raises(lotes.VarianteRequerida):
+            stock.salida_manual(conn, pid, "salida", 3, "uso", deposito_id=dep)
+        conn.rollback()
+    assert _ledger(abrir_fefo) == antes and _saldos(abrir_fefo, pid, variante=v) == {"VA": 10}
+
+
+def test_http_ajuste_salida_y_merma_sin_variante_con_stock_por_variante_son_422_y_no_escriben(abrir_fefo):
+    pid, v = _con_variante(abrir_fefo)
+    dep = _principal(abrir_fefo)
+    cliente = _app(abrir_fefo, merma=True)
+    antes = _ledger(abrir_fefo)
+    for cuerpo in ({"modo": "absoluto", "cantidad": 5}, {"modo": "salida", "cantidad": 2},
+                   {"modo": "merma", "cantidad": 2, "motivo": "Rotura"}):
+        r = cliente.post(f"/api/stock/{pid}/ajuste", json={**cuerpo, "deposito_id": dep})
+        assert r.status_code == 422 and "indicá la variante" in r.json()["detail"], (cuerpo, r.text)
+    assert _ledger(abrir_fefo) == antes
+
+
+def test_con_variante_explicita_el_ajuste_y_la_salida_manual_bajan_el_lote_de_esa_variante(abrir_fefo):
+    pid, v = _con_variante(abrir_fefo)
+    dep = _principal(abrir_fefo)
+    cliente = _app(abrir_fefo, merma=True)
+    marca = _ultimo_id(abrir_fefo)
+    r = cliente.post(f"/api/stock/{pid}/ajuste", json={"modo": "absoluto", "cantidad": 5, "deposito_id": dep,
+                                                      "variant_id": v, "fecha": "2026-09-12"})
+    assert r.status_code == 200, r.text
+    assert _saldos(abrir_fefo, pid, variante=v) == {"VA": 5}
+    assert cliente.post(f"/api/stock/{pid}/ajuste", json={"modo": "salida", "cantidad": 2, "deposito_id": dep,
+                                                         "variant_id": v, "fecha": "2026-09-12"}).status_code == 200
+    assert _saldos(abrir_fefo, pid, variante=v) == {"VA": 3}
+    assert [f[:5] for f in _filas_de_movimiento(abrir_fefo, marca)] == [
+        ("adjustment", "ajuste", -5.0, "VA", LEJOS), ("adjustment", "salida", -2.0, "VA", LEJOS)]
+
+
+def test_sin_stock_en_variantes_el_ajuste_y_la_salida_sin_variante_funcionan_como_siempre(abrir_fefo):
+    pid, v = _con_variante(abrir_fefo)
+    dep = _principal(abrir_fefo)
+    norte = _deposito_nuevo(abrir_fefo)
+    with abrir_fefo() as conn:                               # la variante se vació: saldo 0 en su lote
+        stock.add_movimiento_stock(conn, pid, "salida", -10, "uso", fecha=PREVIA, lot_code="VA", expires_at=LEJOS,
+                                   variant_id=v)
+        stock.add_movimiento_stock(conn, pid, "entrada", 6, "carga", fecha=PREVIA, lot_code="N1", expires_at=LEJOS)
+        stock.add_movimiento_stock(conn, pid, "entrada", 9, "carga", fecha=PREVIA, lot_code="VN", expires_at=LEJOS,
+                                   variant_id=v, deposito_id=norte)     # y hay stock por variante… en OTRO depósito
+        conn.commit()
+    marca = _ultimo_id(abrir_fefo)
+    _ajustar(abrir_fefo, pid, 4, deposito_id=dep, variant_id=None)
+    with abrir_fefo() as conn:
+        stock.salida_manual(conn, pid, "salida", 1, "uso", deposito_id=dep)
+        conn.commit()
+    assert [a[:3] for a in _ajustes(abrir_fefo, marca)][0] == (-2.0, "N1", LEJOS)
+    assert _saldos(abrir_fefo, pid, dep, variante=None) == {"N1": 3}
+
+
+def test_un_sin_marcar_con_stock_por_variante_ajusta_como_siempre(abrir_fefo):
+    pid, v = _con_variante(abrir_fefo, marcado=False)
+    dep = _principal(abrir_fefo)
+    marca = _ultimo_id(abrir_fefo)
+    _ajustar(abrir_fefo, pid, 4, deposito_id=dep)            # compara el total (10) y escribe −6 sin variante, sin lote
+    with abrir_fefo() as conn:
+        stock.salida_manual(conn, pid, "salida", 1, "uso", deposito_id=dep)
+        conn.commit()
+    assert _ajustes(abrir_fefo, marca) == [(-6.0, None, None, dep)]
+
+
+def test_la_transferencia_es_por_variante_y_no_tiene_este_problema(abrir_fefo):
+    """La guarda de `transfer_stock` mira `variant_id IS NULL` cuando no se pasa variante, igual que el FEFO: no hay
+    diferencia entre lo que se compara y lo que se planifica. Sin stock en la variante NULL, la guarda rechaza."""
+    pid, v = _con_variante(abrir_fefo)
+    dep = _principal(abrir_fefo)
+    norte = _deposito_nuevo(abrir_fefo)
+    with abrir_fefo() as conn:
+        with pytest.raises(ValueError, match="Stock insuficiente"):
+            catalogo.transferir_stock(conn, pid, dep, norte, 3)
+        conn.rollback()
+    _transferir(abrir_fefo, pid, dep, norte, 3, variant_id=v)
+    assert _saldos(abrir_fefo, pid, norte, variante=v) == {"VA": 3}
+
+
 # ── Concurrencia de la salida manual (PostgreSQL) ───────────────────────
 
 

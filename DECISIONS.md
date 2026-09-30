@@ -866,6 +866,16 @@ marquen productos. Margen y reposición leen lo mismo (un test compara un marcad
 - 🔵 `listar_ventas` y `erp.reportes._rango` filtran `sales.occurred_on <= hasta` sobre texto libre: una venta con hora del día `hasta`
   queda afuera (el margen lo evita con `_filtro_de_ventas`). Preexistente, no se tocó.
 - 🔵 La edición de un producto no es atómica respecto de un código duplicado (ver la nota de la carga). Preexistente, no se tocó.
+- **Variantes en el ajuste y la salida manual (revisión de Codex).** `ajustar_stock` compara el total del depósito, variantes incluidas,
+  pero el FEFO sólo planifica la variante del movimiento: sin `variant_id`, la NULL. Un ajuste «a 5» de un producto con 10 en un lote de
+  la variante A escribía −5 «sin lote» de la variante NULL y dejaba el lote de A en 10. Ahora, para un producto MARCADO, un
+  ajuste sin lote (`ajustar_stock`, sube o baja) o una `salida`/`merma` manual (`salida_manual`) **sin variante** cuando el producto
+  tiene saldo ≠ 0 en alguna variante **en ese depósito** (el dado o el por defecto) levanta `lotes.VarianteRequerida`
+  (`ValueError`; 422 por HTTP: «este producto tiene stock por variante: indicá la variante a ajustar») antes de escribir. No se
+  reparte entre variantes. Con `variant_id` explícito, sin stock en variantes (saldos en 0, o sólo en otro depósito), con lote (el bucket
+  ya es de una variante) o sin marcar, todo es idéntico a hoy. La **transferencia** no tiene el patrón: su guarda mira
+  `variant_id IS NULL` igual que el FEFO (lo que se compara es lo que se planifica). La **venta** tampoco se tocó: su línea
+  sin variante consume la variante NULL por diseño (PR-2), sin comparar totales.
 - 🔵 La **transferencia y el ajuste** siguen la marca ACTUAL (son operaciones sobre stock presente, no sobre una venta pasada): un producto
   desmarcado con lotes en el ledger transfiere y ajusta «sin lote» como uno sin marcar; al volver a marcarlo, por FEFO otra vez (hay test).
   La devolución y la anulación, en cambio, siguen lo que dice la venta.

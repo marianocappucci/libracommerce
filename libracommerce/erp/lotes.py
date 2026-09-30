@@ -167,6 +167,22 @@ def saldo_del_bucket(conn, item_id: int, deposito_id: int, variante_id: int | No
     return _buckets(conn, item_id, deposito_id, variante_id).get((lote, vence), CERO)
 
 
+class VarianteRequerida(ValueError):
+    """Un ajuste o una salida manual de un producto marcado, sin variante, cuando el producto tiene stock por variante en ese
+    depósito: el FEFO sólo planifica la variante NULL y dejaría sin bajar el lote de la variante que se quiso tocar."""
+
+
+def exigir_variante(conn, item_id: int, deposito_id: int, variante_id: int | None) -> None:
+    """Levanta `VarianteRequerida` si `variante_id` es `None` y el producto tiene algún bucket con saldo ≠ 0 de una variante
+    (`variant_id` no nulo) en ese depósito. Con una variante explícita, o sin stock en variantes, no hace nada. Lectura
+    pura; llamarla con el producto ya tomado (`tomar_productos`)."""
+    if variante_id is not None:
+        return
+    if saldos_por_bucket(conn, "sm.item_id = ? AND sm.location_id = ? AND sm.variant_id IS NOT NULL",
+                         [item_id, deposito_id]):
+        raise VarianteRequerida("este producto tiene stock por variante: indicá la variante a ajustar")
+
+
 # ── La sonda de opt-in y el bloqueo por producto ─────────────────────────
 
 
@@ -480,7 +496,7 @@ def planificar_salida(conn, items, deposito_id: int | None = None, *, hoy: _date
 
 __all__ = [
     "CERO", "DIAS_AVISO", "ESCALA_RUIDO", "MAX_DIAS_AVISO", "MAX_LARGO_LOTE", "TIPO_FALTANTE_SIN_LOTE",
-    "TIPO_LOTE_VENCIDO", "TIPO_POR_VENCER", "Tramo", "avisos_de_venta", "dec", "ids_marcados", "lote_de_fila",
+    "TIPO_LOTE_VENCIDO", "TIPO_POR_VENCER", "Tramo", "VarianteRequerida", "avisos_de_venta", "dec", "exigir_variante", "ids_marcados", "lote_de_fila",
     "normalizar_lote", "normalizar_vencimiento", "plan_fefo", "planificar_salida", "saldo_del_bucket", "saldo_limpio",
     "saldos_por_bucket", "tiene_marca", "tomar_productos", "vence_de_fila",
 ]

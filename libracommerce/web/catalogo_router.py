@@ -80,7 +80,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Literal
 
-from ..erp import catalogo, stock, vencimientos
+from ..erp import catalogo, lotes, stock, vencimientos
 from . import fastapi as _fastapi
 
 # La guarda traduce la ausencia del extra `[web]` a un error que lo nombra;
@@ -935,6 +935,8 @@ def build_stock_router(
                 try:
                     stock.ajustar_stock(conn, pid, payload.cantidad, referencia, usuario_id=usuario_id, fecha=fecha,
                                         **destino, **lote)
+                except lotes.VarianteRequerida as e:
+                    raise HTTPException(422, str(e)) from e
                 except ValueError as e:
                     if not lote:
                         raise     # sin lote el ajuste no levantaba ValueError: no se cambia lo de siempre
@@ -960,12 +962,18 @@ def build_stock_router(
                                                fecha=fecha, **destino)
             elif payload.modo == "salida":
                 # Un producto marcado sale por FEFO (ADR-018, A-4 PR-3); uno sin marcar, la fila de siempre.
-                stock.salida_manual(conn, pid, "salida", payload.cantidad, referencia, usuario_id=usuario_id,
-                                    fecha=fecha, **destino)
+                try:
+                    stock.salida_manual(conn, pid, "salida", payload.cantidad, referencia, usuario_id=usuario_id,
+                                        fecha=fecha, **destino)
+                except lotes.VarianteRequerida as e:
+                    raise HTTPException(422, str(e)) from e
             elif payload.modo == "merma" and con_merma:
                 motivo = (payload.motivo or "Otro").strip() or "Otro"
-                stock.salida_manual(conn, pid, "merma", payload.cantidad, f"Merma: {motivo}", usuario_id=usuario_id,
-                                    fecha=fecha, **destino)
+                try:
+                    stock.salida_manual(conn, pid, "merma", payload.cantidad, f"Merma: {motivo}",
+                                        usuario_id=usuario_id, fecha=fecha, **destino)
+                except lotes.VarianteRequerida as e:
+                    raise HTTPException(422, str(e)) from e
             else:
                 raise HTTPException(422, "Modo inválido.")
             respuesta = {"producto": producto, "stock_actual": stock.get_stock_actual(conn, pid)}
