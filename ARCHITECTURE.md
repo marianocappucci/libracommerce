@@ -54,7 +54,8 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
   de ventas y stock de la línea de tiempo de `libracore.db.logs`) y `vencimientos` (lotes y
   vencimientos como dimensión del ledger, opt-in por producto, sin tabla `lots`; ADR-018; `erp/lotes.py` es su piso, sin
   depender de `stock`: saldos por bucket, FEFO de la venta para los productos marcados, lote de origen en la anulación y
-  los avisos de la venta), todos con la conexión
+  los avisos de la venta; con A-4 PR-3 la devolución de un perecedero va a merma en un par por lote, la transferencia
+  mueve el lote por FEFO con un par por tramo y el ajuste y las salidas manuales cuentan un lote o bajan por FEFO: A-4 completo para esos caminos, ver ADR-018), todos con la conexión
   como primer parámetro —salvo `crear_venta_directa`, que recibe la fábrica porque el
   reintento por número repetido necesita una transacción nueva—; y `erp.hooks`, los
   puntos de extensión tipados que un producto engancha (`al_confirmar_venta` /

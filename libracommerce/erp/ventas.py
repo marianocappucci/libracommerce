@@ -699,14 +699,58 @@ def _movimientos_de_venta(conn, vid: int, condicion_sql: str) -> list:
     ).fetchall()
 
 
-def _acumular(movimientos, *, con_deposito: bool) -> dict[tuple, float]:
-    """Suma `quantity_delta` por (item, variante[, depósito])."""
+def _acumular(movimientos, *, con_deposito: bool, con_lote: bool = False) -> dict[tuple, float]:
+    """Suma `quantity_delta` por (item, variante[, depósito][, lote, vencimiento]).
+
+    Con `con_lote` (A-4 PR-3) la clave termina en el bucket de cada fila, `(lote, vence)` normalizados (`(None, None)`
+    es el «sin lote»). El tope de `devolver_items` **no** lo usa: sigue siendo por (ítem, variante) sin lote, como
+    siempre; el lote sólo sirve para repartir una devolución entre los lotes de los que salió la venta."""
     acumulado: dict[tuple, float] = {}
     for m in movimientos:
         clave = ((m["item_id"], m["variant_id"], m["location_id"]) if con_deposito
                  else (m["item_id"], m["variant_id"]))
+        if con_lote:
+            clave += (lotes.lote_de_fila(m["lot_code"]), lotes.vence_de_fila(m["expires_at"]))
         acumulado[clave] = acumulado.get(clave, 0.0) + float(m["quantity_delta"])
     return acumulado
+
+
+def _lotes_a_devolver(vendidas, devueltas, claves) -> dict[tuple, dict[tuple, Decimal]]:
+    """`{(ítem, variante): {(lote, vence): disponible}}` para las `claves` dadas: lo que cada LOTE de la venta todavía
+    puede recibir de vuelta, **en el orden en que salió** (el de las filas `sale`, por id). Es lo vendido de ese lote
+    menos lo que una devolución anterior ya le devolvió. Los buckets «sin lote» no figuran (no hay a qué lote volver) y
+    un lote agotado tampoco."""
+    vendido = _acumular(vendidas, con_deposito=False, con_lote=True)
+    devuelto = _acumular(devueltas, con_deposito=False, con_lote=True)
+    pool: dict[tuple, dict[tuple, Decimal]] = {}
+    for clave, cantidad in vendido.items():
+        item_y_variante, bucket = clave[:2], clave[2:]
+        if item_y_variante not in claves or bucket == (None, None):
+            continue
+        disponible = lotes.saldo_limpio(-Decimal(str(cantidad)) - Decimal(str(devuelto.get(clave, 0.0))))
+        if disponible > 0:
+            pool.setdefault(item_y_variante, {})[bucket] = disponible
+    return pool
+
+
+def _repartir_devolucion(lotes_de_la_clave: dict[tuple, Decimal], cantidad: float) -> list[tuple]:
+    """Reparte `cantidad` entre los lotes de los que salió la venta, en orden de salida, y **descuenta** lo repartido de
+    `lotes_de_la_clave` (la siguiente línea del mismo ítem y variante ve lo que dejó la anterior). Devuelve
+    `[(lote, vence, cantidad)]`; lo que ningún lote puede recibir (devoluciones anteriores sin lote, ventas de antes de
+    A-4) va a UN tramo final `(None, None, resto)`: «sin lote»."""
+    restante = Decimal(str(cantidad))
+    tramos: list[tuple] = []
+    for bucket, disponible in lotes_de_la_clave.items():
+        if restante <= 0:
+            break
+        toma = min(restante, disponible)
+        if toma > 0:
+            tramos.append((*bucket, toma))
+            lotes_de_la_clave[bucket] = disponible - toma
+            restante -= toma
+    if restante > 0:
+        tramos.append((None, None, restante))
+    return tramos
 
 
 class VentaConDevoluciones(ValueError):
@@ -901,7 +945,34 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
 
     🔴 **No es receta-aware**: repone el ítem vendido, nunca sus insumos. Es
     una limitación real para un producto con `resolver_receta` (Restolibra);
-    no lo pidió esta fase, que es la de VentaLibra, sin recetas.
+    no lo pidió esta fase, que es la de VentaLibra, sin recetas. **Sigue así
+    en A-4 PR-3**: la venta de un plato con receta descontó insumos (por lote
+    si están marcados) y esta función devuelve el plato, que nunca tuvo stock,
+    así que no toca los lotes de los insumos. Es un pendiente, no un defecto
+    nuevo (hay un test que lo fija).
+
+    🔑 **Productos marcados: un PAR por lote (ADR-018, A-4 PR-3).** La
+    devolución de un perecedero **va a merma** (decisión de producto): por cada
+    tramo devuelto de un ítem cuya venta salió de un lote (lo dice el ledger de
+    la venta, NO la marca actual: desmarcar el producto después de vender no
+    cambia a dónde vuelve) se escriben, los dos
+    en `deposito_id` y con el lote y vencimiento de origen, un `devolucion`
+    `+cantidad` (que es lo que leen el tope, `anular_venta` y el margen) y una
+    `merma` `−cantidad` (`movement_type='waste'`, `source_id` la venta, nota
+    `Merma: devolución venta ID n — lote X`; no la leen ninguno de los tres).
+    Para el stock y la reposición el neto es 0: la mercadería devuelta no vuelve
+    al estante. El tramo es el reparto de la cantidad devuelta entre las filas
+    `sale` de la venta para ese ítem y variante, **en el orden en que salieron**,
+    restando lo ya devuelto por lote (`_lotes_a_devolver`); lo que ningún lote
+    pueda recibir (una venta anterior a A-4, una devolución anterior sin lote) va
+    a «sin lote» **sin par**: una fila `devolucion` suelta, como siempre. El
+    **tope** no cambia: sigue siendo por (ítem, variante) total, sin lote. Un
+    producto sin marcar, y un marcado cuya venta no salió de ningún lote,
+    escriben la fila suelta de siempre, idéntica. Antes de leer lo ya devuelto se
+    toman los productos marcados pedidos y los que la venta sacó de un lote
+    (`lotes.tomar_productos`, en orden de id): dos devoluciones simultáneas del mismo producto se serializan y la
+    segunda ve lo que repuso la primera. Efecto visible: una `merma` más por cada
+    tramo de un marcado en la pantalla de movimientos.
 
     🔴 **`hooks.validar_deposito` corre ANTES del loop que repone stock** —la
     primera escritura de esta función—, con `operacion="devolucion"` y el
@@ -945,7 +1016,35 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
         if li["kind"] == "product" and li["item_id"] is not None:
             clave = (li["item_id"], li["variant_id"])
             vendido_por_clave[clave] = vendido_por_clave.get(clave, 0.0) + float(li["quantity"])
-    ya_devuelto = _acumular(_movimientos_de_venta(conn, vid, _COND_DEVUELTO), con_deposito=False)
+    # 🔑 El tratamiento por lote de una devolución lo decide la VENTA, no la marca de hoy: un ítem se devuelve por lote si
+    # las filas `sale` de ESTA venta para él salieron de un lote (`lot_code` o `expires_at`). Desmarcar un producto después
+    # de venderlo no cambia a dónde vuelve (mismo criterio que `anular_venta`); una venta sin lotes (anterior a A-4, o de
+    # un producto que nunca los tuvo) devuelve la fila suelta de siempre, marcado o no.
+    vendidas = _movimientos_de_venta(conn, vid, _COND_VENDIDO)
+    pedidos = {
+        lineas[i]["item_id"] for i in devoluciones
+        if i in lineas and lineas[i]["kind"] == "product" and lineas[i]["item_id"] is not None
+    }
+    con_lote_en_la_venta = {
+        m["item_id"] for m in vendidas
+        if m["item_id"] in pedidos
+        and (lotes.lote_de_fila(m["lot_code"]) is not None or lotes.vence_de_fila(m["expires_at"]) is not None)
+    }
+    # Se toman (en orden de id) la unión de los marcados AHORA y los que la venta sacó de un lote, ANTES de leer lo ya
+    # devuelto: dos devoluciones simultáneas del mismo producto se serializan y el tope y el reparto ven lo que repuso la
+    # primera (y contra asignar, dar de baja y vender, que toman el mismo bloqueo). Sin ninguno, una sola consulta de
+    # sondeo y el código de siempre.
+    a_tomar = lotes.ids_marcados(conn, pedidos) | con_lote_en_la_venta
+    if a_tomar:
+        lotes.tomar_productos(conn, a_tomar)
+    devueltas = _movimientos_de_venta(conn, vid, _COND_DEVUELTO)
+    ya_devuelto = _acumular(devueltas, con_deposito=False)
+    lotes_por_clave = (
+        _lotes_a_devolver(
+            vendidas, devueltas,
+            {(li["item_id"], li["variant_id"]) for li in lineas.values() if li["item_id"] in con_lote_en_la_venta},
+        ) if con_lote_en_la_venta else {}
+    )
     fecha = _ar_now().split(" ")[0]
 
     # `turno_para` no se resolvía acá hasta este gancho: `caja_con_turno`
@@ -990,11 +1089,38 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
                 f"quedan {disponible} sin devolver"
             )
         pedido_por_clave[clave] = pedido_por_clave.get(clave, 0.0) + cantidad
-        add_movimiento_stock(
-            conn, producto_id=linea["item_id"], tipo="devolucion", cantidad=cantidad,
-            referencia=f"Devolución venta ID {vid}", venta_id=vid, usuario_id=usuario_id,
-            fecha=fecha, deposito_id=deposito_id, variant_id=linea["variant_id"],
-        )
+        tramos = _repartir_devolucion(lotes_por_clave[clave], cantidad) if clave in lotes_por_clave else []
+        con_lote = any(lote is not None or vence is not None for lote, vence, _ in tramos)
+        if not con_lote:
+            # Sin marcar, o marcado sin lote al que volver: la fila suelta de siempre, idéntica.
+            add_movimiento_stock(
+                conn, producto_id=linea["item_id"], tipo="devolucion", cantidad=cantidad,
+                referencia=f"Devolución venta ID {vid}", venta_id=vid, usuario_id=usuario_id,
+                fecha=fecha, deposito_id=deposito_id, variant_id=linea["variant_id"],
+            )
+        for lote, vence, tramo in (tramos if con_lote else ()):
+            if lote is None and vence is None:
+                # Lo que ningún lote pudo recibir: «sin lote», sin par (como siempre).
+                add_movimiento_stock(
+                    conn, producto_id=linea["item_id"], tipo="devolucion", cantidad=float(tramo),
+                    referencia=f"Devolución venta ID {vid}", venta_id=vid, usuario_id=usuario_id,
+                    fecha=fecha, deposito_id=deposito_id, variant_id=linea["variant_id"],
+                )
+                continue
+            # El par de un perecedero: vuelve al lote (lo que leen el tope, la anulación y el margen) y sale como
+            # merma; neto 0 en el stock.
+            add_movimiento_stock(
+                conn, producto_id=linea["item_id"], tipo="devolucion", cantidad=float(tramo),
+                referencia=f"Devolución venta ID {vid}", venta_id=vid, usuario_id=usuario_id,
+                fecha=fecha, deposito_id=deposito_id, variant_id=linea["variant_id"],
+                lot_code=lote, expires_at=vence,
+            )
+            add_movimiento_stock(
+                conn, producto_id=linea["item_id"], tipo="merma", cantidad=-float(tramo),
+                referencia=f"Merma: devolución venta ID {vid} — lote {lote or '(sin código)'}",
+                venta_id=vid, usuario_id=usuario_id, fecha=fecha, deposito_id=deposito_id,
+                variant_id=linea["variant_id"], lot_code=lote, expires_at=vence,
+            )
         importe += cantidad * float(linea["unit_price"])
 
     importe = round(importe, 2)

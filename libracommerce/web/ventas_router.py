@@ -29,12 +29,13 @@ instala cualquier producto que monte ventas.
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..erp import ventas
+from ..erp import catalogo, lotes, ventas
 from ..erp.hooks import SIN_GANCHOS, Hooks
 from . import fastapi as _fastapi
 from .catalogo_router import Conexion, _deps
@@ -144,6 +145,21 @@ class DevolucionPayload(BaseModel):
         return medios_pago.validar(medio)
 
 
+class PlanSalidaLinea(BaseModel):
+    """Una línea del plan de salida: lo mismo que la venta (`ItemPayload`) sin el precio, que no interviene."""
+
+    producto_id: int
+    qty: float
+    #: La variante del catálogo, o `None` (el producto sin variantes).
+    variante_id: int | None = None
+
+
+class PlanSalidaPayload(BaseModel):
+    items: list[PlanSalidaLinea]
+    #: El depósito del que saldría la venta: el mismo `deposito_id` de `VentaPayload`. `None` = el por defecto.
+    deposito_id: int | None = None
+
+
 def _nombre_de_cliente_default(cliente_id: int) -> str | None:
     from libracore.db.clients import get_client
 
@@ -192,6 +208,23 @@ class OpcionesVentas:
     #: `False` (el comportamiento de hoy: queda NULL; Contalibra y Restolibra no
     #: cambian). Sin migración: la columna ya existe.
     guardar_costo: bool = False
+    #: Avisos de vencimiento (ADR-018, A-4 PR-3, opt-in). **Prendida:** `POST /api/ventas` y `GET /api/ventas/{id}`
+    #: agregan la clave `avisos` a la respuesta **sólo si hay alguno** (`erp.lotes.avisos_de_venta`: lote vencido, por
+    #: vencer —15 días— y faltante sin lote; `hoy` es la fecha de Argentina, no la de la venta), y existe
+    #: `POST /api/ventas/plan-salida`: una LECTURA pura (no escribe ni bloquea) que dice de qué lote saldría cada línea
+    #: (`erp.lotes.planificar_salida`) para que el POS confirme ANTES de cobrar. **Apagada (el default):** las respuestas
+    #: son byte a byte las de hoy, la ruta no existe (404) y no figura en `/openapi.json` (Contalibra y Restolibra no
+    #: cambian). Sin gate de plan ni permisos propios: el producto monta el router con sus dependencias.
+    con_avisos_de_vencimiento: bool = False
+
+
+def _agregar_avisos(conn, venta: dict | None, venta_id: int) -> None:
+    """Agrega `avisos` a la venta **sólo si hay alguno** (sin avisos la respuesta es la de siempre)."""
+    if venta is None:
+        return
+    avisos = lotes.avisos_de_venta(conn, venta_id)
+    if avisos:
+        venta["avisos"] = avisos
 
 
 def build_ventas_router(
@@ -328,6 +361,8 @@ def build_ventas_router(
             venta = ventas.obtener_venta(conn, venta_id)
             if opciones.promociones:
                 venta["promociones"] = promos.promociones_de_venta(conn, venta_id)
+            if opciones.con_avisos_de_vencimiento:
+                _agregar_avisos(conn, venta, venta_id)
             return venta
 
     @router.get("/{vid}")
@@ -338,9 +373,41 @@ def build_ventas_router(
                 from ..erp import promociones as promos
 
                 venta["promociones"] = promos.promociones_de_venta(conn, vid)
+            if venta and opciones.con_avisos_de_vencimiento:
+                _agregar_avisos(conn, venta, vid)
         if not venta:
             raise HTTPException(404, "Venta no encontrada")
         return venta
+
+    if opciones.con_avisos_de_vencimiento:
+
+        @router.post("/plan-salida")
+        def plan_salida(payload: PlanSalidaPayload):
+            """De qué lote saldría cada línea si se vendiera ahora, más los avisos de vencimiento, para confirmar
+            ANTES de cobrar. Lectura pura: no escribe, no bloquea y no commitea. Es una simulación sobre el estado de
+            ahora: otra venta concurrente puede cambiar el resultado antes de cobrar."""
+            if not payload.items:
+                raise HTTPException(422, "Debe agregar al menos un ítem.")
+            if any(not (math.isfinite(i.qty) and i.qty > 0) for i in payload.items):
+                raise HTTPException(422, "La cantidad de cada ítem debe ser mayor que cero.")
+            items = [{"producto_id": i.producto_id, "qty": i.qty, "variante_id": i.variante_id}
+                     for i in payload.items]
+            with abrir() as conn:
+                try:
+                    catalogo.validar_deposito(conn, payload.deposito_id)
+                except catalogo.DepositoInexistente as exc:
+                    raise HTTPException(422, str(exc)) from None
+                ids = sorted({i["producto_id"] for i in items})
+                marcadores = ",".join("?" for _ in ids)
+                existentes = {f[0] for f in conn.execute(
+                    f"SELECT id FROM catalog_items WHERE id IN ({marcadores})", ids).fetchall()}
+                if faltantes := [i for i in ids if i not in existentes]:
+                    raise HTTPException(
+                        422, "No existe el producto " + ", ".join(str(i) for i in faltantes) + ".")
+                try:
+                    return lotes.planificar_salida(conn, items, payload.deposito_id, hooks=opciones.hooks)
+                except ValueError as exc:
+                    raise HTTPException(422, str(exc)) from None
 
     @router.post("/{vid}/anular", dependencies=gate_anular)
     def anular(vid: int, user: dict = Depends(usuario)):

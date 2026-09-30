@@ -23,8 +23,9 @@ Al final, dos familias aparte y rotuladas sobre un marcado CON lotes:
 
 - `test_a4_pr2_*` (A-4 PR-2, 2026-09-30): la venta y la anulación, que YA descuentan y reponen por lote (FEFO). Son los
   `test_a4_cambia_*` de esos casos, invertidos a propósito; el resto de sus tests, sin tocar.
-- `test_a4_cambia_*`: lo que sigue igual hasta el PR-3 (devolución, transferencia y ajuste siguen sin elegir lote). Pasan
-  por `_hoy_la_salida_no_descuenta_por_lote`, el único punto a invertir cuando llegue.
+- `test_a4_pr3_*` (A-4 PR-3, 2026-09-30): la devolución (un par `devolucion` + `merma` en el lote de origen), la
+  transferencia (un par por tramo FEFO) y el ajuste (conteo de un lote; FEFO si baja, «sin lote» si sube). Son los
+  `test_a4_cambia_*` de esos casos, invertidos a propósito; el resto de sus tests, sin tocar.
 """
 
 from __future__ import annotations
@@ -982,30 +983,15 @@ def test_a4_pr2_la_anulacion_repone_al_lote_del_que_salio(abrir_ledger):
         assert _saldos_por_lote(conn, pid, dep) == {"L1": 6, "L2": 4}   # exacto como antes de vender
 
 
-# ═══════════════════ Lo que sigue igual hasta el PR-3: devolución, transferencia y ajuste ═══════════════════
+# ═══════════════════ Un marcado CON lotes: devolución, transferencia y ajuste por lote (A-4 PR-3) ═══════════════════
 #
-# 🔴 Esta familia NO es una red de seguridad: documenta lo que hoy es una LIMITACIÓN (ADR-018, «hasta A-4», que para la
-# venta y la anulación ya no aplica). Un producto marcado con lotes en el ledger devuelve, transfiere y ajusta SIN elegir
-# lote: todas las filas van al bucket «sin lote». Cuando el PR-3 lo resuelva hay que INVERTIR
-# `_hoy_la_salida_no_descuenta_por_lote` —es el único lugar que afirma «los lotes quedan como estaban»— y revisar las
-# filas de ledger de cada test (hoy: `lot_code` y `expires_at` en `None`).
+# Esta familia era `test_a4_cambia_*` (la devolución, la transferencia y el ajuste de un marcado con lotes escribían todo
+# en el bucket «sin lote», ADR-018 «hasta A-4»). Desde el PR-3 la devolución va a merma en el lote de origen (un par), la
+# transferencia mueve los lotes por FEFO (un par por tramo) y el ajuste cuenta un lote o baja por FEFO; se invirtió cada
+# test a propósito. Los casos nuevos están en `tests/test_fefo_devolucion_transferencia_ajuste.py`.
 
 
-def _hoy_la_salida_no_descuenta_por_lote(conn, pid, *, dep, sin_lote, norte=None, sin_lote_norte=None,
-                                          lotes=None):
-    """EL punto a invertir en el PR-3. Hoy: los lotes del depósito principal quedan como estaban (`L1` 6 y `L2` 4, o
-    `lotes` si una venta FEFO previa ya los bajó) y todo lo que entró o salió sin elegir lote está en el bucket «sin
-    lote» con el saldo `sin_lote` (`None` = el bucket ya no existe)."""
-    saldos = {(f["deposito_id"], f["lote"]): f["saldo"] for f in vencimientos.lotes_de(conn, pid, hoy=HOY)}
-    esperado = {(dep, lote): saldo for lote, saldo in (lotes or {"L1": 6, "L2": 4}).items()}
-    if sin_lote is not None:
-        esperado[(dep, None)] = sin_lote
-    if sin_lote_norte is not None:
-        esperado[(norte, None)] = sin_lote_norte
-    assert saldos == esperado
-
-
-def test_a4_cambia_la_devolucion_repone_en_el_sin_lote(abrir_ledger):
+def test_a4_pr3_la_devolucion_de_un_marcado_con_lotes_va_a_merma_en_el_lote_de_origen(abrir_ledger):
     pid = _producto(abrir_ledger, "marcado_con_lotes")
     dep, _ = _depositos(abrir_ledger)
     vid = _vender(abrir_ledger, [_linea(pid, 3)])
@@ -1014,14 +1000,17 @@ def test_a4_cambia_la_devolucion_repone_en_el_sin_lote(abrir_ledger):
     _devolver(abrir_ledger, vid, {linea: 1.0}, dep, usuario_id=7)
     with abrir_ledger() as conn:
         assert _ledger(conn, antes) == [
-            ("return", 1.0, dep, pid, None, "devolucion", "venta", vid, None, None, f"Devolución venta ID {vid}", 7,
-             "2026-09-20T00:00:00", None),
+            ("return", 1.0, dep, pid, None, "devolucion", "venta", vid, "L1", "2026-10-05",
+             f"Devolución venta ID {vid}", 7, "2026-09-20T00:00:00", None),
+            ("waste", -1.0, dep, pid, None, "merma", "venta", vid, "L1", "2026-10-05",
+             f"Merma: devolución venta ID {vid} — lote L1", 7, "2026-09-20T00:00:00", None),
         ]
-        # La venta (FEFO) bajó L1 en 3; la devolución no vuelve a ese lote: entra al «sin lote» (PR-3: va a merma).
-        _hoy_la_salida_no_descuenta_por_lote(conn, pid, dep=dep, sin_lote=1, lotes={"L1": 3, "L2": 4})
+        # La venta (FEFO) bajó L1 en 3; la devolución vuelve a L1 y la merma la saca: el neto es 0 y nada entra al «sin lote».
+        assert _saldos_por_lote(conn, pid, dep) == {"L1": 3, "L2": 4}
+        assert stock.get_stock_actual(conn, pid) == 7.0
 
 
-def test_a4_cambia_la_transferencia_mueve_el_sin_lote_y_no_los_lotes(abrir_ledger):
+def test_a4_pr3_la_transferencia_de_un_marcado_con_lotes_mueve_el_lote_por_fefo(abrir_ledger):
     pid = _producto(abrir_ledger, "marcado_con_lotes")
     dep, norte = _depositos(abrir_ledger)
     antes = _marca(abrir_ledger)
@@ -1032,28 +1021,29 @@ def test_a4_cambia_la_transferencia_mueve_el_sin_lote_y_no_los_lotes(abrir_ledge
         (salida_id, _) = [f[0] for f in conn.execute("SELECT id FROM stock_movements WHERE id > ? ORDER BY id",
                                                      (antes,))]
         assert _ledger(conn, antes) == [
-            ("transfer_out", -4.0, dep, pid, None, "transferencia_salida", "transfer", None, None, None,
+            ("transfer_out", -4.0, dep, pid, None, "transferencia_salida", "transfer", None, "L1", "2026-10-05",
              "Transferencia entre depósitos", 7, "2026-09-12T00:00:00", None),
-            ("transfer_in", 4.0, norte, pid, None, "transferencia_entrada", "transfer", salida_id, None, None,
+            ("transfer_in", 4.0, norte, pid, None, "transferencia_entrada", "transfer", salida_id, "L1", "2026-10-05",
              "Transferencia entre depósitos", 7, "2026-09-12T00:00:00", None),
         ]
-        _hoy_la_salida_no_descuenta_por_lote(conn, pid, dep=dep, sin_lote=-4, norte=norte, sin_lote_norte=4)
+        saldos = {(f["deposito_id"], f["lote"]): f["saldo"] for f in vencimientos.lotes_de(conn, pid, hoy=HOY)}
+        assert saldos == {(dep, "L1"): 2, (dep, "L2"): 4, (norte, "L1"): 4}    # y nada en el «sin lote»
 
 
-def test_a4_cambia_el_ajuste_de_un_marcado_con_lotes_escribe_en_el_sin_lote(abrir_ledger):
+def test_a4_pr3_el_ajuste_de_un_marcado_con_lotes_entra_sin_lote_y_baja_por_fefo(abrir_ledger):
     pid = _producto(abrir_ledger, "marcado_con_lotes")
     dep, _ = _depositos(abrir_ledger)
     antes = _marca(abrir_ledger)
     with abrir_ledger() as conn:
-        stock.ajustar_stock(conn, pid, 12.0, "conteo", usuario_id=7, fecha="2026-09-12")    # +2
-        _hoy_la_salida_no_descuenta_por_lote(conn, pid, dep=dep, sin_lote=2)
-        stock.ajustar_stock(conn, pid, 7.0, "rotura", fecha="2026-09-13")                   # −5
-        _hoy_la_salida_no_descuenta_por_lote(conn, pid, dep=dep, sin_lote=-3)
+        stock.ajustar_stock(conn, pid, 12.0, "conteo", usuario_id=7, fecha="2026-09-12")    # +2: entra «sin lote»
+        assert _saldos_por_lote(conn, pid, dep) == {"L1": 6, "L2": 4, None: 2}
+        stock.ajustar_stock(conn, pid, 7.0, "rotura", fecha="2026-09-13")                   # −5: sale por FEFO, de L1
+        assert _saldos_por_lote(conn, pid, dep) == {"L1": 1, "L2": 4, None: 2}
         conn.commit()
     with abrir_ledger() as conn:
         assert _ledger(conn, antes) == [
             ("adjustment", 2.0, dep, pid, None, "ajuste", None, None, None, None, "conteo", 7,
              "2026-09-12T00:00:00", None),
-            ("adjustment", -5.0, dep, pid, None, "ajuste", None, None, None, None, "rotura", None,
+            ("adjustment", -5.0, dep, pid, None, "ajuste", None, None, "L1", "2026-10-05", "rotura", None,
              "2026-09-13T00:00:00", None),
         ]

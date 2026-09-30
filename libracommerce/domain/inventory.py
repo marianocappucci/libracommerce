@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 
@@ -47,7 +47,9 @@ class StockMovement:
     source_id: int | None = None
     unit_cost: Decimal | None = None
     lot_code: str | None = None
-    expires_at: datetime | None = None
+    #: `datetime` (la recepcion de compra) o `date` (el lote de una transferencia, A-4 PR-3): el repositorio escribe
+    #: `.isoformat()`, asi que un `date` queda como `AAAA-MM-DD`, igual que las filas de venta y ajuste.
+    expires_at: date | datetime | None = None
     variant_id: int | None = None
     note: str = ""
     created_by: int | None = None

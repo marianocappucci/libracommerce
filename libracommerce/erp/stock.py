@@ -253,10 +253,80 @@ def get_movimientos_stock(conn, producto_id: int | None = None,
 
 def ajustar_stock(conn, producto_id: int, stock_nuevo: float, referencia: str,
                   usuario_id: int | None = None, fecha: str = "",
-                  deposito_id: int | None = None, variant_id: int | None = None):
+                  deposito_id: int | None = None, variant_id: int | None = None,
+                  lot_code: str | None = None, expires_at: _date | _datetime | str | None = None):
     """Un movimiento de ajuste que lleva el stock al valor indicado. Con `deposito_id`/`variant_id` el valor es el
-    de ese depósito y esa variante (y el movimiento va ahí); sin ellos, el total y el depósito por defecto."""
+    de ese depósito y esa variante (y el movimiento va ahí); sin ellos, el total y el depósito por defecto.
+
+    🔑 **Productos marcados (`tracks_expiry = 1`, ADR-018, A-4 PR-3).** Un producto sin marcar, y un marcado sin lotes,
+    escriben EXACTAMENTE la fila de siempre. Un marcado CON lotes:
+
+    - **con `lot_code` y/o `expires_at`** es el conteo de ESE bucket: `stock_nuevo` es lo que hay en el lote, y el delta
+      se mide contra el saldo del bucket `(lote, vencimiento)` en el depósito que escribe (no contra el total); una fila
+      `ajuste` con ese lote y vencimiento. Un lote que no existe se crea (el saldo de un bucket ausente es 0);
+    - **sin lote**, `stock_nuevo` sigue siendo el total (como hoy) y un delta **negativo** sale por FEFO (una fila
+      `ajuste` por lote consumido, con el mismo plan y las mismas reglas que la venta: vencidos primero, «sin lote»
+      último, el resto que ningún bucket respalda va a una fila «sin lote», que queda negativa como hoy); un delta
+      **positivo** entra en el bucket «sin lote» (no se inventa un lote).
+
+    **Variantes:** un marcado ajustado SIN variante cuando tiene stock por variante en ese depósito es un
+    `lotes.VarianteRequerida` (`ValueError`; 422 por HTTP): el total que se compara incluye las variantes y el FEFO sólo
+    planifica la variante NULL. Con `variant_id` explícito, sin stock en variantes, o sin marcar, nada cambia. (Con lote
+    el bucket ya es de una variante: no aplica.)
+
+    Pasar `lot_code` o `expires_at` de un producto que NO está marcado es un `ValueError` (no hay lote que contar; antes
+    de A-4 el parámetro no existía, así que nadie lo manda hoy). Antes de leer saldos el producto marcado se toma
+    (`lotes.tomar_productos`): dos ajustes, o un ajuste y una venta, del mismo producto se serializan en PostgreSQL.
+
+    🔴 **Límite preexistente, conservado a propósito:** sin `deposito_id` el valor que se compara es el **total de todos
+    los depósitos** pero la fila se escribe en el depósito por defecto. Para un marcado con el stock repartido el FEFO
+    corre sobre el depósito donde efectivamente se escribe (el por defecto), no sobre donde está el resto: un ajuste
+    negativo puede dejar el «sin lote» del depósito por defecto en negativo aunque otro depósito tenga lotes. Cambiarlo
+    alteraría el camino de los productos sin marcar; quien ajusta un producto con varios depósitos tiene que pasar
+    `deposito_id`."""
+    con_lote = lot_code is not None or expires_at is not None
+    marcado = bool(lotes.ids_marcados(conn, [producto_id]))
+    if not marcado:
+        if con_lote:
+            raise ValueError(
+                "lot_code y expires_at sólo se pueden usar con un producto que vence (marcado): este no lo está"
+            )
+        return _ajustar_total(conn, producto_id, stock_nuevo, referencia, usuario_id, fecha, deposito_id, variant_id)
+    # El producto se toma ANTES de leer saldos (y se relee lo que haya): el conteo y el FEFO ven el ledger ya serializado.
+    lotes.tomar_productos(conn, [producto_id])
+    if con_lote:
+        lote = normalizar_lote(lot_code) if lot_code is not None else None
+        vence = normalizar_vencimiento(expires_at) if expires_at is not None else None
+        deposito = deposito_id if deposito_id is not None else get_default_deposito_id(conn)
+        saldo = lotes.saldo_del_bucket(conn, producto_id, deposito, variant_id, lote, vence)
+        delta = round(float(Decimal(str(stock_nuevo)) - saldo), 4)
+        if delta == 0:
+            return
+        return add_movimiento_stock(
+            conn, producto_id=producto_id, tipo="ajuste", cantidad=delta, referencia=referencia,
+            usuario_id=usuario_id, fecha=fecha, deposito_id=deposito_id, variant_id=variant_id,
+            lot_code=lote, expires_at=vence,
+        )
+    # Sin variante, el total que se compara incluye las variantes pero el FEFO sólo planifica la variante NULL: si hay stock
+    # por variante en ese depósito se pide la variante (lotes.VarianteRequerida), en vez de bajar el bucket equivocado.
+    lotes.exigir_variante(conn, producto_id, deposito_id if deposito_id is not None else get_default_deposito_id(conn),
+                          variant_id)
     actual = get_stock_actual(conn, producto_id, deposito_id, variant_id)
+    delta = round(stock_nuevo - actual, 4)
+    if delta < 0:
+        return _salida_por_lote(conn, producto_id=producto_id, cantidad=delta, referencia=referencia, venta_id=None,
+                                usuario_id=usuario_id, fecha=fecha, deposito_id=deposito_id, variant_id=variant_id,
+                                tipo="ajuste")
+    return _ajustar_total(conn, producto_id, stock_nuevo, referencia, usuario_id, fecha, deposito_id, variant_id,
+                          actual=actual)
+
+
+def _ajustar_total(conn, producto_id, stock_nuevo, referencia, usuario_id, fecha, deposito_id, variant_id,
+                   actual=None):
+    """El ajuste de siempre: una sola fila `ajuste` sin lote por la diferencia contra el stock (total, o el del depósito
+    y la variante). `actual` ya leído, si quien llama lo tenía."""
+    if actual is None:
+        actual = get_stock_actual(conn, producto_id, deposito_id, variant_id)
     delta = round(stock_nuevo - actual, 4)
     if delta == 0:
         return
@@ -268,19 +338,68 @@ def ajustar_stock(conn, producto_id: int, stock_nuevo: float, referencia: str,
     )
 
 
+def salida_manual(conn, producto_id: int, tipo: str, cantidad: float, referencia: str, usuario_id: int | None = None,
+                  fecha: str = "", deposito_id: int | None = None, variant_id: int | None = None):
+    """Una salida manual de stock (`salida`, `merma`, ...: lo que el endpoint de ajuste escribe en esos modos) de
+    `cantidad` (positiva; el signo lo pone esta función).
+
+    🔑 **Productos marcados (`tracks_expiry = 1`, ADR-018, A-4 PR-3): FEFO.** Un producto marcado no resta del bucket «sin
+    lote»: sale por los lotes en el mismo orden y con las mismas reglas que la venta (`_salida_por_lote`: una fila por lote
+    consumido con su `lot_code` y `expires_at`, vencidos primero, «sin lote» último, lo que ningún bucket respalda va a una
+    fila «sin lote»), conservando el `movement_type` y el `reason_code` de `tipo` y la misma `referencia` en cada fila. Se
+    toma el producto antes de leer saldos (`lotes.tomar_productos`). **Un producto sin marcar, y un marcado sin lotes,
+    escriben la llamada de siempre** a `add_movimiento_stock` (mismos argumentos, `INSERT` de 11 columnas).
+
+    Es el punto de entrada para CUALQUIER salida manual de un producto que puede estar marcado: llamar a
+    `add_movimiento_stock` con una cantidad negativa y sin lote resta del bucket «sin lote» y deja sobreestimado el saldo
+    de los lotes. Un marcado SIN variante con stock por variante en ese depósito es `lotes.VarianteRequerida` (ver
+    `ajustar_stock`)."""
+    cantidad = -abs(cantidad)
+    if lotes.ids_marcados(conn, [producto_id]):
+        lotes.tomar_productos(conn, [producto_id])
+        lotes.exigir_variante(conn, producto_id,
+                              deposito_id if deposito_id is not None else get_default_deposito_id(conn), variant_id)
+        return _salida_por_lote(conn, producto_id=producto_id, cantidad=cantidad, referencia=referencia, venta_id=None,
+                                usuario_id=usuario_id, fecha=fecha, deposito_id=deposito_id, variant_id=variant_id,
+                                tipo=tipo)
+    return add_movimiento_stock(conn, producto_id, tipo, cantidad, referencia, usuario_id=usuario_id, fecha=fecha,
+                                deposito_id=deposito_id, variant_id=variant_id)
+
+
+def entrada_manual_con_lote(conn, producto_id: int, cantidad: float, referencia: str, *, lot_code=None,
+                            expires_at=None, usuario_id: int | None = None, fecha: str = "",
+                            deposito_id: int | None = None, variant_id: int | None = None):
+    """Una entrada manual (`entrada`, `+cantidad`, UNA fila) al bucket `(lot_code, expires_at)` de un producto marcado: la
+    misma fila que escribe `erp.vencimientos.registrar_entrada_con_lote`, pero sin su idempotencia por `clave_operacion`
+    ni su validación de escala (que son de esa operación) y con la `referencia` que arme quien llama (el modo `entrada` del
+    endpoint de ajuste, que suma una conversión de unidad de compra). `ValueError` si el producto no está marcado (no hay
+    lote que cargar) o el lote o el vencimiento no son válidos, antes de escribir. Sumar no bloquea ni toca otros
+    buckets. La entrada SIN lote no pasa por acá: sigue entrando «sin lote» (no sobreestima ningún lote)."""
+    if not lotes.ids_marcados(conn, [producto_id]):
+        raise ValueError(
+            "lot_code y expires_at sólo se pueden usar con un producto que vence (marcado): este no lo está"
+        )
+    return add_movimiento_stock(conn, producto_id, "entrada", cantidad, referencia, usuario_id=usuario_id, fecha=fecha,
+                                deposito_id=deposito_id, variant_id=variant_id, lot_code=lot_code, expires_at=expires_at)
+
+
 def _es_servicio(conn, producto_id: int) -> bool:
     row = conn.execute("SELECT item_type FROM catalog_items WHERE id=?", (producto_id,)).fetchone()
     return bool(row) and row[0] == "service"
 
 
-def _salida_por_lote(conn, *, producto_id: int, cantidad: float, referencia: str, venta_id: int,
-                     usuario_id: int | None, fecha: str, deposito_id: int | None, variant_id: int | None = None):
-    """La salida por venta de `cantidad` (negativa) de un producto **marcado** (`tracks_expiry=1`, ya tomado con
+def _salida_por_lote(conn, *, producto_id: int, cantidad: float, referencia: str, venta_id: int | None,
+                     usuario_id: int | None, fecha: str, deposito_id: int | None, variant_id: int | None = None,
+                     tipo: str = "venta"):
+    """La salida de `cantidad` (negativa) de un producto **marcado** (`tracks_expiry=1`, ya tomado con
     `lotes.tomar_productos`): una fila por bucket en orden FEFO (`lotes.plan_fefo`), cada una con el `lot_code` y el
     `expires_at` de su bucket. Un marcado sin lotes da un único tramo «sin lote» y entonces la llamada es, argumento por
-    argumento, la de siempre (incluida la cantidad original en `float`, sin pasar por `Decimal`)."""
+    argumento, la de siempre (incluida la cantidad original en `float`, sin pasar por `Decimal`).
+
+    `tipo` es el de las filas: `venta` (la venta, con su `venta_id`) o `ajuste` (el ajuste negativo de
+    `ajustar_stock`, sin `venta_id`; A-4 PR-3)."""
     if not cantidad:
-        return add_movimiento_stock(conn, producto_id=producto_id, tipo="venta", cantidad=cantidad,
+        return add_movimiento_stock(conn, producto_id=producto_id, tipo=tipo, cantidad=cantidad,
                                     referencia=referencia, venta_id=venta_id, usuario_id=usuario_id, fecha=fecha,
                                     variant_id=variant_id, deposito_id=deposito_id)
     deposito = deposito_id if deposito_id is not None else get_default_deposito_id(conn)
@@ -288,14 +407,14 @@ def _salida_por_lote(conn, *, producto_id: int, cantidad: float, referencia: str
     for t in tramos:
         if t.sin_lote:
             add_movimiento_stock(
-                conn, producto_id=producto_id, tipo="venta",
+                conn, producto_id=producto_id, tipo=tipo,
                 cantidad=cantidad if len(tramos) == 1 else -float(t.cantidad),
                 referencia=referencia, venta_id=venta_id, usuario_id=usuario_id, fecha=fecha,
                 variant_id=variant_id, deposito_id=deposito_id,
             )
         else:
             add_movimiento_stock(
-                conn, producto_id=producto_id, tipo="venta", cantidad=-float(t.cantidad),
+                conn, producto_id=producto_id, tipo=tipo, cantidad=-float(t.cantidad),
                 referencia=referencia, venta_id=venta_id, usuario_id=usuario_id, fecha=fecha,
                 variant_id=variant_id, deposito_id=deposito_id, lot_code=t.lote, expires_at=t.vence,
             )
