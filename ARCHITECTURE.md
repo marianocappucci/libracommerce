@@ -68,7 +68,8 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
   `margen_router` (`build_margen_router`: margen y rotación por producto y por período, sólo
   lectura sobre `erp.margen`; ADR-015) y
   `reposicion_router` (`build_reposicion_router`: qué pedir por producto y por sucursal, sólo lectura sobre
-  `erp.reposicion`; ADR-017) y
+  `erp.reposicion`; ADR-017; los tres exports CSV —margen, reposición y vencimientos— pasan por un único `_csv` que
+  neutraliza las celdas de texto que una planilla leería como fórmula, `web/csv_seguro.py`) y
   `vencimientos_router` (`build_vencimientos_router`, de lectura, y `build_vencimientos_escritura_router`, con
   gates por operación: próximos a vencer, lotes de un producto, marcar «vence», asignar vencimiento a saldo sin
   lote y dar de baja un lote, sobre `erp.vencimientos`; ADR-018). La de escritura **falla al construirse** sin

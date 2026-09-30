@@ -608,7 +608,10 @@ def dar_de_baja_lote(conn, item_id: int, deposito_id: int, lot_code: str | None,
     `lot_code` y `expires_at` son los del bucket tal como los devuelve `lotes_de` (al menos uno tiene que venir: la
     merma del stock sin lote es un ajuste común). `ValueError` con datos inválidos o un depósito inexistente;
     `ProductoNoEncontrado`; `SaldoInsuficiente` si el lote no tiene `cantidad` en ese depósito y variante (un lote
-    que no existe tiene saldo 0). No exige que el producto esté marcado. Devuelve `{producto_id, deposito_id,
+    que no existe tiene saldo 0) **o si el stock total del producto ahí (lotes y sin lote) no la alcanza**;
+    `ReglaDeNegocio` si hay **saldo «sin lote» negativo** en ese depósito y variante (salidas sin conciliar: hasta A-4 las
+    ventas no bajan el lote, su saldo puede estar sobreestimado y mermarlo descontaría dos veces lo vendido). Esas
+    comprobaciones van después de buscar la clave: un reintento (`repetida`) no se ve afectado por ellas. No exige que el producto esté marcado. Devuelve `{producto_id, deposito_id,
     variante_id, lote, vence, cantidad, saldo_restante, repetida}`."""
     clave = _normalizar_clave(clave_operacion)
     lote = normalizar_lote(lot_code) if lot_code is not None else None
@@ -625,11 +628,28 @@ def dar_de_baja_lote(conn, item_id: int, deposito_id: int, lot_code: str | None,
             "tipo": "merma", "producto_id": item_id, "deposito_id": deposito_id, "variante_id": variante_id,
             "lote": lote, "vence": vence, "cantidad": _saldo(cant)})
     _fila_de_producto(conn, item_id)
-    saldo = _saldo_del_bucket(conn, item_id, deposito_id, variante_id, lote, vence)
+    # 🔴 Parche hasta A-4 (ver ADR-018, nota del 2026-09-30): las ventas todavía descuentan del bucket «sin lote», no del
+    # lote, así que el saldo de un lote puede estar sobreestimado. Por eso, además del saldo del lote, se mira el del
+    # producto en ese depósito y variante. Las tres comprobaciones corren DESPUÉS de buscar la clave (un reintento de una
+    # baja ya hecha devuelve lo anterior aunque el estado haya cambiado) y con el producto tomado.
+    saldos = {k[3:]: v for k, v in _saldos(conn, "sm.item_id = ? AND sm.location_id = ?", [item_id, deposito_id],
+                                          {deposito_id: {}}).items() if k[2] == variante_id}
+    saldo = saldos.get((lote, vence), _CERO)
     if saldo < cant:
         raise SaldoInsuficiente(
             f"el lote {lote or '(sin código)'} (vence {vence or 'sin fecha'}) tiene {_texto_del_saldo(max(saldo, _CERO))} "
             f"en el depósito {deposito_id} y se quieren dar de baja {_texto_del_saldo(cant)}"
+        )
+    if saldos.get((None, None), _CERO) < 0:
+        raise ReglaDeNegocio(
+            "hay salidas sin lote sin conciliar en este depósito: el saldo del lote puede estar sobreestimado; "
+            "conciliá con el conteo físico antes de dar de baja"
+        )
+    total = sum(saldos.values(), _CERO)
+    if total < cant:
+        raise SaldoInsuficiente(
+            f"el stock total del producto en el depósito {deposito_id} es {_texto_del_saldo(max(total, _CERO))} "
+            f"y se quieren dar de baja {_texto_del_saldo(cant)}"
         )
     referencia = f"Merma: {motivo} — lote {lote or '(sin código)'}, vence {vence or 'sin fecha'}"
     if nota.strip():
