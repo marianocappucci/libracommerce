@@ -180,7 +180,7 @@ def _devuelto_por_clave(conn, desde: str, hasta: str) -> dict[tuple, Decimal]:
 
 def _lineas_netas(conn, desde: str, hasta: str):
     """Cada línea de producto de las ventas del rango, ya neta de descuentos y
-    devoluciones: `(occurred_on, item_id, nombre, unidades, ingreso, costo, estimado, sin_costo)`."""
+    devoluciones: `(occurred_on, item_id, nombre, unidades, ingreso, costo, estimado, sin_costo, venta_id)`."""
     donde, params = _filtro_de_ventas(desde, hasta)
     filas = conn.execute(
         f"""SELECT s.id AS venta_id, s.occurred_on, s.discount_total,
@@ -242,8 +242,48 @@ def _lineas_netas(conn, desde: str, hasta: str):
             yield (
                 f["occurred_on"], f["item_id"], f["nombre"] or f["description_snapshot"],
                 cantidad * queda, ingreso * queda, costo_unitario * cantidad * queda,
-                estimado, sin_costo,
+                estimado, sin_costo, venta_id,
             )
+
+
+def _sucursal_de_las_ventas(conn, desde: str, hasta: str) -> dict[int, int | None]:
+    """La sucursal de cada venta del rango: `{venta_id: branch_id | None}`.
+
+    `sales.branch_id` cuando la venta lo trae; si no, la sucursal del depósito del que salió su stock. **No se
+    puede leer sólo `sales.branch_id`**: `erp.ventas.crear_venta` —el camino de `POST /api/ventas`— no lo escribe
+    (sólo lo llena `db.repository.save_sale` con un `Sale` del dominio), así que toda venta de mostrador lo trae en
+    NULL, y la sucursal es la de su depósito (`locations.branch_id`, la del ledger `movement_type='sale'` con
+    `source_type` `venta` o `sale`, las dos formas en que el motor anota una venta). Una venta tiene un solo depósito
+    (`deposito_id` es de la venta); si el ledger trajera varios se toma la menor sucursal, para que dé siempre lo
+    mismo. Sin ninguna de las dos cosas (un producto sin sucursales, o una venta que no movió stock) es `None`."""
+    donde, params = _filtro_de_ventas(desde, hasta)
+    filas = conn.execute(
+        f"""SELECT s.id AS venta_id, s.branch_id, MIN(l.branch_id) AS branch_deposito
+            FROM sales s
+            LEFT JOIN stock_movements sm ON sm.source_id = s.id AND sm.movement_type = 'sale'
+                                        AND sm.source_type IN ('venta', 'sale')
+            LEFT JOIN locations l ON l.id = sm.location_id
+            WHERE {donde}
+            GROUP BY s.id, s.branch_id""",
+        params,
+    ).fetchall()
+    return {f["venta_id"]: f["branch_id"] if f["branch_id"] is not None else f["branch_deposito"] for f in filas}
+
+
+def unidades_netas(conn, desde: str, hasta: str, sucursal_id: int | None = None):
+    """Las unidades vendidas netas de cada línea de producto del rango, con el criterio de `reporte_margen`
+    (qué es una venta, devoluciones restadas, línea devuelta entera fuera): `(occurred_on, item_id, unidades)`,
+    una por línea. Es lo que usa `erp.reposicion` para la rotación, sin reimplementar el criterio.
+
+    `sucursal_id` deja sólo las ventas de esa sucursal (`_sucursal_de_las_ventas`); las que no tienen ninguna no
+    entran en una sucursal, y `None` (el default) las cuenta todas."""
+    de_la_sucursal = _sucursal_de_las_ventas(conn, desde, hasta) if sucursal_id is not None else {}
+    for occurred_on, item_id, _nombre, unidades, _ingreso, _costo, _estimado, _sin_costo, venta_id in _lineas_netas(
+        conn, desde, hasta
+    ):
+        if sucursal_id is not None and de_la_sucursal.get(venta_id) != sucursal_id:
+            continue
+        yield occurred_on, item_id, unidades
 
 
 def _sumar(acum: _Acum, unidades, ingreso, costo, estimado, sin_costo) -> None:
@@ -304,7 +344,9 @@ def reporte_margen(conn, desde: str = "", hasta: str = "", agrupacion: str = "di
     nombres: dict[int, str] = {}
     por_periodo: dict[str, _Acum] = {}
     total = _Acum()
-    for occurred_on, item_id, nombre, unidades, ingreso, costo, estimado, sin_costo in _lineas_netas(conn, desde, hasta):
+    for occurred_on, item_id, nombre, unidades, ingreso, costo, estimado, sin_costo, _venta in _lineas_netas(
+        conn, desde, hasta
+    ):
         if producto_id is not None and item_id != producto_id:
             continue
         nombres[item_id] = nombre
