@@ -1846,7 +1846,7 @@ def test_el_router_de_lectura_solo_lee_y_el_de_escritura_solo_escribe(abrir_vto)
     assert {m for r in lectura.routes for m in r.methods} == {"GET"}
     assert {m for r in escritura.routes for m in r.methods} == {"PUT", "POST"}
     rutas = {(m, r.path) for router in (lectura, escritura) for r in router.routes for m in r.methods}
-    assert len(rutas) == 6  # y no chocan entre sí
+    assert len(rutas) == 7  # y no chocan entre sí (la entrada con lote es la séptima)
 
 
 def test_las_escrituras_se_pueden_guardar_por_dependencia_distinta_a_las_lecturas(abrir_vto):

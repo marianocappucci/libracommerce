@@ -74,8 +74,11 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
   neutraliza las celdas de texto que una planilla leería como fórmula, `web/csv_seguro.py`) y
   `vencimientos_router` (`build_vencimientos_router`, de lectura, y `build_vencimientos_escritura_router`, con
   gates por operación: próximos a vencer, lotes de un producto, marcar «vence», asignar vencimiento a saldo sin
-  lote y dar de baja un lote, sobre `erp.vencimientos`; ADR-018). La de escritura **falla al construirse** sin
-  `usuario_actual` o sin listas no vacías `dependencias_marcar` y `dependencias_movimientos`, y `asignar` y `merma`
+  lote, cargar una entrada de stock nuevo con lote (`POST /entrada`) y dar de baja un lote, sobre `erp.vencimientos`;
+  ADR-018; y, opt-in con `OpcionesCatalogo.con_vencimientos`, la marca `vence` en el producto: listado, escaneo, alta y
+  edición la devuelven y el alta y la edición la cambian bajo `autorizar_marcar_vence`, y apagada las respuestas de
+  productos no cambian). La de escritura **falla al construirse** sin
+  `usuario_actual` o sin listas no vacías `dependencias_marcar` y `dependencias_movimientos`, y `asignar`, `entrada` y `merma`
   exigen `clave_operacion` (idempotencia de los reintentos; única por producto: el cliente genera una clave por intento
   del usuario y por producto). Una `variante_id` que no es del producto es 422.
 - **`adapters/`** e **`integrations/`** — puentes hacia afuera: `adapters/

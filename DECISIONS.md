@@ -654,6 +654,78 @@ tocan. Un test barre el paquete y falla si aparece otro export con su propio `cs
 > **Nota 2026-09-30 (tercera revisión de Codex sobre el montaje en VentaLibra): la guarda de la merma es de mejor esfuerzo, no una garantía.** Mientras las ventas descuenten del bucket «sin lote», el saldo de un lote sobreestima lo que hay en cuanto ocurre CUALQUIER salida sin lote posterior a su entrada o asignación, aunque el saldo neto «sin lote» siga siendo positivo (asignar 6 de 10, vender 3 sin indicar lote y mermar las 6 vuelve a descontar unidades vendidas). `dar_de_baja_lote` bloquea los casos detectables (stock total insuficiente y saldo «sin lote» negativo), pero **no puede probar de qué bucket salió físicamente una venta**. Cerrarlo de verdad exige que la salida registre su lote (A-4: FEFO en ventas, anulaciones, devoluciones y transferencias). **Decisión:** hasta A-4, el producto que monte este router **no debe exponer la baja de un lote**; la asignación de vencimiento (que conserva el total) y el reporte informativo sí. La regla de salidas sin conciliar se revisa cuando A-4 esté hecho.
 > **Nota 2026-09-30 (CSV):** `csv_seguro` también neutraliza el salto de línea inicial (`\n`), que OWASP cuenta como posible disparador de fórmula.
 
+**Nota (2026-09-30) — carga de vencimientos: la entrada con lote y la marca en el producto.** Decisión del humano: hoy no hay
+dónde cargar vencimientos de forma natural (se podía marcar, asignar al saldo sin lote y dar de baja, pero no **cargar** un
+lote de mercadería nueva ni marcar desde el alta del producto). Es el **motor** de la etapa; el kit de pantallas y el
+producto vienen después y se apoyan en estos dos contratos. Aditivo, sin tocar el camino de ventas.
+- **`erp.vencimientos.registrar_entrada_con_lote(conn, item_id, deposito_id, lote, vence, cantidad, *, clave_operacion,
+  variante_id=None, usuario_id=None, nota='', fecha='')`** y **`POST /api/vencimientos/entrada`** (router de escritura, con
+  `dependencias_movimientos` y `usuario_actual` como asignar y merma; la firma obligatoria de la factory no cambia): una
+  **entrada manual de stock nuevo** con lote y vencimiento. Se distingue de asignar: **asignar** le pone fecha a saldo que
+  ya está contado sin lote (un par de ajustes, el total no cambia); la **entrada** suma stock real (`+cantidad`, **una sola
+  fila**) y no toca el «sin lote». Devuelve `{producto_id, deposito_id, variante_id, lote, vence, cantidad, referencia,
+  saldo_lote, repetida}` (`saldo_lote` = saldo de ese lote tras la entrada).
+- **Tipo de movimiento: `entrada`** (`reason_code='entrada'`, `movement_type='adjustment'`), el mismo que escribe la entrada
+  manual de `POST /api/stock/{id}/ajuste` y con etiqueta propia en las pantallas; `TIPOS` de `erp.stock` no se modificó. (Asignar
+  sigue escribiendo `ajuste`: es una reclasificación, no una entrada.)
+- **Un lote es el par (código, vencimiento), como ya lo agrupa `lotes_de`:** el mismo código con la **misma fecha suma al
+  mismo bucket**; el mismo código con **otra fecha es otro bucket** (otra fila en `lotes_de` y en el reporte). No se
+  «corrige» solo: un lote cargado con la fecha equivocada se da de baja y se vuelve a cargar. Unir buckets por código sería
+  reescribir el ledger o adivinar cuál fecha vale; el costo aceptado es que un error de tipeo en la fecha se ve como dos filas.
+- **Misma idempotencia que asignar y merma:** `clave_operacion` obligatoria, única por `(producto, clave)`, marca `[op:<clave>]`
+  al final de la nota, producto tomado antes de buscarla. Reintento con los mismos datos → `repetida: true` con el resultado
+  de la primera vez; otros datos u otra operación sobre ese producto → 409; **la búsqueda de la clave va primero**, así que un
+  reintento de una carga hecha no falla porque el producto se haya desmarcado o la unidad haya cambiado. Un lote, un producto
+  sin marcar y un servicio: 409. Validaciones: variante del producto (422), cantidad > 0, **la escala de la unidad** (entera
+  si `units.allows_fraction = 0`; si la admite, hasta `decimal_scale` decimales, 3 si no lo declara, como `erp.reposicion`) y
+  un tope de mil millones por entrada (sin tope `1e999999` pasaba por «número finito» y llegaba a un `float` infinito).
+  🔵 Hallazgo: **ni `ajustar_stock` ni `asignar_vencimiento_a_saldo` validan la escala de la unidad** (el ajuste manual
+  tampoco); acá sí porque es stock nuevo. No se tocaron.
+- **La marca `vence` en el producto, opt-in por producto del motor:** `OpcionesCatalogo.con_vencimientos: bool = False` y
+  `autorizar_marcar_vence: Callable[[dict], bool] | None = None` en `web/catalogo_router.py`. **Apagada (el default), las
+  respuestas y los cuerpos de productos son byte a byte los de hoy** (Contalibra y Restolibra no cambian: un test compara el
+  JSON contra el de una app sin la opción, y que la sesión ni se resuelve). **Prendida:** el listado, el escaneo (dentro de
+  `producto`) y la respuesta del alta y la edición devuelven `vence: bool`; el alta y la edición aceptan `vence` (estricto:
+  un `"si"` o un `1` son 422), y **si no viene no se toca la marca** (`save_catalog_item` no escribe la columna: editar otros
+  campos nunca la pierde, hay test). Si viene y **cambió**, se marca o desmarca con `marcar_vence`; el gancho recibe el usuario
+  de la sesión y, si devuelve `False`, **403** sin guardar nada del resto de la edición; sin gancho, cualquiera que pueda editar
+  el producto puede marcar. Sin la revisión `0002` y con un cambio de marca: **409** con el comando; un servicio: 409.
+- **Por qué opt-in y no siempre prendida:** los tres productos comparten `build_productos_router`, y una clave nueva en cada
+  producto del listado, o un campo nuevo en el cuerpo, es un cambio de contrato para dos productos que no usan vencimientos
+  (y `vence` en una base sin `0002` sería una mentira). Por qué **un gancho** `autorizar_marcar_vence` y no una dependencia:
+  editar el producto y marcarlo que venza son capacidades distintas (en VentaLibra marca sólo el encargado y edita más gente)
+  y la decisión depende de **si la marca cambia**, que el router sabe y el producto no.
+- **Una sola consulta auxiliar por pedido en el listado** (`erp.vencimientos.ids_que_vencen`: los ids marcados, más el
+  sondeo de la columna por metadatos, que también hace el resto del módulo), no una por producto. **Tolera una base sin la
+  `0002`** (`vence` es `false`, nada se rompe): el sondeo es por `PRAGMA table_info` y no con un `SELECT` de la columna, porque
+  en PostgreSQL un `SELECT` fallido **aborta la transacción** entera.
+- 🔵 **Transacción de la edición:** `save_catalog_item` commitea por su cuenta (es del repositorio), así que no hay una
+  única transacción SQL con el guardado. En cambio **todo lo que puede rechazar el cambio de marca se resuelve antes de
+  escribir** (autorización, revisión, servicio) y la marca se escribe **después** del guardado, en la misma conexión y sin
+  commit propio: un guardado que falla (p. ej. un código repetido, 422) no deja la marca cambiada (hay test). Lo único que
+  queda fuera es una falla de la base entre el guardado y la marca.
+- **Revisión de Codex (2026-09-30), tres ajustes.** (1) **Un servicio no puede quedar marcado.** El alta y la edición validan la
+  combinación **resultante** (tipo pedido + marca efectiva), cambie o no la marca: un producto marcado que se edita a
+  `servicio` con `vence` omitido o `true` es **409** («un servicio no puede tener vencimiento…») sin guardar nada y sin consultar
+  el gancho; con `vence: false` en la misma edición vale. Para eso `marcar_vence(False)` ya no rechaza a un servicio (limpiar la
+  marca siempre puede hacerse; sólo marcar es error). Además `registrar_entrada_con_lote` y `asignar_vencimiento_a_saldo`
+  rechazan (409) un producto que no sea `item_type='product'`, marcado o no. La merma no: dar de baja existencias históricas de
+  algo que hoy es servicio es una limpieza legítima. (2) **La entrada exige depósito activo** (`catalogo.validar_deposito`,
+  `DepositoInexistente`, un `ValueError`: **422**, el mismo código que ventas y transferencias), porque es stock nuevo; va
+  **después** de buscar la clave (un reintento de una carga hecha no falla porque el depósito se haya dado de baja). Lectura,
+  asignar y merma sobre un depósito inactivo **no cambian** (sus existencias siguen existiendo). (3) **Limitación preexistente,
+  fuera de alcance y pendiente:** la edición de un producto **no es atómica respecto de un código duplicado**:
+  `update_producto` (`save_catalog_item`) commitea los campos y **después** reemplaza el código, así que un código repetido falla
+  (422) con los demás campos ya guardados, **con o sin `vence`**. No lo introdujo esta etapa y arreglarlo toca `db/repository.py` y
+  el camino de edición de los tres productos. Lo que sí se garantiza: **la marca `vence` sólo se escribe si el guardado completo tuvo
+  éxito**. Un test (`test_limitacion_preexistente_la_edicion_no_es_atomica_respecto_del_codigo_duplicado`) fija el comportamiento
+  actual.
+- **Límites.** No hay `GET /api/productos/{pid}` en el motor: la ficha suelta con `vence` es
+  `GET /api/vencimientos/productos/{id}/lotes` (`producto.vence`); `GET /api/stock/{pid}` y la respuesta del ajuste siguen con el
+  `producto` sin `vence` (prender eso sería una opción más en `OpcionesStock`). La entrada con lote no avisa si el mismo
+  código ya existe con otra fecha.
+> **Nota 2026-09-30 (límite conocido, severidad media):** la validación «un servicio no puede tener vencimiento» en la edición de un producto lee la marca antes de guardar y no bloquea la fila; una edición a `servicio` concurrente con otra petición que marca el mismo producto puede dejar un servicio marcado. No daña datos: `registrar_entrada_con_lote` y `asignar_vencimiento_a_saldo` rechazan todo lo que no sea `item_type='product'` (409), así que un servicio marcado no recibe stock con lote, y se puede desmarcar con `vence: false`. Cerrarlo de verdad exige bloquear la fila durante el guardado de la edición (camino compartido con los tres productos, fuera de alcance) o una restricción en la base.
+
 **Nota (2026-09-30) — A-4 PR-2: FEFO en la venta y lote en la anulación.** La venta y la anulación de un producto marcado
 dejan de pasar por el bucket «sin lote». Lo que se decidió y se hizo:
 

@@ -7,14 +7,15 @@ da de baja un lote.
 - `build_vencimientos_router`, **sólo lectura**: `GET /api/vencimientos` (próximos a vencer y vencidos),
   `GET /api/vencimientos/export` (CSV) y `GET /api/vencimientos/productos/{id}/lotes` (las existencias por lote).
 - `build_vencimientos_escritura_router`: `PUT /api/vencimientos/productos/{id}` (marcar «vence»),
-  `POST /api/vencimientos/asignar` (ponerle lote y vencimiento a saldo sin lote) y `POST /api/vencimientos/merma`
-  (dar de baja un lote). Además de lo que el producto ponga al montarlo (`include_router(..., dependencies=...)`),
-  acepta gates **por operación**: `dependencias_marcar` (marcar un producto) y `dependencias_movimientos` (asignar y
-  dar de baja, las dos que mueven el ledger). Así, por ejemplo, un producto puede dejar que el encargado marque y que
+  `POST /api/vencimientos/asignar` (ponerle lote y vencimiento a saldo sin lote), `POST /api/vencimientos/entrada`
+  (una entrada manual de stock nuevo con lote y vencimiento) y `POST /api/vencimientos/merma` (dar de baja un lote).
+  Además de lo que el producto ponga al montarlo (`include_router(..., dependencies=...)`), acepta gates **por
+  operación**: `dependencias_marcar` (marcar un producto) y `dependencias_movimientos` (asignar, dar entrada y dar
+  de baja, las tres que mueven el ledger). Así, por ejemplo, un producto puede dejar que el encargado marque y que
   el encargado **y el depósito** asignen y den de baja. **La factory de escritura FALLA al construirse (`ValueError`)
   si falta `usuario_actual` o alguna de las dos listas de dependencias está vacía o ausente**: no hay forma de exponer
   escrituras del ledger sin autorización ni sin usuario.
-- `asignar` y `merma` exigen `clave_operacion` en el cuerpo (un texto único por intento, p. ej. un UUID): un reintento
+- `asignar`, `entrada` y `merma` exigen `clave_operacion` en el cuerpo (un texto único por intento, p. ej. un UUID): un reintento
   con la misma clave, el mismo producto y los mismos datos no vuelve a escribir y devuelve el resultado anterior con
   `repetida: true` (la clave es única por producto: una por intento del usuario y por producto).
 
@@ -73,6 +74,21 @@ class AsignarPayload(BaseModel):
     #: reintentar). Con ella un reintento no duplica la operación. Ver `erp.vencimientos`.
     clave_operacion: str = Field(min_length=1, max_length=vencimientos.MAX_LARGO_CLAVE)
     variante_id: int | None = None
+    nota: str = ""
+
+
+class EntradaPayload(BaseModel):
+    """Una entrada manual de stock nuevo con lote y vencimiento (`POST /entrada`). `vence` es una fecha ISO
+    (`AAAA-MM-DD`; se acepta también un ISO 8601 con hora, como en `asignar`) y se valida en el motor: 422 si no se
+    puede leer."""
+
+    producto_id: int
+    deposito_id: int
+    variante_id: int | None = None
+    lote: str
+    vence: str
+    cantidad: Decimal = Field(gt=0)
+    clave_operacion: str = Field(min_length=1, max_length=vencimientos.MAX_LARGO_CLAVE)
     nota: str = ""
 
 
@@ -167,9 +183,9 @@ def build_vencimientos_escritura_router(
     dependencias_marcar: Sequence[Any] | None = None,
     dependencias_movimientos: Sequence[Any] | None = None,
 ):
-    """`PUT /productos/{producto_id}` (`{vence: bool}`), `POST /asignar` y `POST /merma`. Cada operación es una
-    transacción: un error de negocio no deja nada escrito. Las dos que mueven el ledger escriben filas nuevas, nunca
-    un `UPDATE` de una ya escrita, y **exigen `clave_operacion` en el cuerpo** (un texto único por intento, p. ej. un
+    """`PUT /productos/{producto_id}` (`{vence: bool}`), `POST /asignar`, `POST /entrada` y `POST /merma`. Cada
+    operación es una transacción: un error de negocio no deja nada escrito. Las tres que mueven el ledger escriben
+    filas nuevas, nunca un `UPDATE` de una ya escrita, y **exigen `clave_operacion` en el cuerpo** (un texto único por intento, p. ej. un
     UUID): un reintento con la misma clave y los mismos datos devuelve el resultado anterior (`repetida: true`) sin
     escribir nada, y con la misma clave y otros datos, 409.
 
@@ -177,7 +193,7 @@ def build_vencimientos_escritura_router(
     (`ValueError`) si falta algo de esto.** `usuario_actual` (una `Depends`-able que devuelve un `dict` con `id`) sale
     como `created_by` de los movimientos. `dependencias_marcar` y `dependencias_movimientos` (listas **no vacías** de
     `Depends(...)`) van **por operación**, encima de las que el producto ponga al montar el router: las primeras a la
-    marca de un producto, las segundas a `asignar` y `merma`."""
+    marca de un producto, las segundas a `asignar`, `entrada` y `merma`."""
     if usuario_actual is None:
         raise ValueError("build_vencimientos_escritura_router necesita usuario_actual: los movimientos que escribe "
                          "tienen que quedar a nombre de quien los hizo")
@@ -204,6 +220,18 @@ def build_vencimientos_escritura_router(
         try:
             with abrir() as conn:
                 return vencimientos.asignar_vencimiento_a_saldo(
+                    conn, payload.producto_id, payload.deposito_id, payload.lote, payload.vence, payload.cantidad,
+                    clave_operacion=payload.clave_operacion, variante_id=payload.variante_id,
+                    usuario_id=user.get("id"), nota=payload.nota,
+                )
+        except _ERRORES as e:
+            raise _http(e) from e
+
+    @router.post("/entrada", dependencies=list(dependencias_movimientos))
+    def entrada(payload: EntradaPayload, user: dict = Depends(usuario)):
+        try:
+            with abrir() as conn:
+                return vencimientos.registrar_entrada_con_lote(
                     conn, payload.producto_id, payload.deposito_id, payload.lote, payload.vence, payload.cantidad,
                     clave_operacion=payload.clave_operacion, variante_id=payload.variante_id,
                     usuario_id=user.get("id"), nota=payload.nota,
