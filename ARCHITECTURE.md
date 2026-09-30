@@ -65,7 +65,9 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
   `ventas_router` (`build_ventas_router` con `OpcionesVentas`: stock, nombre del
   cliente y los ganchos; el cobro por QR y la factura desde la venta son de LibraCore) y
   `margen_router` (`build_margen_router`: margen y rotación por producto y por período, sólo
-  lectura sobre `erp.margen`; ADR-015).
+  lectura sobre `erp.margen`; ADR-015) y
+  `reposicion_router` (`build_reposicion_router`: qué pedir por producto y por sucursal, sólo lectura sobre
+  `erp.reposicion`; ADR-017).
 - **`adapters/`** e **`integrations/`** — puentes hacia afuera: `adapters/
   contalibra` lee datos del schema legado de Contalibra; `integrations/libraedge`
   traduce una venta confirmada a una operación de sincronización del nodo edge
