@@ -18,6 +18,11 @@ más grupos el stock total de un producto/depósito no cambia (`get_stock_actual
 - `asignar_vencimiento_a_saldo`: le pone lote y vencimiento a saldo que hoy no lo tiene, con un **par** de filas de
   ajuste (una negativa sin lote y una positiva con lote, misma referencia).
 - `dar_de_baja_lote`: la merma de un lote concreto, sin dejar su saldo negativo.
+- `registrar_entrada_con_lote` (carga de vencimientos, 2026-09-30): una entrada manual de stock **nuevo** (+cantidad)
+  con lote y vencimiento, para cargar mercadería que ya está en el depósito o que no vino por una compra. A diferencia
+  de `asignar_vencimiento_a_saldo` no mueve nada del «sin lote»: suma stock real.
+- `ids_que_vencen` / `tiene_revision`: lo que el router de productos usa para mostrar la marca `vence` sin romperse en
+  una base sin la revisión `0002`.
 
 **«Hoy» es la fecha de Argentina** (UTC-3 fijo, como `erp.listas_precio`), no la del servidor: una consulta a las 22:00
 de Buenos Aires no salta de día porque el contenedor esté en UTC. Es lo que hace que «vence hoy» sea estable.
@@ -30,6 +35,17 @@ la transferencia y `ajustar_stock` siguen escribiendo movimientos **sin lote**, 
 (que puede quedar negativo) y no del lote del que salió la mercadería. `proximos_a_vencer` lo hace visible: la lista
 `sin_lote` incluye los productos con saldo sin lote **negativo** (`situacion='salidas_sin_lote'`), que son exactamente
 los que tienen salidas todavía no descontadas de ningún lote. Los saldos ≠ 0 de `lotes_de` también lo muestran.
+
+**Actualización (A-4 PR-2, 2026-09-30):** para la venta y la anulación lo de arriba ya no aplica: un producto marcado vende por
+FEFO (`erp.lotes`) y la anulación repone al lote de origen.
+
+**Actualización (A-4 PR-3, 2026-09-30): A-4 está completo en el motor.** La devolución (un par `devolucion` + `merma` en el lote
+de origen), la transferencia (un par por tramo FEFO) y `ajustar_stock` (el conteo de un lote, FEFO si baja) también siguen el
+lote. El saldo por lote ya es fiable **para las salidas posteriores**; lo de arriba sigue valiendo sólo para lo **anterior a
+A-4** (ventas, devoluciones y transferencias que escribieron «sin lote»: su saldo «sin lote» negativo heredado mantiene la
+guarda de `dar_de_baja_lote`) y para los caminos que quedan fuera (el viejo `usecases.sales`, `transfer_stock` llamado directo y
+`add_movimiento_stock` negativo sin lote de un producto; ver la tabla del ADR-018). La salida manual pasa por
+`erp.stock.salida_manual` (FEFO).
 
 Las consultas son las mismas en SQLite y PostgreSQL: se agrupa en SQL y se limpia y fusiona en Python con `Decimal`
 (un mismo lote puede estar guardado como `'2026-10-05'` o como `'2026-10-05T00:00:00'` según quién lo escribió: la
@@ -45,7 +61,14 @@ import datetime
 import uuid
 from decimal import Decimal, InvalidOperation
 
+from .catalogo import validar_deposito
 from .listas_precio import _ZONA_LOCAL
+from .lotes import CERO as _CERO
+from .lotes import dec as _dec
+from .lotes import lote_de_fila as _lote_de_fila
+from .lotes import saldo_limpio as _saldo
+from .lotes import saldos_por_bucket as _saldos
+from .lotes import vence_de_fila as _vence_de_fila
 from .stock import add_movimiento_stock, normalizar_lote, normalizar_vencimiento
 
 DIAS_AVISO = 15
@@ -56,10 +79,6 @@ ESTADOS = ("vencido", "por_vencer")
 
 #: Largo máximo de la `clave_operacion` (un UUID en texto son 36).
 MAX_LARGO_CLAVE = 64
-
-#: Decimales con que se limpia el ruido de `float` de una suma (mismo criterio que `erp.reposicion`).
-_ESCALA_RUIDO = 10
-_CERO = Decimal("0")
 
 
 class VencimientosError(Exception):
@@ -95,15 +114,6 @@ def hoy_argentina(ahora: datetime.datetime | None = None) -> datetime.date:
 # ── Utilidades ───────────────────────────────────────────────────────────
 
 
-def _dec(valor) -> Decimal:
-    return Decimal(str(valor)) if valor is not None else _CERO
-
-
-def _saldo(valor) -> Decimal:
-    """Un saldo como `Decimal` sin el ruido de la suma en `float` (`0.1 + 0.2`): a 10 decimales."""
-    return round(_dec(valor), _ESCALA_RUIDO)
-
-
 def _num(valor: Decimal):
     """Un `int` si es entero, un `float` si no: `5` y no `5.0` para lo que se cuenta de a unidades."""
     return int(valor) if valor == valor.to_integral_value() else float(valor)
@@ -131,29 +141,19 @@ def _columnas(conn, tabla: str) -> set[str]:
     return {f[1] for f in conn.execute(f"PRAGMA table_info({tabla})").fetchall()}
 
 
+def tiene_revision(conn) -> bool:
+    """Si la base tiene la revisión `0002_vencimientos_lotes` (la columna `catalog_items.tracks_expiry`). Se sondea por
+    metadatos (`PRAGMA table_info`, que el adaptador de PostgreSQL traduce a `information_schema`) y no con un `SELECT`
+    de la columna: en PostgreSQL un `SELECT` fallido **aborta la transacción** entera."""
+    return "tracks_expiry" in _columnas(conn, "catalog_items")
+
+
 def _exigir_revision(conn) -> None:
-    if "tracks_expiry" not in _columnas(conn, "catalog_items"):
+    if not tiene_revision(conn):
         raise SinRevision(
             "Falta la revisión 0002_vencimientos_lotes del motor: corré `libracommerce-migrar upgrade` "
             "(--prefijo del producto) antes de usar vencimientos y lotes."
         )
-
-
-def _lote_de_fila(valor) -> str | None:
-    """El lote guardado, normalizado: un texto vacío o de espacios es «sin código»."""
-    texto = str(valor).strip() if valor is not None else ""
-    return texto or None
-
-
-def _vence_de_fila(valor) -> str | None:
-    """El vencimiento guardado como `'AAAA-MM-DD'`, sea cual sea la forma en que se escribió. Uno que no se puede
-    leer cuenta como sin vencimiento (el ledger lo escriben varios caminos; un reporte no debe caerse por uno)."""
-    if valor is None:
-        return None
-    try:
-        return normalizar_vencimiento(str(valor))
-    except ValueError:
-        return None
 
 
 def _sucursal_y_depositos(conn, sucursal_id: int | None, deposito_id: int | None) -> dict[int, dict]:
@@ -176,27 +176,6 @@ def _sucursal_y_depositos(conn, sucursal_id: int | None, deposito_id: int | None
         i: d for i, d in todos.items()
         if (deposito_id is None or i == deposito_id) and (sucursal_id is None or d["sucursal_id"] == sucursal_id)
     }
-
-
-def _saldos(conn, sql_items: str, params: list, depositos: dict[int, dict]) -> dict[tuple, Decimal]:
-    """`{(item, depósito, variante, lote, vence): saldo}` de los movimientos de `sql_items` (un `WHERE` sobre
-    `sm`), en los depósitos dados, con el lote y el vencimiento normalizados. Los saldos en cero se descartan."""
-    filas = conn.execute(
-        f"""SELECT sm.item_id, sm.location_id, sm.variant_id, sm.lot_code, sm.expires_at,
-                   SUM(sm.quantity_delta) AS saldo
-            FROM stock_movements sm
-            WHERE {sql_items}
-            GROUP BY sm.item_id, sm.location_id, sm.variant_id, sm.lot_code, sm.expires_at""",
-        params,
-    ).fetchall()
-    saldos: dict[tuple, Decimal] = {}
-    for f in filas:
-        if f["location_id"] not in depositos:
-            continue
-        clave = (f["item_id"], f["location_id"], f["variant_id"], _lote_de_fila(f["lot_code"]),
-                 _vence_de_fila(f["expires_at"]))
-        saldos[clave] = saldos.get(clave, _CERO) + _saldo(f["saldo"])
-    return {k: _saldo(v) for k, v in saldos.items() if _saldo(v) != 0}
 
 
 def _nombres_de_variantes(conn) -> dict[int, str]:
@@ -250,10 +229,33 @@ def marcar_vence(conn, item_id: int, vence: bool) -> dict:
         raise ValueError(f"vence tiene que ser verdadero o falso: {vence!r}")
     _exigir_revision(conn)
     producto = _fila_de_producto(conn, item_id)
-    if producto["item_type"] == "service":
+    if vence and producto["item_type"] == "service":
+        # Sólo MARCAR un servicio es un error: desmarcarlo limpia una marca que no debería tener (un producto marcado
+        # que se editó a servicio), y tiene que poder hacerse.
         raise ReglaDeNegocio("un servicio no tiene inventario: no se le puede marcar vencimiento")
     conn.execute("UPDATE catalog_items SET tracks_expiry = ? WHERE id = ?", (1 if vence else 0, item_id))
     return {"producto_id": item_id, "vence": vence}
+
+
+def _exigir_producto_con_inventario(producto, que: str) -> None:
+    """Sólo un producto (`item_type='product'`) tiene inventario: a un servicio no se le asigna ni se le carga stock,
+    esté o no marcado (un producto marcado puede haber pasado a servicio al editarlo). `ReglaDeNegocio` (409)."""
+    if producto["item_type"] != "product":
+        raise ReglaDeNegocio(f"el producto {producto['id']} es un servicio: no tiene inventario, no se le puede {que}")
+
+
+def ids_que_vencen(conn, item_id: int | None = None) -> set[int]:
+    """Los ids de los productos marcados como perecederos (`tracks_expiry = 1`): **una sola consulta** para todo el
+    catálogo, o para un producto si viene `item_id`. **Tolera una base sin la revisión `0002`**: devuelve un conjunto
+    vacío (nadie está marcado) en vez de fallar. Es lo que el listado de productos usa para no hacer una consulta por
+    fila. No escribe."""
+    if not tiene_revision(conn):
+        return set()
+    if item_id is None:
+        filas = conn.execute("SELECT id FROM catalog_items WHERE tracks_expiry = 1").fetchall()
+    else:
+        filas = conn.execute("SELECT id FROM catalog_items WHERE id = ? AND tracks_expiry = 1", (item_id,)).fetchall()
+    return {f[0] for f in filas}
 
 
 def ficha(conn, item_id: int) -> dict:
@@ -483,7 +485,8 @@ def _movimientos_de_la_operacion(conn, item_id: int, clave: str) -> list:
     marca = _marca_de_operacion(clave)
     patron = "%" + marca.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     filas = conn.execute(
-        "SELECT id, item_id, location_id, variant_id, movement_type, quantity_delta, lot_code, expires_at, note "
+        "SELECT id, item_id, location_id, variant_id, movement_type, reason_code, quantity_delta, lot_code, expires_at, "
+        "note "
         "FROM stock_movements WHERE item_id = ? AND note LIKE ? ESCAPE '\\' ORDER BY id",
         (item_id, patron),
     ).fetchall()
@@ -539,6 +542,7 @@ def asignar_vencimiento_a_saldo(conn, item_id: int, deposito_id: int, lot_code: 
             "tipo": "asignar", "producto_id": item_id, "deposito_id": deposito_id, "variante_id": variante_id,
             "lote": lote, "vence": vence, "cantidad": _saldo(cant)})
     producto = _fila_de_producto(conn, item_id)
+    _exigir_producto_con_inventario(producto, "asignar un vencimiento")
     if not producto["tracks_expiry"]:
         raise ReglaDeNegocio(f"el producto {item_id} no está marcado como perecedero: marcalo antes de asignar un "
                              "vencimiento")
@@ -678,3 +682,118 @@ def _baja_repetida(conn, filas: list, pedida: dict) -> dict:
     return {"producto_id": previa["producto_id"], "deposito_id": previa["deposito_id"],
             "variante_id": previa["variante_id"], "lote": previa["lote"], "vence": previa["vence"],
             "cantidad": _num(previa["cantidad"]), "saldo_restante": _num(saldo), "repetida": True}
+
+
+# ── Entrada manual con lote (carga de vencimientos, 2026-09-30) ────────────
+
+#: Decimales de una unidad que admite fracciones y no declara `decimal_scale` (mismo criterio que `erp.reposicion`).
+_ESCALA_FRACCION = 3
+#: Tope de una sola entrada manual: mil millones de unidades. Sin tope, `1e999999` pasaba como «número finito» y
+#: terminaba en un `float` infinito en el ledger.
+MAX_CANTIDAD_ENTRADA = Decimal("1000000000")
+
+
+def _exigir_escala_de_la_unidad(conn, item_id: int, cant: Decimal) -> None:
+    """`cant` tiene que respetar la unidad del producto: un entero si `units.allows_fraction` es 0 y, si la admite, a lo
+    sumo `decimal_scale` decimales (3 si la unidad no lo declara). Es **stock nuevo** lo que se carga y no hay forma
+    de corregir una fracción de más sin otro ajuste. `ValueError` si no."""
+    u = conn.execute(
+        "SELECT u.allows_fraction, u.decimal_scale FROM catalog_items ci LEFT JOIN units u ON u.code = ci.unit_code "
+        "WHERE ci.id = ?", (item_id,),
+    ).fetchone()
+    permite = bool(u["allows_fraction"]) if u is not None and u["allows_fraction"] is not None else False
+    escala = (int(u["decimal_scale"] or 0) or _ESCALA_FRACCION) if permite else 0
+    # Por el exponente y no con `round`/`quantize`: con un exponente enorme (`1e999999`) cuantizar levanta
+    # `InvalidOperation` (un 500). El tope de `registrar_entrada_con_lote` ya lo dejó afuera, pero esto no depende de él.
+    if -cant.normalize().as_tuple().exponent > escala:
+        detalle = "es de unidades enteras" if escala == 0 else f"admite hasta {escala} decimales"
+        raise ValueError(f"la cantidad {_texto_del_saldo(cant)} no respeta la unidad del producto: {detalle}")
+
+
+def registrar_entrada_con_lote(conn, item_id: int, deposito_id: int, lote: str, vence, cantidad, *,
+                               clave_operacion: str, variante_id: int | None = None,
+                               usuario_id: int | None = None, nota: str = "", fecha: str = "") -> dict:
+    """Una **entrada manual de stock nuevo** (`+cantidad`) con lote y vencimiento en un depósito: es para cargar
+    mercadería que ya está en el depósito o que no vino por una compra (la recepción de compras ya escribe el lote
+    sola). **No es lo mismo que `asignar_vencimiento_a_saldo`**: no saca nada del stock «sin lote», suma stock real (el
+    stock total del producto en ese depósito sube en `cantidad`). Si lo que se quiere es ponerle fecha a lo que ya está
+    contado sin lote, es asignar.
+
+    Escribe **una sola fila**, nunca un `UPDATE`: un movimiento de tipo `entrada` (`reason_code='entrada'`,
+    `movement_type='adjustment'`: el mismo que escribe la entrada manual de `POST /api/stock/{id}/ajuste`) con `lot_code`
+    y `expires_at` normalizados como en el resto, la `nota` (o «Entrada con lote») más `: lote L, vence AAAA-MM-DD` y
+    la marca `[op:<clave>]`. Si `fecha` no viene es hoy en Argentina.
+
+    **Un lote es el par (código, vencimiento)**, igual que en `lotes_de`: el mismo código con la misma fecha **suma al
+    mismo bucket**; el mismo código con **otra** fecha es **otro bucket** (aparece como otra fila). No se «corrige» solo:
+    un lote cuyo vencimiento se cargó mal se da de baja (`dar_de_baja_lote`) y se vuelve a cargar bien.
+
+    **Idempotente por `clave_operacion`**, igual que `asignar_vencimiento_a_saldo` (obligatoria, única por producto,
+    `[op:<clave>]` al final de la nota, producto tomado antes de buscarla): un reintento con la misma clave y los mismos
+    datos no escribe nada y devuelve el resultado de la primera vez con `repetida: True`; con otros datos u otra
+    operación sobre ese producto, `ClaveDeOperacionReusada` (409). **La búsqueda de la clave va primero**: lo que depende
+    del estado (producto marcado, unidad) se comprueba después, así que un reintento de una carga hecha no falla porque
+    el producto se haya desmarcado o cambiado de unidad.
+
+    `ValueError` con datos inválidos (lote vacío o de más de 64 caracteres, fecha ilegible, cantidad ≤ 0, clave inválida,
+    depósito inexistente, una variante que no existe o es de otro producto, una cantidad de más de mil millones o que no
+    respeta la unidad: entera si no admite fracciones, hasta `decimal_scale` decimales si sí); `ProductoNoEncontrado`; `ReglaDeNegocio` si el
+    producto no es un producto (un servicio no tiene inventario, esté marcado o no) o no está marcado con `marcar_vence`;
+    `DepositoInexistente` (un `ValueError`: 422, como `validar_deposito` en ventas y transferencias) si el depósito no está
+    **activo** (al escribir; para leer, asignar o dar de baja un depósito inactivo sigue valiendo).
+    `SinRevision` sin la revisión `0002`. Todo se valida antes de escribir. Devuelve `{producto_id, deposito_id,
+    variante_id, lote, vence, cantidad, referencia, saldo_lote, repetida}`; `saldo_lote` es el saldo de ese lote (en ese
+    depósito y variante) **tras la entrada** (en un reintento, el que tenía justo después de la primera vez)."""
+    clave = _normalizar_clave(clave_operacion)
+    lote = normalizar_lote(lote)
+    vence = normalizar_vencimiento(vence)
+    cant = _cantidad_positiva(cantidad)
+    if cant > MAX_CANTIDAD_ENTRADA:
+        raise ValueError(f"cantidad no puede pasar de {_texto_del_saldo(MAX_CANTIDAD_ENTRADA)} en una entrada")
+    _validar_variante(conn, item_id, variante_id)
+    _preparar_escritura(conn, item_id, deposito_id)
+    previas = _movimientos_de_la_operacion(conn, item_id, clave)
+    if previas:
+        return _entrada_repetida(conn, clave, previas, {
+            "tipo": "entrada", "producto_id": item_id, "deposito_id": deposito_id, "variante_id": variante_id,
+            "lote": lote, "vence": vence, "cantidad": _saldo(cant)})
+    producto = _fila_de_producto(conn, item_id)
+    _exigir_producto_con_inventario(producto, "cargar un lote")
+    if not producto["tracks_expiry"]:
+        raise ReglaDeNegocio(f"el producto {item_id} no está marcado como perecedero: marcalo antes de cargarle un "
+                             "lote")
+    # Stock NUEVO: el depósito tiene que estar activo, como en la entrada manual ordinaria. No se exige en la lectura, ni
+    # en asignar ni en la merma: las existencias de un depósito dado de baja siguen existiendo. Va después de buscar la
+    # clave (un reintento de una carga hecha no falla porque el depósito se haya dado de baja).
+    validar_deposito(conn, deposito_id)
+    _exigir_escala_de_la_unidad(conn, item_id, cant)
+    referencia = nota.strip() or "Entrada con lote"
+    add_movimiento_stock(conn, item_id, "entrada", float(cant),
+                         f"{referencia}: lote {lote}, vence {vence} {_marca_de_operacion(clave)}",
+                         usuario_id=usuario_id, fecha=fecha or hoy_argentina().isoformat(), deposito_id=deposito_id,
+                         variant_id=variante_id, lot_code=lote, expires_at=vence)
+    return {"producto_id": item_id, "deposito_id": deposito_id, "variante_id": variante_id, "lote": lote,
+            "vence": vence, "cantidad": _num(cant), "referencia": referencia,
+            "saldo_lote": _num(_saldo_del_bucket(conn, item_id, deposito_id, variante_id, lote, vence)),
+            "repetida": False}
+
+
+def _entrada_repetida(conn, clave: str, filas: list, pedida: dict) -> dict:
+    """El resultado de una entrada con lote que ya se escribió con esta clave, o `ClaveDeOperacionReusada` si lo pedido
+    ahora no es lo mismo. Sin escribir nada."""
+    previa = {"tipo": "otra"}
+    f = filas[0]
+    if (len(filas) == 1 and f["movement_type"] == "adjustment" and f["reason_code"] == "entrada"
+            and _dec(f["quantity_delta"]) > 0 and (_lote_de_fila(f["lot_code"]) or _vence_de_fila(f["expires_at"]))):
+        previa = {"tipo": "entrada", "producto_id": f["item_id"], "deposito_id": f["location_id"],
+                  "variante_id": f["variant_id"], "lote": _lote_de_fila(f["lot_code"]),
+                  "vence": _vence_de_fila(f["expires_at"]), "cantidad": _saldo(_dec(f["quantity_delta"]))}
+    _misma_operacion(previa, pedida)
+    sufijo = f": lote {previa['lote']}, vence {previa['vence']} {_marca_de_operacion(clave)}"
+    nota = f["note"]
+    saldo = _saldo_del_bucket(conn, previa["producto_id"], previa["deposito_id"], previa["variante_id"],
+                              previa["lote"], previa["vence"], hasta_id=f["id"])
+    return {"producto_id": previa["producto_id"], "deposito_id": previa["deposito_id"],
+            "variante_id": previa["variante_id"], "lote": previa["lote"], "vence": previa["vence"],
+            "cantidad": _num(previa["cantidad"]), "referencia": nota[:-len(sufijo)] if nota.endswith(sufijo) else nota,
+            "saldo_lote": _num(saldo), "repetida": True}

@@ -21,7 +21,9 @@ Aca las dos escrituras y la lectura que las autoriza viven en el mismo
 `repo.transaction()`.
 """
 
-from datetime import datetime
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import date, datetime
 from decimal import Decimal
 
 from libracommerce.domain.inventory import StockMovement, StockMovementType
@@ -45,6 +47,22 @@ class StockInsuficienteError(ValueError):
             f"Stock insuficiente en el deposito {location_id} para el item {item_id}: "
             f"se piden {pedido} y hay {disponible}."
         )
+
+
+@dataclass(frozen=True)
+class TramoDeTransferencia:
+    """Un tramo de una transferencia por lote (ADR-018, A-4 PR-3): `cantidad` (positiva) del bucket `(lot_code,
+    expires_at)` del origen. Cada tramo escribe su propio par salida/entrada, y la entrada COPIA el lote y el
+    vencimiento de la salida. `lot_code` y `expires_at` en `None` es el tramo «sin lote»."""
+
+    cantidad: Decimal
+    lot_code: str | None = None
+    expires_at: date | None = None
+
+
+#: Diferencia relativa por debajo de la cual la suma de los tramos cuenta como igual a la cantidad pedida (el ruido de
+#: `float` que `erp.lotes` ya descarta al planificar).
+_UMBRAL_DE_RUIDO = Decimal("1e-12")
 
 
 def verificar_disponibilidad(
@@ -83,6 +101,7 @@ def transfer_stock(
     reason_code_salida: str | None = None,
     reason_code_entrada: str | None = None,
     permitir_negativo: bool = False,
+    tramos: Sequence[TramoDeTransferencia] | None = None,
 ) -> tuple[StockMovement, StockMovement]:
     """Mueve `quantity` de un deposito a otro como una sola operacion.
 
@@ -108,6 +127,18 @@ def transfer_stock(
     `permitir_negativo` existe para el ajuste de un inventario que ya estaba
     mal cargado, donde la realidad fisica manda sobre la proyeccion. No es el
     camino normal y por eso hay que pedirlo.
+
+    **Por lote (A-4 PR-3, ADR-018).** `tramos=None` (el default, y lo unico que
+    mandan los tres productos hoy) es EL CAMINO DE SIEMPRE: una salida y una
+    entrada con lote y vencimiento en NULL. Con `tramos` (el plan FEFO de un
+    producto marcado, que arma `erp.catalogo.transferir_stock`) se escribe **un
+    par por tramo**, en la misma transaccion: la salida lleva el lote y el
+    vencimiento del bucket de origen y la entrada los copia; cada entrada apunta
+    a SU salida con `source_id`, asi que el par sigue siendo 1:1 (una
+    transferencia de N lotes son N pares, y `get_transferencias` muestra N
+    filas). La suma de los tramos tiene que ser `quantity`. La guarda de
+    disponibilidad sigue siendo sobre el total del origen. Con `tramos` devuelve
+    el par del PRIMER tramo; los demas se leen del ledger.
     """
     if quantity <= 0:
         raise ValueError(f"La cantidad a transferir tiene que ser positiva (recibido: {quantity}).")
@@ -117,43 +148,61 @@ def transfer_stock(
             "la transferencia no moveria nada."
         )
 
+    if tramos is not None:
+        if not tramos or any(tr.cantidad <= 0 for tr in tramos):
+            raise ValueError("Los tramos de la transferencia tienen que ser positivos y no estar vacios.")
+        if abs(sum((tr.cantidad for tr in tramos), Decimal(0)) - quantity) > _UMBRAL_DE_RUIDO * max(Decimal(1), quantity):
+            raise ValueError(
+                f"Los tramos de la transferencia ({sum((tr.cantidad for tr in tramos), Decimal(0))}) no suman la "
+                f"cantidad ({quantity})."
+            )
+    # Sin tramos: un unico par por la cantidad entera, sin lote (lo de siempre).
+    a_escribir = tramos if tramos is not None else [TramoDeTransferencia(quantity)]
+
     with repo.transaction():
         if not permitir_negativo:
             verificar_disponibilidad(
                 repo, item_id, from_location_id, quantity, variant_id=variant_id
             )
 
-        salida = repo.append_stock_movement(
-            StockMovement(
-                id=None,
-                item_id=item_id,
-                variant_id=variant_id,
-                location_id=from_location_id,
-                movement_type=StockMovementType.TRANSFER_OUT,
-                quantity_delta=-quantity,
-                occurred_at=occurred_at,
-                source_type="transfer",
-                source_id=None,
-                note=note,
-                created_by=created_by,
-                reason_code=reason_code_salida,
+        pares = []
+        for tr in a_escribir:
+            salida = repo.append_stock_movement(
+                StockMovement(
+                    id=None,
+                    item_id=item_id,
+                    variant_id=variant_id,
+                    location_id=from_location_id,
+                    movement_type=StockMovementType.TRANSFER_OUT,
+                    quantity_delta=-tr.cantidad,
+                    occurred_at=occurred_at,
+                    source_type="transfer",
+                    source_id=None,
+                    lot_code=tr.lot_code,
+                    expires_at=tr.expires_at,
+                    note=note,
+                    created_by=created_by,
+                    reason_code=reason_code_salida,
+                )
             )
-        )
-        entrada = repo.append_stock_movement(
-            StockMovement(
-                id=None,
-                item_id=item_id,
-                variant_id=variant_id,
-                location_id=to_location_id,
-                movement_type=StockMovementType.TRANSFER_IN,
-                quantity_delta=quantity,
-                occurred_at=occurred_at,
-                source_type="transfer",
-                source_id=salida.id,
-                note=note,
-                created_by=created_by,
-                reason_code=reason_code_entrada,
+            entrada = repo.append_stock_movement(
+                StockMovement(
+                    id=None,
+                    item_id=item_id,
+                    variant_id=variant_id,
+                    location_id=to_location_id,
+                    movement_type=StockMovementType.TRANSFER_IN,
+                    quantity_delta=tr.cantidad,
+                    occurred_at=occurred_at,
+                    source_type="transfer",
+                    source_id=salida.id,
+                    lot_code=tr.lot_code,
+                    expires_at=tr.expires_at,
+                    note=note,
+                    created_by=created_by,
+                    reason_code=reason_code_entrada,
+                )
             )
-        )
+            pares.append((salida, entrada))
 
-    return salida, entrada
+    return pares[0]

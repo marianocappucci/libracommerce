@@ -133,6 +133,17 @@ _COLUMNAS_LEDGER = ("item_id, variant_id, location_id, movement_type, quantity_d
                     "source_id, unit_cost, lot_code, expires_at, note, created_by, reason_code")
 
 
+def _venta_anterior_a_a4(conn, venta_id, items, fecha="", usuario_id=None, deposito_id=None):
+    """Una salida por venta como la escribía el motor ANTES de A-4 PR-2: una fila por línea en el bucket «sin lote», aunque
+    el producto esté marcado. Desde el PR-2 `descontar_stock_venta` de un marcado elige lote (FEFO), así que estas pruebas
+    del parche de la merma (salidas sin conciliar: ventas viejas, y hasta el PR-3 devoluciones, transferencias y ajustes)
+    arman ese ledger a mano."""
+    for item in items:
+        stock.add_movimiento_stock(conn, item["producto_id"], "venta", -abs(float(item["qty"])), f"Venta ID {venta_id}",
+                                   fecha=fecha, venta_id=venta_id, usuario_id=usuario_id, deposito_id=deposito_id,
+                                   variant_id=item.get("variante_id"))
+
+
 def _ledger(conn) -> list[tuple]:
     """El ledger entero sin `id` ni `created_at` (que dependen del momento), en orden de escritura."""
     n = len(_COLUMNAS_LEDGER.split(","))
@@ -397,7 +408,7 @@ def test_el_stock_total_no_cambia_por_tener_lote(abrir_vto):
         _entrada(conn, pid, 6, lote="L2", vence=_dias(40))
         _entrada(conn, pid, 4)
         _entrada(conn, pid, 7, lote="L1", vence=_dias(5), deposito=norte)
-        stock.descontar_stock_venta(conn, 1, [{"producto_id": pid, "qty": 2}], fecha="2026-09-05")
+        _venta_anterior_a_a4(conn, 1, [{"producto_id": pid, "qty": 2}], fecha="2026-09-05")
         assert stock.get_stock_actual(conn, pid) == 25
         assert stock.get_stock_actual(conn, pid, principal) == 18
         assert stock.get_stock_actual(conn, pid, norte) == 7
@@ -460,7 +471,7 @@ def test_lotes_de_agrupa_por_deposito_lote_y_vencimiento_e_incluye_el_bucket_sin
         _entrada(conn, pid, 6, lote="L2", vence=_dias(40))
         _entrada(conn, pid, 4)                                    # sin lote
         _entrada(conn, pid, 7, lote="L1", vence=_dias(5), deposito=norte)
-        stock.descontar_stock_venta(conn, 1, [{"producto_id": pid, "qty": 2}], fecha="2026-09-05")  # sin lote: -2
+        _venta_anterior_a_a4(conn, 1, [{"producto_id": pid, "qty": 2}], fecha="2026-09-05")  # sin lote: -2
     filas = _lotes(abrir_vto, pid)
     resumen = [(f["deposito_id"], f["lote"], f["vence"], f["saldo"], f["sin_lote"], f["estado"]) for f in filas]
     assert resumen == [
@@ -591,7 +602,7 @@ def test_las_salidas_sin_lote_se_marcan_porque_hasta_A4_dejan_los_lotes_sobreest
     with abrir_vto() as conn:
         pid = _producto(conn, "Yogur")
         _entrada(conn, pid, 10, lote="L1", vence=_dias(5))
-        stock.descontar_stock_venta(conn, 1, [{"producto_id": pid, "qty": 3}], fecha="2026-09-10")
+        _venta_anterior_a_a4(conn, 1, [{"producto_id": pid, "qty": 3}], fecha="2026-09-10")
     r = _proximos(abrir_vto)
     assert [(x["lote"], x["saldo"]) for x in r["lotes"]] == [("L1", 10)]
     assert [(x["nombre"], x["saldo"], x["situacion"]) for x in r["sin_lote"]] == [("Yogur", -3, "salidas_sin_lote")]
@@ -606,7 +617,7 @@ def test_los_saldos_sin_lote_se_clasifican_por_deposito_y_no_se_cancelan_entre_d
         norte = catalogo.create_deposito(conn, "Norte")
         principal = catalogo.get_default_deposito_id(conn)
         _entrada(conn, yogur, 10, lote="L1", vence=_dias(5), deposito=principal)
-        stock.descontar_stock_venta(conn, 1, [{"producto_id": yogur, "qty": 5}], fecha="2026-09-10",
+        _venta_anterior_a_a4(conn, 1, [{"producto_id": yogur, "qty": 5}], fecha="2026-09-10",
                                     deposito_id=principal)                      # −5 sin lote en principal
         _entrada(conn, yogur, 5, deposito=norte)                                # +5 sin lote en norte
     r = _proximos(abrir_vto)
@@ -626,7 +637,7 @@ def test_los_saldos_sin_lote_se_clasifican_tambien_por_variante(abrir_vto):
         azul = catalogo.create_variante(conn, pid, "SKU-A", "Durazno")["id"]
         _entrada(conn, pid, 4, variante=rojo)
         _entrada(conn, pid, 4, variante=azul)
-        stock.descontar_stock_venta(conn, 1, [{"producto_id": pid, "qty": 6, "variante_id": azul}],
+        _venta_anterior_a_a4(conn, 1, [{"producto_id": pid, "qty": 6, "variante_id": azul}],
                                     fecha="2026-09-10")            # el neto del producto es +2: no debe esconder −2
     r = _proximos(abrir_vto)
     assert [(x["variante"], x["saldo"], x["situacion"]) for x in r["sin_lote"]] == [
@@ -983,7 +994,7 @@ def test_un_reintento_de_asignar_con_la_misma_clave_no_duplica_y_devuelve_lo_de_
         primera = _asignar(conn, pid, deposito, "L1", "2026-10-05", 4, clave_operacion=clave, nota="Conteo")
         assert primera["repetida"] is False
         despues_de_la_primera = _sin_id(_todo_el_ledger(conn))
-        stock.descontar_stock_venta(conn, 1, [{"producto_id": pid, "qty": 2}], fecha="2026-09-20")  # pasa el tiempo
+        _venta_anterior_a_a4(conn, 1, [{"producto_id": pid, "qty": 2}], fecha="2026-09-20")  # pasa el tiempo
         con_la_venta = _sin_id(_todo_el_ledger(conn))
         segunda = _asignar(conn, pid, deposito, "L1", "2026-10-05", 4, clave_operacion=clave, nota="otra nota")
         assert _sin_id(_todo_el_ledger(conn)) == con_la_venta, "el reintento escribió"
@@ -1409,17 +1420,22 @@ def test_la_variante_ajena_es_422_por_http_en_asignar_merma_y_lotes(abrir_vto):
 
 
 def _vender(abrir, pid, cantidad, *, deposito=None, fecha="2026-09-10"):
-    """Una venta de mostrador por el mismo camino que `POST /api/ventas` (`erp.ventas.crear_venta_directa`): descuenta
-    del bucket «sin lote», porque hasta A-4 la venta no elige lote."""
+    """Una venta de mostrador por el mismo camino que `POST /api/ventas` (`erp.ventas.crear_venta_directa`) pero con el
+    stock armado a mano como lo escribía el motor antes de A-4 PR-2 (`_venta_anterior_a_a4`: sin lote, aunque el producto
+    esté marcado): desde el PR-2 la venta real de un marcado elige lote."""
     linea = {"nombre": "Yogur", "qty": cantidad, "precio": 100.0, "subtotal": round(cantidad * 100.0, 2),
              "producto_id": pid}
     total = linea["subtotal"]
     pagos = [{"medio": "efectivo", "monto": total, "estado": "aprobado"}]
-    return ventas.crear_venta_directa(
+    vid = ventas.crear_venta_directa(
         abrir, fecha=fecha, items=[linea], subtotal=total, descuento=0.0, total=total, cliente_id=None,
         cliente_nombre="", usuario_id=USUARIO["id"], observaciones="",
-        estado=ventas.estado_segun_pagos(total, pagos), pagos=pagos, stock_habilitado=True, deposito_id=deposito,
+        estado=ventas.estado_segun_pagos(total, pagos), pagos=pagos, stock_habilitado=False, deposito_id=deposito,
     )
+    with abrir() as conn:
+        _venta_anterior_a_a4(conn, vid, [linea], fecha=fecha, deposito_id=deposito)
+        conn.commit()
+    return vid
 
 
 def test_asignar_vender_todo_y_dar_de_baja_el_lote_es_409_y_no_escribe(abrir_vto_ventas):
@@ -1830,7 +1846,7 @@ def test_el_router_de_lectura_solo_lee_y_el_de_escritura_solo_escribe(abrir_vto)
     assert {m for r in lectura.routes for m in r.methods} == {"GET"}
     assert {m for r in escritura.routes for m in r.methods} == {"PUT", "POST"}
     rutas = {(m, r.path) for router in (lectura, escritura) for r in router.routes for m in r.methods}
-    assert len(rutas) == 6  # y no chocan entre sí
+    assert len(rutas) == 7  # y no chocan entre sí (la entrada con lote es la séptima)
 
 
 def test_las_escrituras_se_pueden_guardar_por_dependencia_distinta_a_las_lecturas(abrir_vto):

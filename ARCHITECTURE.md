@@ -52,7 +52,10 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
   `sales`/`sale_items`/`catalog_items`: la implementación del `PuertoDeReportes` de
   LibraCore para un producto que vende con este motor) y `actividad` (las partes
   de ventas y stock de la línea de tiempo de `libracore.db.logs`) y `vencimientos` (lotes y
-  vencimientos como dimensión del ledger, opt-in por producto, sin tabla `lots`; ADR-018), todos con la conexión
+  vencimientos como dimensión del ledger, opt-in por producto, sin tabla `lots`; ADR-018; `erp/lotes.py` es su piso, sin
+  depender de `stock`: saldos por bucket, FEFO de la venta para los productos marcados, lote de origen en la anulación y
+  los avisos de la venta; con A-4 PR-3 la devolución de un perecedero va a merma en un par por lote, la transferencia
+  mueve el lote por FEFO con un par por tramo y el ajuste y las salidas manuales cuentan un lote o bajan por FEFO: A-4 completo para esos caminos, ver ADR-018), todos con la conexión
   como primer parámetro —salvo `crear_venta_directa`, que recibe la fábrica porque el
   reintento por número repetido necesita una transacción nueva—; y `erp.hooks`, los
   puntos de extensión tipados que un producto engancha (`al_confirmar_venta` /
@@ -72,8 +75,11 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
   neutraliza las celdas de texto que una planilla leería como fórmula, `web/csv_seguro.py`) y
   `vencimientos_router` (`build_vencimientos_router`, de lectura, y `build_vencimientos_escritura_router`, con
   gates por operación: próximos a vencer, lotes de un producto, marcar «vence», asignar vencimiento a saldo sin
-  lote y dar de baja un lote, sobre `erp.vencimientos`; ADR-018). La de escritura **falla al construirse** sin
-  `usuario_actual` o sin listas no vacías `dependencias_marcar` y `dependencias_movimientos`, y `asignar` y `merma`
+  lote, cargar una entrada de stock nuevo con lote (`POST /entrada`) y dar de baja un lote, sobre `erp.vencimientos`;
+  ADR-018; y, opt-in con `OpcionesCatalogo.con_vencimientos`, la marca `vence` en el producto: listado, escaneo, alta y
+  edición la devuelven y el alta y la edición la cambian bajo `autorizar_marcar_vence`, y apagada las respuestas de
+  productos no cambian). La de escritura **falla al construirse** sin
+  `usuario_actual` o sin listas no vacías `dependencias_marcar` y `dependencias_movimientos`, y `asignar`, `entrada` y `merma`
   exigen `clave_operacion` (idempotencia de los reintentos; única por producto: el cliente genera una clave por intento
   del usuario y por producto). Una `variante_id` que no es del producto es 422.
 - **`adapters/`** e **`integrations/`** — puentes hacia afuera: `adapters/

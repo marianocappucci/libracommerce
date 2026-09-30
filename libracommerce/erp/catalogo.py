@@ -40,7 +40,7 @@ from libracommerce.domain.catalog import (
 )
 from libracommerce.domain.inventory import Location
 from libracommerce.domain.scale import ScaleFormat, ScaleValueKind, parse_scale_barcode
-from libracommerce.usecases.inventory import StockInsuficienteError, transfer_stock
+from libracommerce.usecases.inventory import StockInsuficienteError, TramoDeTransferencia, transfer_stock
 
 #: Las unidades que ofrece el alta de producto en los dos productos.
 UNIDADES = ("u", "kg", "g", "lt", "ml", "m", "cm", "m²", "caja", "par", "docena", "pack")
@@ -263,6 +263,28 @@ def get_stock_producto_todos_depositos(conn, producto_id: int) -> list[dict]:
     ]
 
 
+def _tramos_de_transferencia(conn, producto_id, origen_id, destino_id, cantidad, variant_id):
+    """Los tramos FEFO de la transferencia de un producto MARCADO con lotes en el origen, o `None` (el camino de
+    siempre: un par sin lote) si no está marcado, no hay lotes de los que sacar, o la operación es inválida (cantidad no
+    positiva, mismo origen y destino: que la rechace `transfer_stock` como hoy, sin tomar nada). Toma el producto antes
+    de planificar."""
+    if cantidad <= 0 or origen_id == destino_id:
+        return None
+    # Import diferido: `erp.lotes` importa este módulo (`get_default_deposito_id`).
+    from . import lotes
+
+    if not lotes.ids_marcados(conn, [producto_id]):
+        return None
+    lotes.tomar_productos(conn, [producto_id])
+    plan = lotes.plan_fefo(conn, producto_id, origen_id, variant_id, Decimal(str(cantidad)))
+    if all(tr.sin_lote for tr in plan):
+        return None     # un marcado sin lotes en el origen: el par de siempre, idéntico al de un producto sin marcar
+    return [
+        TramoDeTransferencia(tr.cantidad, tr.lote, _date.fromisoformat(tr.vence) if tr.vence else None)
+        for tr in plan
+    ]
+
+
 def transferir_stock(conn, producto_id: int, origen_id: int, destino_id: int,
                      cantidad: float, usuario_id: int | None = None,
                      fecha: str = "", observaciones: str = "", variant_id: int | None = None):
@@ -283,11 +305,22 @@ def transferir_stock(conn, producto_id: int, origen_id: int, destino_id: int,
     un depósito dado de baja; y un `origen_id` inexistente terminaba en el
     422 de "Stock insuficiente" —engañoso: el problema no era la cantidad, el
     depósito no existía—.
+
+    🔑 **Productos marcados (`tracks_expiry = 1`, ADR-018, A-4 PR-3): un par por lote.** La transferencia de un marcado
+    con lotes en el origen sale por FEFO (`lotes.plan_fefo` sobre el depósito de ORIGEN y la variante: vencidos
+    incluidos, con aviso en otra capa; «sin lote» último; el faltante no aplica porque la guarda de disponibilidad total
+    ya exige stock) y escribe **un par salida/entrada por tramo**, en la misma transacción: la salida lleva el lote y el
+    vencimiento, la entrada los copia y cada entrada sigue apuntando a SU salida con `source_id`. Una transferencia de N
+    lotes son N pares y `get_transferencias` muestra N filas (una por tramo, cada una con su cantidad). Antes de leer los
+    saldos el producto se toma (`lotes.tomar_productos`): dos transferencias (o una venta) del mismo producto se
+    serializan en PostgreSQL. Un producto sin marcar, y un marcado sin lotes, escriben el par de siempre (sin lote); la
+    guarda de disponibilidad total no cambia.
     """
     validar_deposito(conn, origen_id)
     validar_deposito(conn, destino_id)
     _fecha = _datetime.fromisoformat(fecha or _date.today().isoformat())
     ref = observaciones or "Transferencia entre depósitos"
+    tramos = _tramos_de_transferencia(conn, producto_id, origen_id, destino_id, cantidad, variant_id)
     try:
         transfer_stock(
             repositorio_de(conn),
@@ -303,6 +336,7 @@ def transferir_stock(conn, producto_id: int, origen_id: int, destino_id: int,
             created_by=usuario_id,
             reason_code_salida="transferencia_salida",
             reason_code_entrada="transferencia_entrada",
+            tramos=tramos,
         )
     except StockInsuficienteError as e:
         raise ValueError(
