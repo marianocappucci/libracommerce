@@ -37,8 +37,15 @@ la transferencia y `ajustar_stock` siguen escribiendo movimientos **sin lote**, 
 los que tienen salidas todavía no descontadas de ningún lote. Los saldos ≠ 0 de `lotes_de` también lo muestran.
 
 **Actualización (A-4 PR-2, 2026-09-30):** para la venta y la anulación lo de arriba ya no aplica: un producto marcado vende por
-FEFO (`erp.lotes`) y la anulación repone al lote de origen. Sigue valiendo para la devolución, la transferencia y
-`ajustar_stock` (hasta el PR-3) y para las ventas anteriores.
+FEFO (`erp.lotes`) y la anulación repone al lote de origen.
+
+**Actualización (A-4 PR-3, 2026-09-30): A-4 está completo en el motor.** La devolución (un par `devolucion` + `merma` en el lote
+de origen), la transferencia (un par por tramo FEFO) y `ajustar_stock` (el conteo de un lote, FEFO si baja) también siguen el
+lote. El saldo por lote ya es fiable **para las salidas posteriores**; lo de arriba sigue valiendo sólo para lo **anterior a
+A-4** (ventas, devoluciones y transferencias que escribieron «sin lote»: su saldo «sin lote» negativo heredado mantiene la
+guarda de `dar_de_baja_lote`) y para los caminos que quedan fuera (el viejo `usecases.sales`, `transfer_stock` llamado directo y
+`add_movimiento_stock` negativo sin lote de un producto; ver la tabla del ADR-018). La salida manual pasa por
+`erp.stock.salida_manual` (FEFO).
 
 Las consultas son las mismas en SQLite y PostgreSQL: se agrupa en SQL y se limpia y fusiona en Python con `Decimal`
 (un mismo lote puede estar guardado como `'2026-10-05'` o como `'2026-10-05T00:00:00'` según quién lo escribió: la

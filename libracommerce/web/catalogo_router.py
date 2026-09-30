@@ -154,6 +154,14 @@ class OpcionesStock:
     #: producto en cada uno (`por_deposito`), y el ajuste puede ir a un depósito (`deposito_id`). Sin esto la
     #: respuesta es la de siempre (Contalibra, Restolibra).
     por_deposito: bool = False
+    #: Lote y vencimiento en el ajuste (ADR-018, A-4 PR-3, opt-in): el cuerpo de `POST /{pid}/ajuste` acepta `lot_code`
+    #: y `expires_at`, sólo con `modo="absoluto"` (el conteo de ESE lote, ver `stock.ajustar_stock`) o `modo="entrada"` (la
+    #: entrada va a ESE bucket, ver `stock.entrada_manual_con_lote`) y sólo para un producto marcado (`tracks_expiry`);
+    #: un producto sin marcar, o otro modo, con esos campos es 422. Apagada (el default) el cuerpo, el esquema OpenAPI y
+    #: las respuestas son los de siempre (Contalibra y Restolibra no cambian). **Sin esta opción, y con ella sin los
+    #: campos**, un producto marcado igual sigue el lote: el ajuste que baja, la `salida` y la `merma` salen por FEFO
+    #: (`stock.salida_manual`) y lo que sube o entra sin lote entra «sin lote».
+    con_lotes: bool = False
 
 
 @dataclass(frozen=True)
@@ -308,6 +316,13 @@ class AjustePayload(BaseModel):
     # Con `OpcionesStock.por_deposito`: en qué depósito (y de qué variante) va el ajuste. `None` = el de siempre.
     deposito_id: int | None = None
     variant_id: int | None = None
+
+
+class AjusteConLotePayload(AjustePayload):
+    """`AjustePayload` más el lote, sólo con `OpcionesStock.con_lotes` (apagada, el payload es el de siempre)."""
+
+    lot_code: str | None = None
+    expires_at: str | None = None
 
 
 def _deps(usuario_actual, conexion):
@@ -839,6 +854,8 @@ def build_stock_router(
     abrir, usuario = _deps(usuario_actual, conexion)
     opciones = opciones or OpcionesStock()
     con_merma = bool(opciones.motivos_merma)
+    # Sin `con_lotes` el payload (y por eso el OpenAPI) es el de siempre.
+    Payload = AjusteConLotePayload if opciones.con_lotes else AjustePayload
 
     router = APIRouter(prefix=prefix, tags=["stock"])
 
@@ -890,7 +907,7 @@ def build_stock_router(
             return respuesta
 
     @router.post("/{pid}/ajuste")
-    def ajuste(pid: int, payload: AjustePayload, user: dict = Depends(usuario)):
+    def ajuste(pid: int, payload: Payload, user: dict = Depends(usuario)):
         fecha = payload.fecha or date.today().isoformat()
         referencia = payload.referencia.strip() or "Ajuste manual"
         usuario_id = user.get("id")
@@ -906,11 +923,22 @@ def build_stock_router(
             except catalogo.DepositoInexistente as e:
                 raise HTTPException(422, str(e)) from e
             destino = {"deposito_id": deposito_id, "variant_id": variant_id}
+            lote = {}
+            if opciones.con_lotes and (payload.lot_code is not None or payload.expires_at is not None):
+                if payload.modo not in ("absoluto", "entrada"):
+                    raise HTTPException(
+                        422, "El lote y el vencimiento sólo se pueden usar con el modo absoluto o entrada.")
+                lote = {"lot_code": payload.lot_code, "expires_at": payload.expires_at}
             if payload.modo == "absoluto":
                 if payload.cantidad < 0:
                     raise HTTPException(422, "El stock no puede fijarse en un valor negativo.")
-                stock.ajustar_stock(conn, pid, payload.cantidad, referencia, usuario_id=usuario_id, fecha=fecha,
-                                    **destino)
+                try:
+                    stock.ajustar_stock(conn, pid, payload.cantidad, referencia, usuario_id=usuario_id, fecha=fecha,
+                                        **destino, **lote)
+                except ValueError as e:
+                    if not lote:
+                        raise     # sin lote el ajuste no levantaba ValueError: no se cambia lo de siempre
+                    raise HTTPException(422, str(e)) from e
             elif payload.modo == "entrada":
                 factor = payload.factor or 1
                 if factor <= 0:
@@ -920,19 +948,24 @@ def build_stock_router(
                 ref = referencia
                 if unidad_compra and factor != 1:
                     ref = f"{referencia} ({payload.cantidad:g} {unidad_compra} × {factor:g})"
-                stock.add_movimiento_stock(conn, pid, "entrada", cantidad_base, ref, usuario_id=usuario_id,
-                                           fecha=fecha, **destino)
+                if lote:
+                    # Con lote (sólo un producto marcado): la entrada va a ESE bucket.
+                    try:
+                        stock.entrada_manual_con_lote(conn, pid, cantidad_base, ref, usuario_id=usuario_id,
+                                                      fecha=fecha, **destino, **lote)
+                    except ValueError as e:
+                        raise HTTPException(422, str(e)) from e
+                else:
+                    stock.add_movimiento_stock(conn, pid, "entrada", cantidad_base, ref, usuario_id=usuario_id,
+                                               fecha=fecha, **destino)
             elif payload.modo == "salida":
-                stock.add_movimiento_stock(
-                    conn, pid, "salida", -abs(payload.cantidad), referencia, usuario_id=usuario_id, fecha=fecha,
-                    **destino,
-                )
+                # Un producto marcado sale por FEFO (ADR-018, A-4 PR-3); uno sin marcar, la fila de siempre.
+                stock.salida_manual(conn, pid, "salida", payload.cantidad, referencia, usuario_id=usuario_id,
+                                    fecha=fecha, **destino)
             elif payload.modo == "merma" and con_merma:
                 motivo = (payload.motivo or "Otro").strip() or "Otro"
-                stock.add_movimiento_stock(
-                    conn, pid, "merma", -abs(payload.cantidad), f"Merma: {motivo}", usuario_id=usuario_id,
-                    fecha=fecha, **destino,
-                )
+                stock.salida_manual(conn, pid, "merma", payload.cantidad, f"Merma: {motivo}", usuario_id=usuario_id,
+                                    fecha=fecha, **destino)
             else:
                 raise HTTPException(422, "Modo inválido.")
             respuesta = {"producto": producto, "stock_actual": stock.get_stock_actual(conn, pid)}

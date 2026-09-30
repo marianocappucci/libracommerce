@@ -792,3 +792,124 @@ cambie (par `devolucion` + `merma` con lote de origen).
 el ajuste con lote (`ajustar_stock`), la exposición HTTP de los avisos (`avisos_de_venta` y `planificar_salida`), reactivar la
 baja de un lote en el producto y revisar la guarda de la merma.
 > **Nota 2026-09-30 (PR-2, segunda revisión de Codex; límites conocidos, no se endurecen):** (1) las cantidades con más de ~15 dígitos significativos (p. ej. lotes de 10^16 unidades) pueden perder una unidad al convertir cada tramo a `float` para el `INSERT` (la columna y la API trabajan con `float`); no es un caso de comercio real y fijarlo exigiría pasar `Decimal` hasta la base en todo el ledger. (2) La marca `tracks_expiry` se lee antes de tomar el bloqueo por producto: si se marca o desmarca un producto mientras se vende ese mismo producto, esa venta puede escribirse sin lote (estado de A-1) o con lote en un producto recién desmarcado (los consumidores del ledger ignoran el lote de un producto sin marcar). No pierde ni duplica stock. Cerrarlo de verdad exige bloquear todos los productos de la venta, con costo para el camino de Contalibra y Restolibra.
+
+**Nota (2026-09-30) — A-4 PR-3: devolución, transferencia y ajuste por lote, y los avisos por HTTP.** Cierra A-4 en el
+motor: con esto, **venta, anulación, devolución, transferencia y ajuste** de un producto marcado (`tracks_expiry = 1`)
+siguen el lote. Estado intermedio que termina acá: el PR-2 solo existía en `develop`; **PR-2 y PR-3 se promueven JUNTOS**.
+
+- **Devolución (`erp.ventas.devolver_items`): un PAR por lote, y la devolución de un perecedero va a merma.** Por cada tramo
+  devuelto de un ítem marcado se escriben, **los dos en el `deposito_id` del parámetro** y con el lote y vencimiento de origen:
+  un `devolucion +q` (`reason_code='devolucion'`, `source_type='venta'`, `source_id` la venta, con `lot_code` y `expires_at`) y
+  una `merma −q` (`movement_type='waste'`, `reason_code='merma'`, `source_id` la venta, nota `Merma: devolución venta ID n —
+  lote X`). **Por qué el par:** lo que lee el tope (`_COND_DEVUELTO`), `anular_venta` y `margen._devuelto_por_clave` son las filas
+  `devolucion`, y la merma no matchea ninguna de las condiciones de vendido/devuelto ni las consultas de margen; para el stock y
+  la reposición el neto es 0 (la mercadería perecedera devuelta no vuelve al estante: es la decisión de producto 3). El tramo
+  es el reparto de lo devuelto entre las filas `sale` de la venta para ese ítem y variante **en el orden en que salieron**,
+  restando lo ya devuelto por lote (`_acumular` aprendió `con_lote`; `_lotes_a_devolver` y `_repartir_devolucion`); el **tope no
+  cambia**: sigue siendo por (ítem, variante) total, sin lote. Lo que ningún lote puede recibir (una venta de antes de A-4, una
+  devolución anterior sin lote, el faltante de la venta) cae en «sin lote» **sin par**: una fila `devolucion` suelta, como
+  siempre. Un producto sin marcar y un marcado cuya venta no salió de ningún lote escriben la fila suelta de siempre (idéntica,
+  `INSERT` de 11 columnas). Antes de leer lo ya devuelto se toman los marcados pedidos (`lotes.tomar_productos`, en orden
+  ascendente de id): dos devoluciones simultáneas del mismo producto se serializan y la segunda ve el tope que dejó la primera
+  (hay tests con dos conexiones en PostgreSQL, y con líneas en orden cruzado). La atomicidad es la de siempre (no commitea; si
+  falla a mitad el caller hace rollback).
+- **Transferencia (`usecases.inventory.transfer_stock(tramos=...)` y `catalogo.transferir_stock`): un par por tramo FEFO.**
+  `catalogo.transferir_stock` arma el plan sólo si el producto está marcado (`lotes.plan_fefo` sobre el depósito de **origen** y
+  la variante; vencidos incluidos, «sin lote» último; el faltante no aplica porque la guarda de disponibilidad total ya exige
+  stock) y lo pasa como `tramos`. Cada tramo escribe su propio par salida/entrada en la misma transacción; la salida lleva el lote
+  y el vencimiento (`AAAA-MM-DD`) y la entrada los **copia**; cada entrada apunta a SU salida con `source_id`, así que el par sigue
+  siendo 1:1. `tramos=None` (el default) es **el camino de siempre**: `lot_code` y `expires_at` en NULL por
+  `repo.append_stock_movement`. Un marcado sin lotes en el origen da un plan todo «sin lote» y entonces también va con
+  `tramos=None`. Se toma el producto antes de planificar y **no** se toma para una operación inválida (cantidad no positiva, mismo
+  origen y destino: la rechaza `transfer_stock` como hoy). La guarda de disponibilidad no cambia (total del origen). **Efecto
+  visible:** `get_transferencias` muestra **una fila por tramo**, cada una con su cantidad y sin clave nueva (mismo contrato
+  por fila): una transferencia de 8 unidades de dos lotes son dos filas. Con `tramos`, `transfer_stock` devuelve el par del
+  primer tramo. `StockMovement.expires_at` acepta `date` además de `datetime` (un `date` se guarda como `AAAA-MM-DD`, igual que
+  las filas de venta; la recepción de compra sigue guardando `datetime`).
+- **Ajuste (`erp.stock.ajustar_stock`, `POST /api/stock/{pid}/ajuste` con `modo="absoluto"`).** Recibe `lot_code` y `expires_at`
+  opcionales. **Con lote: el conteo de ESE bucket** `(lote, vencimiento)` en el depósito que escribe: el delta es contra el saldo
+  del bucket, no contra el total, y la fila `ajuste` lleva el lote; un lote que no existe se crea. **Sin lote, un marcado:**
+  `stock_nuevo` sigue siendo el total; un delta **negativo** sale por FEFO (una fila `ajuste` por tramo, el mismo plan que la venta
+  pero con el tipo de ajuste y sin `venta_id`), uno **positivo** entra «sin lote». Un producto sin marcar, o un marcado sin lotes,
+  escribe la fila de siempre; pasar lote a un producto sin marcar es `ValueError`. Toma el producto antes de leer saldos.
+  **HTTP, opt-in:** `OpcionesStock.con_lotes` (default `False`) hace que el cuerpo acepte `lot_code` y `expires_at` (sólo con
+  `modo="absoluto"` o `"entrada"`; `salida`/`merma`, un producto sin marcar o un lote inválido, 422). Apagada, el cuerpo, el esquema OpenAPI y las
+  respuestas son los de siempre (un test compara el esquema).
+- **Avisos por HTTP, opt-in: `OpcionesVentas.con_avisos_de_vencimiento` (default `False`).** Prendida, `POST /api/ventas` y
+  `GET /api/ventas/{id}` agregan la clave `avisos` (`erp.lotes.avisos_de_venta`, umbral por vencer de 15 días) **sólo si hay
+  alguno**, y existe `POST /api/ventas/plan-salida`: cuerpo `{items: [{producto_id, qty, variante_id?}], deposito_id?}`, respuesta
+  `lotes.planificar_salida(...)` (`{hoy, dias, salidas, avisos}`); **lectura pura** (no escribe, no bloquea, no commitea; 422 con
+  una lista vacía, una cantidad no positiva o no finita, un producto o depósito inexistente), para que el POS confirme antes de
+  cobrar. Apagada, las respuestas son byte a byte las de hoy y la ruta no existe ni figura en `/openapi.json` (un test lo
+  compara). 🔵 Apagada, `POST /api/ventas/plan-salida` responde **405 y no 404**: es lo que ya pasaba hoy, porque `GET /{vid}`
+  captura ese path. Sin gate de plan ni permisos propios: el producto monta el router con sus dependencias.
+- **Efectos visibles.** (1) Una devolución de un marcado suma una fila `merma` por cada tramo en `GET /api/stock/movimientos`
+  (con el `venta_id` de la venta). (2) Una transferencia de N lotes son N filas en `get_transferencias`. (3) El ajuste de un marcado
+  con lotes escribe filas con lote. (4) La `salida` y la `merma` manuales de un marcado escriben una fila por lote en vez de una. (5) El stock de un perecedero devuelto no vuelve: la reposición sugerida ve `stock` más bajo
+  que con un producto sin marcar equivalente, y la rotación (ventas netas) igual.
+
+**Lo que NO cambia.** Un producto sin marcar y un marcado sin lotes escriben **el mismo ledger de siempre** en las cinco
+operaciones (mismas llamadas a `add_movimiento_stock` y al repositorio, mismos argumentos): lo fijan los tests de
+`tests/test_ledger_sin_marcar.py`, invertidos sólo los `test_a4_cambia_*` de devolución, transferencia y ajuste (hoy
+`test_a4_pr3_*`). `test_erp_ventas.py` y `test_web_ventas.py` no se tocaron. Contalibra y Restolibra no cambian mientras no
+marquen productos. Margen y reposición leen lo mismo (un test compara un marcado con devolución contra uno sin marcar).
+
+**Límites conocidos (no se arreglan en este PR).**
+- 🔴 **`devolver_items` no es receta-aware** (preexistente): una venta con receta descontó insumos (por lote si están marcados) y la
+  devolución repone el plato, que nunca tuvo stock; los lotes de los insumos no vuelven ni van a merma. Un test lo fija. Es un
+  pendiente de Restolibra, no de VentaLibra.
+- 🔴 **`ajustar_stock` sin `deposito_id`** compara el total de TODOS los depósitos y escribe en el depósito por defecto
+  (preexistente). Para un marcado con el stock repartido, el FEFO corre sobre ese depósito (donde se escribe), y puede dejar su
+  «sin lote» en negativo aunque otro depósito tenga lotes. Quien ajusta un producto con varios depósitos tiene que pasar
+  `deposito_id`; no se cambió porque alteraría el camino de los productos sin marcar. Un test lo fija.
+- 🔵 `listar_ventas` y `erp.reportes._rango` filtran `sales.occurred_on <= hasta` sobre texto libre: una venta con hora del día `hasta`
+  queda afuera (el margen lo evita con `_filtro_de_ventas`). Preexistente, no se tocó.
+- 🔵 La edición de un producto no es atómica respecto de un código duplicado (ver la nota de la carga). Preexistente, no se tocó.
+- 🔵 Los avisos del `GET` de una venta usan «hoy» (Argentina), no la fecha de la venta: un lote que estaba vigente al vender
+  puede figurar vencido al consultar meses después. Una venta anulada conserva sus avisos (son historia).
+- 🔵 Con `tramos`, `transfer_stock` devuelve sólo el par del primer tramo; quien necesite todos los lee del ledger.
+- 🔵 El plan de salida es una simulación sobre el estado de ahora: otra venta concurrente puede cambiar el resultado antes de cobrar.
+  No valida `hooks.validar_deposito` (necesita turno): sólo que el depósito exista y esté activo.
+- 🔵 Las cantidades con más de ~15 dígitos significativos pueden perder una unidad al pasar por `float` (nota del PR-2): vale también acá.
+
+**Salidas manuales (se cerraron en este mismo PR, antes de subirlo).** `erp.stock.salida_manual(conn, pid, tipo, cantidad, ...)`
+es la salida manual de un producto que puede estar marcado: un marcado sale por FEFO (`_salida_por_lote(tipo=...)`: una fila por
+lote, vencidos primero, «sin lote» último, el faltante a una fila «sin lote», mismo `movement_type` y `reason_code` de cada modo
+—`salida` = `adjustment`/`salida`, `merma` = `waste`/`merma`—, misma referencia, bloqueo por producto); un sin marcar y un marcado
+sin lotes escriben la llamada de siempre a `add_movimiento_stock` (mismo `INSERT` de 11 columnas: un test compara el SQL, y la
+comparación HTTP contra develop 69d4a77 de `salida`, `merma` y `entrada` dio respuestas y ledger idénticos). El endpoint de ajuste
+la usa en `modo="salida"` y `modo="merma"`. La `entrada` manual sin lote de un marcado sigue entrando «sin lote» (sumar ahí no
+sobreestima ningún lote); con `OpcionesStock.con_lotes` y `lot_code`/`expires_at`, el modo `entrada` escribe UNA fila `entrada`
+en ese bucket (`stock.entrada_manual_con_lote`; **no** reusa `registrar_entrada_con_lote` porque esa exige `clave_operacion`, valida
+la escala de la unidad y arma su propia referencia, y el modo `entrada` del endpoint no tiene idempotencia ni acepta esos
+parámetros; la fila que escribe es la misma). Con lote en un producto sin marcar, o en `salida`/`merma`, 422.
+
+**Caminos de stock del motor (`grep add_movimiento_stock | append_stock_movement`) y si siguen el lote:**
+
+| Camino | Efecto | ¿Por lote? |
+|---|---|---|
+| `stock.descontar_stock_venta` (venta, insumos de receta) | resta | sí, FEFO (PR-2) |
+| `ventas.anular_venta` | suma | sí, al lote de origen (PR-2) |
+| `ventas.devolver_items` | suma + merma | sí, par por lote (PR-3) |
+| `catalogo.transferir_stock` | resta y suma | sí, par por tramo FEFO (PR-3) |
+| `stock.ajustar_stock` | resta o suma | sí: conteo de un lote, FEFO si baja (PR-3) |
+| `stock.salida_manual` (endpoint `salida` y `merma`) | resta | sí, FEFO (PR-3, este cierre) |
+| endpoint `entrada` sin lote | suma | entra «sin lote» (no sobreestima); con lote, a ese bucket |
+| `vencimientos.asignar_vencimiento_a_saldo`, `dar_de_baja_lote`, `registrar_entrada_con_lote` | par / resta / suma | explícitas sobre un bucket, por diseño |
+| `usecases.purchasing` (recepción) | suma | con lote (si la línea lo trae) |
+
+**Quedan FUERA, por decisión (sólo se listan):** (a) el camino viejo `usecases.sales` (`confirm_sale`, `cancel_sale`,
+`return_sale_items`: escriben `sale`/`return` sin lote, vía el repositorio); (b) `usecases.inventory.transfer_stock` llamado
+**directamente** (sin pasar por `catalogo.transferir_stock`): con `tramos=None` mueve «sin lote»; (c) cualquier producto que llame
+a `stock.add_movimiento_stock` con una cantidad negativa y sin lote (p. ej. un `produccion` o una merma propia de Restolibra):
+ese helper no puede saber si el «sin lote» es intencional (lo necesitan `asignar` y el faltante de la venta), así que un producto
+con marcados tiene que usar `salida_manual`, `descontar_stock_venta` o `ajustar_stock`; (d) los scripts de migración
+(`scripts/migrate_from_*`), que cargan el ledger de otro sistema tal cual.
+
+**A-4 está completo en el motor para los caminos de la tabla.** Venta, anulación, devolución, transferencia, ajuste y salidas manuales por lote. Consecuencia para el producto:
+**la merma de un lote (`dar_de_baja_lote`) puede reactivarse en los productos que la deshabilitaron** (VentaLibra: quitar
+`merma_deshabilitada`, `MERMA_DESHABILITADA=False` en sus tests, y `puedeMermar` separado de `puedeMover` en el kit), porque el saldo
+por lote ya es fiable **para las salidas POSTERIORES** a este cambio y que pasen por esos caminos. Las ventas, devoluciones y transferencias **anteriores a A-4
+siguen «sin lote»**: el saldo «sin lote» negativo heredado mantiene la guarda de `dar_de_baja_lote` (no se toca) hasta que se
+concilie con el conteo físico. Si el producto usa alguno de los caminos (a)–(c), el saldo de sus lotes puede volver a sobreestimarse.
+La guarda de stock total y de saldo «sin lote» negativo de la nota del 2026-09-30 sigue en pie.
