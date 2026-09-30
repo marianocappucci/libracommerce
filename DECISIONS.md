@@ -436,3 +436,67 @@ NULL (y con costo estimado en el margen) porque el costo de aquel día no se pue
 reconstruir; un backfill con el costo de hoy sería exactamente la estimación de siempre,
 pero sin avisarlo. Un producto con receta se costea con su propio `default_cost`, no con la suma de
 sus insumos: es lo que hoy guarda el catálogo.
+
+## ADR-017 — Reposición sugerida: «qué pedir» por rotación, con el mínimo como piso, por sucursal y sin generar la orden (2026-09-30)
+
+**Contexto.** Roadmap de producto de VentaLibra, B-1 (decisión del humano, 2026-09-29: empezar por reposición
+sugerida). El motor ya tenía las piezas sueltas —rotación (`erp.margen`, ADR-015), stock por depósito
+(`erp.stock.get_stock_por_deposito`), órdenes de compra (`erp.compras`), `catalog_items.min_stock`— pero nadie las
+cruzaba: `alertas_de_stock` sólo compara el stock con el mínimo. Decisiones ya tomadas: rotación de los últimos N días
+con `min_stock` como piso; se calcula por **sucursal** (con la opción de la instancia entera) y se recibe por
+depósito; **sólo sugiere**, no genera la orden de compra. Sin migración ni schema nuevo, y libre de planes.
+
+**Decisión.**
+- `erp.reposicion.sugerencia_reposicion` (sólo lee) y `web.reposicion_router.build_reposicion_router`:
+  `GET /api/reportes/reposicion` y `GET .../export` (CSV). Parámetros: `dias_rotacion` (30), `dias_cobertura` (15),
+  `plazo_entrega_dias` (3), `sucursal_id`, `categoria`, `producto_id`, `solo_a_pedir` (`true`). Enteros de 1 hasta su
+  tope (365, 365 y 180); uno inválido, o una sucursal que no existe, es 422. El gate lo pone el producto al montarlo.
+- **La fórmula.** `necesidad = unidades_netas_vendidas × (dias_cobertura + plazo_entrega_dias) / dias_de_muestra` y
+  `sugerido = max(0, ceil(necesidad − stock − en_camino))`; si `stock + en_camino < min_stock`, al menos lo que falta
+  para llegar: `max(sugerido, ceil(min_stock − stock − en_camino))`. Sale también `motivo` (`bajo_minimo`,
+  `por_rotacion` o `ambos`), la rotación diaria, la cobertura actual en días (`None` sin rotación) y las banderas
+  `sin_ventas`, `posible_quiebre` y `variantes` (cuántas activas: se agrupa por producto, no por variante). Se
+  redondea hacia arriba a la unidad (`units.allows_fraction`: entero, o `decimal_scale` decimales, 3 si no lo trae).
+  Ordena por urgencia: menor cobertura primero, luego mayor `sugerido`; los que no rotan, al final.
+- **La rotación es la del margen, no otra.** `erp.margen.unidades_netas` reusa `_lineas_netas` sin cambiarle la semántica:
+  una venta es `confirmed`, `partially_returned` o `returned`; la anulada y la pendiente de cobro no cuentan; las
+  devoluciones se restan del ledger. Sólo se agregó `venta_id` a la línea que ya devolvía y el reparto por sucursal.
+- **Cómo se cuentan las ventas por sucursal.** 🔴 `sales.branch_id` **no alcanza**: `erp.ventas.crear_venta` (el camino
+  de `POST /api/ventas`) no lo escribe —sólo `db.repository.save_sale` con un `Sale` del dominio—, así que toda venta
+  de mostrador lo trae en NULL. La sucursal de una venta es `sales.branch_id` si viene y, si no, la de su depósito
+  (`locations.branch_id` de los movimientos `movement_type='sale'` con `source_type` `venta` o `sale`). Una venta sin
+  ninguna de las dos no entra en ninguna sucursal, pero sí en el total. El stock de una sucursal es la suma de sus
+  depósitos **activos**; el de la instancia, la de todos los depósitos activos (con o sin sucursal). Un depósito
+  desactivado deja de contar.
+- **En camino.** Cantidad pedida menos recibida por línea, sin bajar de 0, sobre las órdenes que no son `received` ni
+  `cancelled`. **`draft` cuenta**: el motor no tiene ninguna operación que pase una orden a `sent` (nace `draft`, y
+  `confirmar_recepcion` la deja `partial` o `received`), así que la que ya se le pidió al proveedor está en `draft`.
+  Con `sucursal_id` entran las de esa sucursal **y las sin sucursal** (`purchase_orders.branch_id` es opcional; no
+  saber a dónde va no es motivo para pedirlo dos veces), y esa parte se informa aparte (`en_camino_sin_sucursal`).
+- **El sesgo por quiebres.** Un producto sin stock no vende y dividir por N subestima su rotación. Del ledger de los
+  depósitos que se miran se arma el saldo día por día; un día en que el saldo **nunca fue positivo y no hubo ninguna
+  venta** no cuenta (`dias_con_stock = N − esos días`, la muestra nunca baja de 7 días, o de N si es menor). Un día con
+  ventas nunca se excluye: si vendió, había —un producto cuyo inventario nunca se cargó no se sobrestima—. Cubre de
+  paso al producto nuevo. `posible_quiebre` es «stock ≤ 0 o algún día sin stock en la ventana». El stock negativo se
+  toma como 0 en la cuenta (se muestra el real): pedir para «tapar» inventario que nunca se cargó es peor que pedir de
+  menos.
+- Se agrega en Python (Decimal) y las consultas son las mismas en SQLite y PostgreSQL, como el margen. Sólo productos
+  activos, `item_type='product'` y `purchasable`.
+
+**Se difiere, a propósito.** `lead_time_days` y `max_stock` por producto (hoy el plazo y la cobertura son del pedido, y el
+piso es `min_stock`); proveedor por producto (no hay a quién dirigir la sugerencia); generar la orden de compra en
+borrador; estacionalidad (una ventana de N días no distingue un diciembre); el reparto entre sucursales de un pedido
+único; y reposición por depósito.
+
+**Límites conocidos.** (1) **El sesgo por quiebres se corrige a medias**: es por día (dos movimientos del mismo día que
+suben y bajan el saldo no se distinguen), depende de que el ledger esté bien cargado, y un producto que estuvo sin
+stock casi toda la ventana rota sobre pocos días (piso de 7). La bandera avisa; no reemplaza el criterio de quien
+pide. (2) `min_stock` es global al producto, no por sucursal: con varias sucursales el piso se aplica igual a cada una.
+(3) Una orden abandonada en `draft` cuenta como pedida. (4) Un comercio que no lleva stock en el ledger no tiene qué
+sugerir (todo sale con stock 0), y sus ventas sin depósito con sucursal no entran en ninguna sucursal. (5) La rotación
+usa el «hoy» del servidor, no el de Argentina. (6) Un producto con receta (Restolibra) se sugiere por sus ventas, no
+por el consumo de sus insumos.
+
+**Consecuencias.** Un producto lo monta con `app.include_router(build_reposicion_router(conexion=...), dependencies=...)`;
+la pantalla es del kit (`libra-ui`) y la capacidad que la gatea, del producto. No escribe nada, así que no hay nada que
+deshacer.
