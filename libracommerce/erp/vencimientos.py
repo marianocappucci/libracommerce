@@ -79,7 +79,7 @@ class SaldoInsuficiente(ReglaDeNegocio):
 
 
 class ClaveDeOperacionReusada(ReglaDeNegocio):
-    """La `clave_operacion` ya se usó con otros parámetros (u otra operación): el router lo traduce a 409."""
+    """La `clave_operacion` ya se usó, sobre ese producto, con otros parámetros u otra operación: 409 en el router."""
 
 
 class SinRevision(VencimientosError):
@@ -216,6 +216,22 @@ def _fila_de_producto(conn, item_id: int):
     return fila
 
 
+def _validar_variante(conn, item_id: int, variante_id: int | None) -> None:
+    """`variante_id` (que llega del cliente) tiene que ser una variante **de este producto**: sin esto se podría mover
+    saldo del producto A a una variante del B. No exige que esté activa: el motor no lo exige para mover stock, y la
+    merma de una variante dada de baja es legítima. `ProductoNoEncontrado` si el producto no existe; `ValueError` si la
+    variante no existe o es de otro producto. `None` (el producto sin variantes) siempre vale."""
+    if variante_id is None:
+        return
+    if isinstance(variante_id, bool) or not isinstance(variante_id, int):
+        raise ValueError(f"variante_id tiene que ser un entero: {variante_id!r}")
+    if not conn.execute("SELECT 1 FROM catalog_items WHERE id = ?", (item_id,)).fetchall():
+        raise ProductoNoEncontrado(f"el producto {item_id} no existe")
+    fila = conn.execute("SELECT item_id FROM item_variants WHERE id = ?", (variante_id,)).fetchone()
+    if fila is None or fila["item_id"] != item_id:
+        raise ValueError(f"la variante {variante_id} no existe o no es del producto {item_id}")
+
+
 def _dias(vence: str | None, hoy: datetime.date) -> int | None:
     return None if vence is None else (datetime.date.fromisoformat(vence) - hoy).days
 
@@ -252,7 +268,7 @@ def ficha(conn, item_id: int) -> dict:
 
 
 def lotes_de(conn, item_id: int, *, deposito_id: int | None = None, sucursal_id: int | None = None,
-             hoy: datetime.date | None = None) -> list[dict]:
+             variante_id: int | None = None, hoy: datetime.date | None = None) -> list[dict]:
     """Las existencias de un producto por lote: una fila por `(depósito, variante, lote, vencimiento)` con saldo ≠ 0,
     incluido el bucket **sin lote** (`lote` y `vence` en `None`) y los saldos negativos. Ordenadas por depósito,
     variante, vencimiento (los sin fecha al final) y lote.
@@ -260,13 +276,17 @@ def lotes_de(conn, item_id: int, *, deposito_id: int | None = None, sucursal_id:
     Cada fila: `producto_id`, `deposito_id`, `deposito`, `deposito_activo`, `sucursal_id`, `sucursal`, `variante_id`,
     `variante`, `lote`, `vence` (`'AAAA-MM-DD'` o `None`), `dias_para_vencer` (negativo = vencido, `None` sin fecha),
     `saldo`, `sin_lote` y `estado` (`vencido`, `vigente` o `sin_fecha`). La suma de los saldos de todos los depósitos
-    es `erp.stock.get_stock_actual`. No requiere que el producto esté marcado. `ProductoNoEncontrado` si no existe;
+    es `erp.stock.get_stock_actual`. Con `variante_id`, sólo esa variante (tiene que ser del producto: si no,
+    `ValueError`, antes de leer saldos). No requiere que el producto esté marcado. `ProductoNoEncontrado` si no existe;
     `ValueError` con una sucursal o un depósito que no existen."""
     if not conn.execute("SELECT 1 FROM catalog_items WHERE id = ?", (item_id,)).fetchall():
         raise ProductoNoEncontrado(f"el producto {item_id} no existe")
+    _validar_variante(conn, item_id, variante_id)
     hoy = hoy or hoy_argentina()
     depositos = _sucursal_y_depositos(conn, sucursal_id, deposito_id)
     saldos = _saldos(conn, "sm.item_id = ?", [item_id], depositos)
+    if variante_id is not None:
+        saldos = {k: v for k, v in saldos.items() if k[2] == variante_id}
     variantes = _nombres_de_variantes(conn)
     filas = []
     for (_, dep, variante, lote, vence), saldo in saldos.items():
@@ -427,10 +447,15 @@ def _saldo_del_bucket(conn, item_id: int, deposito_id: int, variante_id: int | N
 #
 # Un reintento tras un commit con la respuesta perdida no puede duplicar el par ni descontar dos veces. El ledger no
 # tiene columna para la clave, así que viaja **al final de la nota** de cada movimiento como `[op:<clave>]` (el mismo
-# recurso que `[asignación xxxxxxxx]`) y se escribe en la MISMA transacción que los movimientos. Se busca por ella con
-# el producto ya tomado (`_preparar_escritura`): dos reintentos simultáneos se serializan y el segundo ve la marca.
-# Sólo cuenta si está al final de la nota, así que un texto libre (`nota`, `motivo`) no la puede imitar. La búsqueda
-# recorre `note` de todo el ledger (no hay índice por ahí): son operaciones manuales y poco frecuentes.
+# recurso que `[asignación xxxxxxxx]`) y se escribe en la MISMA transacción que los movimientos.
+#
+# 🔑 **La unicidad es (producto, clave), no global.** El bloqueo es por producto (`_preparar_escritura`), así que sólo
+# serializa a quienes compiten por el MISMO producto: buscar la clave entre los movimientos de ese `item_id`, con el
+# producto ya tomado, es lo único que garantiza que el segundo de dos reintentos simultáneos ve la marca del primero.
+# Una búsqueda global no lo garantizaría (dos productos distintos con la misma clave tomarían bloqueos distintos y
+# ninguno vería al otro). La misma clave sobre otro producto es, simplemente, otra operación.
+# Sólo cuenta si está al final de la nota, así que un texto libre (`nota`, `motivo`) no la puede imitar. La búsqueda usa
+# el índice del producto y recorre las notas de sus movimientos.
 
 
 def _normalizar_clave(clave) -> str:
@@ -452,14 +477,15 @@ def _marca_de_operacion(clave: str) -> str:
     return f"[op:{clave}]"
 
 
-def _movimientos_de_la_operacion(conn, clave: str) -> list:
-    """Los movimientos que ya escribió una operación con esta clave, en orden de escritura (`[]` si es nueva)."""
+def _movimientos_de_la_operacion(conn, item_id: int, clave: str) -> list:
+    """Los movimientos de `item_id` que ya escribió una operación con esta clave, en orden de escritura (`[]` si es
+    nueva). Sólo de ese producto: la clave es única por producto."""
     marca = _marca_de_operacion(clave)
     patron = "%" + marca.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     filas = conn.execute(
         "SELECT id, item_id, location_id, variant_id, movement_type, quantity_delta, lot_code, expires_at, note "
-        "FROM stock_movements WHERE note LIKE ? ESCAPE '\\' ORDER BY id",
-        (patron,),
+        "FROM stock_movements WHERE item_id = ? AND note LIKE ? ESCAPE '\\' ORDER BY id",
+        (item_id, patron),
     ).fetchall()
     return [f for f in filas if str(f["note"]).endswith(marca)]  # LIKE no distingue mayúsculas en SQLite
 
@@ -467,8 +493,8 @@ def _movimientos_de_la_operacion(conn, clave: str) -> list:
 def _misma_operacion(previa: dict, pedida: dict) -> None:
     if previa != pedida:
         raise ClaveDeOperacionReusada(
-            "la clave_operacion ya se usó con otros parámetros u otra operación: para una operación distinta hace "
-            "falta otra clave"
+            "la clave_operacion ya se usó en este producto con otros parámetros u otra operación: para una operación "
+            "distinta hace falta otra clave"
         )
 
 
@@ -490,11 +516,13 @@ def asignar_vencimiento_a_saldo(conn, item_id: int, deposito_id: int, lot_code: 
 
     **Idempotente por `clave_operacion`** (obligatoria: un texto no vacío de hasta 64 caracteres, sin corchetes; p. ej.
     un UUID que el cliente genera una vez por intento del usuario). Viaja al final de la nota de los dos movimientos
-    (`[op:<clave>]`), en la misma transacción, y se busca con el producto ya tomado. Un **reintento con la misma clave y
+    (`[op:<clave>]`), en la misma transacción, y se busca con el producto ya tomado. **La clave es única por producto**
+    (`(item_id, clave)`): la misma clave sobre otro producto es otra operación. Un **reintento con la misma clave y
     los mismos parámetros** no escribe nada y devuelve el resultado de la primera vez con `repetida: True`; con la misma
-    clave y **otros** parámetros (u otra operación), `ClaveDeOperacionReusada` (409).
+    clave y **otros** parámetros sobre ese producto (u otra operación), `ClaveDeOperacionReusada` (409).
 
-    `ValueError` con datos inválidos (lote vacío, fecha ilegible, cantidad ≤ 0, clave inválida, depósito inexistente);
+    `ValueError` con datos inválidos (lote vacío, fecha ilegible, cantidad ≤ 0, clave inválida, depósito inexistente, una
+    `variante_id` que no existe o es de otro producto: se valida antes de leer saldos y de escribir);
     `ProductoNoEncontrado`; `ReglaDeNegocio` si el producto no está marcado con `marcar_vence`; `SaldoInsuficiente` si
     el saldo sin lote de ese depósito y variante es menor a `cantidad`. Todo se valida antes de escribir la primera
     fila. Devuelve `{producto_id, deposito_id, variante_id, lote, vence, cantidad, referencia, saldo_sin_lote,
@@ -503,8 +531,9 @@ def asignar_vencimiento_a_saldo(conn, item_id: int, deposito_id: int, lot_code: 
     lote = normalizar_lote(lot_code)
     vence = normalizar_vencimiento(expires_at)
     cant = _cantidad_positiva(cantidad)
+    _validar_variante(conn, item_id, variante_id)
     _preparar_escritura(conn, item_id, deposito_id)
-    previas = _movimientos_de_la_operacion(conn, clave)
+    previas = _movimientos_de_la_operacion(conn, item_id, clave)
     if previas:
         return _asignacion_repetida(conn, clave, previas, {
             "tipo": "asignar", "producto_id": item_id, "deposito_id": deposito_id, "variante_id": variante_id,
@@ -588,8 +617,9 @@ def dar_de_baja_lote(conn, item_id: int, deposito_id: int, lot_code: str | None,
         raise ValueError("hace falta el lote o el vencimiento: la merma del stock sin lote es un ajuste común")
     cant = _cantidad_positiva(cantidad)
     motivo = (motivo or "").strip() or "Vencimiento"
+    _validar_variante(conn, item_id, variante_id)
     _preparar_escritura(conn, item_id, deposito_id)
-    previas = _movimientos_de_la_operacion(conn, clave)
+    previas = _movimientos_de_la_operacion(conn, item_id, clave)
     if previas:
         return _baja_repetida(conn, previas, {
             "tipo": "merma", "producto_id": item_id, "deposito_id": deposito_id, "variante_id": variante_id,

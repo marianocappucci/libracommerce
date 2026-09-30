@@ -15,7 +15,8 @@ da de baja un lote.
   si falta `usuario_actual` o alguna de las dos listas de dependencias está vacía o ausente**: no hay forma de exponer
   escrituras del ledger sin autorización ni sin usuario.
 - `asignar` y `merma` exigen `clave_operacion` en el cuerpo (un texto único por intento, p. ej. un UUID): un reintento
-  con la misma clave y los mismos datos no vuelve a escribir y devuelve el resultado anterior con `repetida: true`.
+  con la misma clave, el mismo producto y los mismos datos no vuelve a escribir y devuelve el resultado anterior con
+  `repetida: true` (la clave es única por producto: una por intento del usuario y por producto).
 
 ```python
 app.include_router(build_vencimientos_router(conexion=get_connection), dependencies=encargado_o_deposito)
@@ -29,7 +30,8 @@ app.include_router(
 ```
 
 **El gate lo pone el producto**, como en el margen y la reposición. Cuelgan de `/api/vencimientos`, que no choca con
-ninguna otra factory del motor. Errores: parámetros o cuerpo inválidos y datos que no existen (sucursal, depósito), 422;
+ninguna otra factory del motor. Errores: parámetros o cuerpo inválidos y datos que no existen (sucursal, depósito, una
+variante que no es del producto), 422;
 producto que no existe, 404; una regla de negocio (saldo insuficiente, producto sin marcar, servicio, una
 `clave_operacion` ya usada con otros datos), 409; base sin la
 revisión `0002` del motor, 503 con el comando que falta.
@@ -141,13 +143,15 @@ def build_vencimientos_router(
         return _csv(reporte["lotes"], _CAMPOS, f"vencimientos_{reporte['hoy']}.csv")
 
     @router.get("/productos/{producto_id}/lotes")
-    def lotes(producto_id: int, sucursal_id: int | None = None, deposito_id: int | None = None):
+    def lotes(producto_id: int, sucursal_id: int | None = None, deposito_id: int | None = None,
+              variante_id: int | None = None):
         """`{producto, lotes}`: la ficha (`vence` dice si está marcado) y las existencias por lote con saldo ≠ 0,
-        incluido el bucket sin lote."""
+        incluido el bucket sin lote. Con `variante_id`, sólo esa variante (una que no es del producto, 422)."""
         try:
             with abrir() as conn:
                 ficha = vencimientos.ficha(conn, producto_id)
-                filas = vencimientos.lotes_de(conn, producto_id, sucursal_id=sucursal_id, deposito_id=deposito_id)
+                filas = vencimientos.lotes_de(conn, producto_id, sucursal_id=sucursal_id, deposito_id=deposito_id,
+                                              variante_id=variante_id)
         except _ERRORES as e:
             raise _http(e) from e
         return {"producto": ficha, "hoy": vencimientos.hoy_argentina().isoformat(), "lotes": filas}

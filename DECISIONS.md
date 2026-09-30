@@ -554,21 +554,30 @@ asignar un vencimiento al stock que no lo tiene y dar de baja un lote. **No toca
   guarda el tipo en `reason_code` (`merma`) y `vencimiento` no es un tipo de `TIPOS`; agregarlo cambiaría la lista que
   muestran las pantallas. El motivo va en la referencia (`Merma: Vencimiento — lote L1, vence ...`), que es la convención
   que ya usa la merma de Restolibra (`Merma: <motivo>`).
-- **Idempotencia: `clave_operacion` obligatoria** en `asignar_vencimiento_a_saldo`, `dar_de_baja_lote` y en los cuerpos
-  de `POST /asignar` y `POST /merma` (un texto único por intento del usuario —un UUID que el cliente genera y reenvía
-  igual al reintentar—, no vacío, de hasta 64 caracteres, sin corchetes). Sin ella un reintento tras un commit con la
-  respuesta perdida duplicaría el par o descontaría dos veces. El ledger no tiene columna: la clave viaja **al final de la
-  nota** de cada movimiento como `[op:<clave>]` (el mismo recurso que `[asignación xxxxxxxx]`), en la **misma transacción**,
-  y se busca con el producto ya tomado. Un reintento con la misma clave y los mismos parámetros **no escribe nada** y
-  devuelve el resultado de la primera vez (con el saldo de entonces) más `repetida: true` (200); con la misma clave y otros
-  parámetros u otra operación, 409 (`ClaveDeOperacionReusada`). Una operación que falla no gasta la clave. Sólo cuenta la
-  marca al final de la nota, así que un texto libre no la puede imitar. Costo: la búsqueda recorre `note` de todo el
-  ledger (sin índice): son operaciones manuales y poco frecuentes. La clave se compara exacta (mayúsculas incluidas, en
-  Python: `LIKE` sólo preselecciona). Límites: no hay expiración de claves, y la clave es global, no por producto.
+- **Idempotencia: `clave_operacion` obligatoria y única por producto** en `asignar_vencimiento_a_saldo`,
+  `dar_de_baja_lote` y en los cuerpos de `POST /asignar` y `POST /merma` (un texto no vacío de hasta 64 caracteres, sin
+  corchetes). Sin ella un reintento tras un commit con la respuesta perdida duplicaría el par o descontaría dos veces. El
+  ledger no tiene columna: la clave viaja **al final de la nota** de cada movimiento como `[op:<clave>]` (el mismo recurso
+  que `[asignación xxxxxxxx]`), en la **misma transacción**. 🔑 **La unicidad es `(item_id, clave)`, no global:** el
+  bloqueo es por producto, así que sólo serializa a quienes compiten por el mismo producto; se busca la marca entre los
+  movimientos de ese `item_id` con el producto ya tomado (una búsqueda global dejaba a dos productos con la misma clave
+  tomando bloqueos distintos, sin verse, y un reintento posterior encontraba dos operaciones). La misma clave sobre otro
+  producto es simplemente otra operación (no 409 ni `repetida`). Un reintento con la misma clave, el mismo producto y los
+  mismos parámetros **no escribe nada** y devuelve el resultado de la primera vez (con el saldo de entonces) más
+  `repetida: true` (200); con otros parámetros u otra operación sobre ese producto, 409 (`ClaveDeOperacionReusada`). Una
+  operación que falla no gasta la clave. Sólo cuenta la marca al final de la nota (un texto libre no la puede imitar) y se
+  compara exacta, mayúsculas incluidas (`LIKE` sólo preselecciona). **Contrato para el cliente: una clave por intento del
+  usuario y por producto** (un UUID por intento; reenviar la misma sólo al reintentar). Límite: no hay expiración de claves.
+- **La variante tiene que ser del producto.** `variante_id` llega del cliente: en `asignar`, `dar_de_baja` y `lotes_de` (que
+  ahora acepta `variante_id` como filtro, y `GET /productos/{id}/lotes` también) se exige que exista y sea de `item_id`
+  (`item_variants.item_id`), **antes** de leer saldos o de escribir; si no, `ValueError` (422 en el router; producto
+  inexistente, 404). Sin esto se podía mover saldo del producto A a una variante del B. No se exige que esté activa: el
+  motor no lo exige para mover stock y la merma de una variante dada de baja es legítima.
 - **Concurrencia de las escrituras.** `asignar` y `dar_de_baja` **toman el producto** antes de leer el saldo, con un
   `UPDATE catalog_items SET tracks_expiry = tracks_expiry WHERE id = ?`: en PostgreSQL bloquea la fila hasta el commit, así
   que dos escrituras simultáneas sobre el mismo producto se serializan y no gastan dos veces el mismo saldo, y **dos
-  reintentos simultáneos con la misma clave escriben una sola vez** (hay tests con dos conexiones en PostgreSQL); en SQLite
+  reintentos simultáneos con la misma clave y el mismo producto escriben una sola vez** (hay tests con dos conexiones en
+  PostgreSQL, también con la misma clave en dos productos distintos: cada uno escribe una vez); en SQLite
   toda escritura ya se serializa.
 - **«Hoy» es la fecha de Argentina** (UTC-3 fijo, como `erp.listas_precio`; no depende de la base de zonas horarias de la
   imagen), no la del servidor: un vencimiento no puede correrse de día porque el contenedor esté en UTC. La ventana es
@@ -583,7 +592,7 @@ asignar un vencimiento al stock que no lo tiene y dar de baja un lote. **No toca
   autorización y sin usuario en `created_by`. Firma: `build_vencimientos_escritura_router(*, conexion=None,
   usuario_actual, dependencias_marcar, dependencias_movimientos, prefix="/api/vencimientos")`; las dos listas son de
   `Depends(...)` y no pueden ser vacías. Errores: parámetro o cuerpo inválido y sucursal o depósito inexistentes, 422; producto inexistente, 404; regla de negocio
-  (saldo insuficiente, producto sin marcar, servicio, `clave_operacion` ya usada con otros datos), 409; base sin la revisión, 503. Quién puede qué es del producto:
+  (saldo insuficiente, producto sin marcar, servicio, `clave_operacion` ya usada en ese producto con otros datos), 409; base sin la revisión, 503. Quién puede qué es del producto:
   la propuesta es que lea encargado y depósito, marque el encargado, y asignen y den de baja encargado y depósito.
 
 **Defaults de producto decididos (2026-09-30).** Los usa A-4; A-1 sólo usa el último.
