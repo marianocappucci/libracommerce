@@ -418,6 +418,126 @@ def test_la_devolucion_aparece_en_movimientos_con_una_merma_de_mas(abrir_fefo):
         ("merma", -1.0, vid), ("devolucion", 1.0, vid)]          # el más nuevo primero
 
 
+# ── El tratamiento por lote lo decide la VENTA, no la marca de hoy ──────
+
+
+def _marcar(abrir, pid, valor):
+    with abrir() as conn:
+        vencimientos.marcar_vence(conn, pid, valor)
+        conn.commit()
+
+
+def test_vender_por_lote_desmarcar_y_devolver_sigue_siendo_un_par_en_el_lote_de_origen_con_neto_cero(abrir_fefo):
+    pid = _producto(abrir_fefo)
+    dep = _principal(abrir_fefo)
+    vid = _vender(abrir_fefo, [_linea(pid, 8)])          # L1 −6, L2 −2
+    (linea,) = _lineas(abrir_fefo, vid)
+    _marcar(abrir_fefo, pid, False)
+    _devolver(abrir_fefo, vid, {linea: 1.0}, dep)         # parcial
+    assert _pares(abrir_fefo, vid) == [("devolucion", 1.0, "L1", "2026-10-05", dep),
+                                       ("merma", -1.0, "L1", "2026-10-05", dep)]
+    assert _stock_total(abrir_fefo, pid) == 2.0           # neto 0: el stock no subió
+    _devolver(abrir_fefo, vid, {linea: 6.0}, dep)         # acumulado: L1 5 y L2 1
+    assert _pares(abrir_fefo, vid)[2:] == [
+        ("devolucion", 5.0, "L1", "2026-10-05", dep), ("merma", -5.0, "L1", "2026-10-05", dep),
+        ("devolucion", 1.0, "L2", "2026-11-01", dep), ("merma", -1.0, "L2", "2026-11-01", dep)]
+    with pytest.raises(ValueError, match="quedan 1"):
+        _devolver(abrir_fefo, vid, {linea: 2.0}, dep)     # el tope: queda 1 (de L2)
+    assert _stock_total(abrir_fefo, pid) == 2.0
+
+
+def test_desmarcado_la_devolucion_total_y_el_tope_siguen_por_item_y_variante(abrir_fefo):
+    pid = _producto(abrir_fefo)
+    dep = _principal(abrir_fefo)
+    vid = _vender(abrir_fefo, [_linea(pid, 4)])
+    (linea,) = _lineas(abrir_fefo, vid)
+    _marcar(abrir_fefo, pid, False)
+    antes = _ledger(abrir_fefo)
+    with pytest.raises(ValueError, match="quedan 4"):
+        _devolver(abrir_fefo, vid, {linea: 5.0}, dep)
+    assert _ledger(abrir_fefo) == antes
+    r = _devolver(abrir_fefo, vid, {linea: 4.0}, dep)
+    assert r["venta"]["estado"] == "devuelta"
+    assert _pares(abrir_fefo, vid) == [("devolucion", 4.0, "L1", "2026-10-05", dep),
+                                       ("merma", -4.0, "L1", "2026-10-05", dep)]
+
+
+def test_desmarcar_y_volver_a_marcar_entre_devoluciones_no_cambia_nada(abrir_fefo):
+    pid = _producto(abrir_fefo)
+    dep = _principal(abrir_fefo)
+    vid = _vender(abrir_fefo, [_linea(pid, 8)])
+    (linea,) = _lineas(abrir_fefo, vid)
+    _marcar(abrir_fefo, pid, False)
+    _devolver(abrir_fefo, vid, {linea: 2.0}, dep)
+    _marcar(abrir_fefo, pid, True)
+    _devolver(abrir_fefo, vid, {linea: 2.0}, dep)
+    assert _pares(abrir_fefo, vid) == [("devolucion", 2.0, "L1", "2026-10-05", dep), ("merma", -2.0, "L1", "2026-10-05", dep),
+                                       ("devolucion", 2.0, "L1", "2026-10-05", dep), ("merma", -2.0, "L1", "2026-10-05", dep)]
+    assert _stock_total(abrir_fefo, pid) == 2.0
+
+
+def test_desmarcar_antes_de_devolver_una_venta_anterior_a_a4_se_comporta_como_hoy(abrir_fefo):
+    pid = _producto(abrir_fefo, "Yogur", lotes_=(), sin_lote=10, marcado=False)
+    dep = _principal(abrir_fefo)
+    vid = _vender(abrir_fefo, [_linea(pid, 3)])          # sale sin lote (todavía sin marcar)
+    with abrir_fefo() as conn:
+        vencimientos.marcar_vence(conn, pid, True)
+        stock.add_movimiento_stock(conn, pid, "entrada", 5, "carga", fecha=PREVIA, lot_code="N1", expires_at=LEJOS)
+        conn.commit()
+    _marcar(abrir_fefo, pid, False)
+    (linea,) = _lineas(abrir_fefo, vid)
+    _devolver(abrir_fefo, vid, {linea: 2.0}, dep)
+    assert _pares(abrir_fefo, vid) == [("devolucion", 2.0, None, None, dep)]      # suelta, sin merma
+    assert _stock_total(abrir_fefo, pid) == 14.0          # 10 − 3 + 5 (lote N1) + 2: la devolución SÍ vuelve al stock
+
+
+def test_la_anulacion_de_una_venta_por_lote_es_exacta_aunque_se_desmarque_despues(abrir_fefo):
+    pid = _producto(abrir_fefo)
+    vid = _vender(abrir_fefo, [_linea(pid, 8)])
+    _marcar(abrir_fefo, pid, False)
+    assert _anular(abrir_fefo, vid) is True
+    assert _saldos(abrir_fefo, pid) == {"L1": 6, "L2": 4}
+
+
+def test_la_transferencia_y_el_ajuste_de_un_desmarcado_con_lotes_en_el_ledger_siguen_la_marca_actual(abrir_fefo):
+    """Son operaciones sobre stock PRESENTE, no sobre una venta pasada: con la marca apagada se comportan como un producto
+    sin marcar (sin lote), aunque el ledger tenga lotes; al volver a marcar, por FEFO otra vez."""
+    pid = _producto(abrir_fefo)
+    dep = _principal(abrir_fefo)
+    norte = _deposito_nuevo(abrir_fefo)
+    _marcar(abrir_fefo, pid, False)
+    marca = _ultimo_id(abrir_fefo)
+    _transferir(abrir_fefo, pid, dep, norte, 4)
+    _ajustar(abrir_fefo, pid, 3)                          # 10 → 3: −7, sin lote
+    assert [(m[0], m[1], m[3]) for m in _movs_de_transferencia(abrir_fefo)] == [
+        ("transfer_out", -4.0, None), ("transfer_in", 4.0, None)]
+    assert _ajustes(abrir_fefo, marca) == [(-7.0, None, None, dep)]
+    _marcar(abrir_fefo, pid, True)
+    marca = _ultimo_id(abrir_fefo)
+    _ajustar(abrir_fefo, pid, 1)                          # 3 → 1: −2, ahora por FEFO (L1 sigue en 6)
+    assert _ajustes(abrir_fefo, marca) == [(-2.0, "L1", "2026-10-05", dep)]
+
+
+def test_en_postgres_dos_devoluciones_simultaneas_de_un_desmarcado_con_venta_por_lote_no_devuelven_de_mas(
+        abrir_fefo, monkeypatch):
+    _solo_postgres()
+    pid = _producto(abrir_fefo, lotes_=(("L1", "2026-10-05", 10),))
+    dep = _principal(abrir_fefo)
+    vid = _vender(abrir_fefo, [_linea(pid, 4)])
+    (linea,) = _lineas(abrir_fefo, vid)
+    _marcar(abrir_fefo, pid, False)          # el bloqueo sale de las filas de la venta, no de la marca
+    original = ventas._lotes_a_devolver
+
+    def lento(*a, **k):
+        r = original(*a, **k)
+        time.sleep(0.4)
+        return r
+
+    monkeypatch.setattr(ventas, "_lotes_a_devolver", lento)
+    resultados, errores = _en_hilos([_devolver_en_conexion_propia(vid, {linea: 3.0}, dep)] * 2)
+    assert len(resultados) == 1 and len(errores) == 1 and isinstance(errores[0], ValueError), (resultados, errores)
+
+
 # ── Concurrencia de la devolución (PostgreSQL) ──────────────────────────
 
 

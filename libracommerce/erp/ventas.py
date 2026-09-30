@@ -953,7 +953,9 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
 
     🔑 **Productos marcados: un PAR por lote (ADR-018, A-4 PR-3).** La
     devolución de un perecedero **va a merma** (decisión de producto): por cada
-    tramo devuelto de un ítem MARCADO (`tracks_expiry = 1`) se escriben, los dos
+    tramo devuelto de un ítem cuya venta salió de un lote (lo dice el ledger de
+    la venta, NO la marca actual: desmarcar el producto después de vender no
+    cambia a dónde vuelve) se escriben, los dos
     en `deposito_id` y con el lote y vencimiento de origen, un `devolucion`
     `+cantidad` (que es lo que leen el tope, `anular_venta` y el margen) y una
     `merma` `−cantidad` (`movement_type='waste'`, `source_id` la venta, nota
@@ -967,8 +969,8 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
     **tope** no cambia: sigue siendo por (ítem, variante) total, sin lote. Un
     producto sin marcar, y un marcado cuya venta no salió de ningún lote,
     escriben la fila suelta de siempre, idéntica. Antes de leer lo ya devuelto se
-    toman los productos marcados pedidos (`lotes.tomar_productos`, en orden de
-    id): dos devoluciones simultáneas del mismo producto se serializan y la
+    toman los productos marcados pedidos y los que la venta sacó de un lote
+    (`lotes.tomar_productos`, en orden de id): dos devoluciones simultáneas del mismo producto se serializan y la
     segunda ve lo que repuso la primera. Efecto visible: una `merma` más por cada
     tramo de un marcado en la pantalla de movimientos.
 
@@ -1014,23 +1016,34 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
         if li["kind"] == "product" and li["item_id"] is not None:
             clave = (li["item_id"], li["variant_id"])
             vendido_por_clave[clave] = vendido_por_clave.get(clave, 0.0) + float(li["quantity"])
-    # Los productos MARCADOS que se devuelven se toman (en orden de id) ANTES de leer lo ya devuelto: así dos
-    # devoluciones simultáneas del mismo producto se serializan y el tope y el reparto por lote ven lo que repuso la
-    # primera. Sin marcados, una sola consulta de sondeo y el código de siempre.
-    ids_pedidos = [
+    # 🔑 El tratamiento por lote de una devolución lo decide la VENTA, no la marca de hoy: un ítem se devuelve por lote si
+    # las filas `sale` de ESTA venta para él salieron de un lote (`lot_code` o `expires_at`). Desmarcar un producto después
+    # de venderlo no cambia a dónde vuelve (mismo criterio que `anular_venta`); una venta sin lotes (anterior a A-4, o de
+    # un producto que nunca los tuvo) devuelve la fila suelta de siempre, marcado o no.
+    vendidas = _movimientos_de_venta(conn, vid, _COND_VENDIDO)
+    pedidos = {
         lineas[i]["item_id"] for i in devoluciones
         if i in lineas and lineas[i]["kind"] == "product" and lineas[i]["item_id"] is not None
-    ]
-    marcados = lotes.ids_marcados(conn, ids_pedidos)
-    if marcados:
-        lotes.tomar_productos(conn, marcados)
+    }
+    con_lote_en_la_venta = {
+        m["item_id"] for m in vendidas
+        if m["item_id"] in pedidos
+        and (lotes.lote_de_fila(m["lot_code"]) is not None or lotes.vence_de_fila(m["expires_at"]) is not None)
+    }
+    # Se toman (en orden de id) la unión de los marcados AHORA y los que la venta sacó de un lote, ANTES de leer lo ya
+    # devuelto: dos devoluciones simultáneas del mismo producto se serializan y el tope y el reparto ven lo que repuso la
+    # primera (y contra asignar, dar de baja y vender, que toman el mismo bloqueo). Sin ninguno, una sola consulta de
+    # sondeo y el código de siempre.
+    a_tomar = lotes.ids_marcados(conn, pedidos) | con_lote_en_la_venta
+    if a_tomar:
+        lotes.tomar_productos(conn, a_tomar)
     devueltas = _movimientos_de_venta(conn, vid, _COND_DEVUELTO)
     ya_devuelto = _acumular(devueltas, con_deposito=False)
     lotes_por_clave = (
         _lotes_a_devolver(
-            _movimientos_de_venta(conn, vid, _COND_VENDIDO), devueltas,
-            {(li["item_id"], li["variant_id"]) for li in lineas.values() if li["item_id"] in marcados},
-        ) if marcados else {}
+            vendidas, devueltas,
+            {(li["item_id"], li["variant_id"]) for li in lineas.values() if li["item_id"] in con_lote_en_la_venta},
+        ) if con_lote_en_la_venta else {}
     )
     fecha = _ar_now().split(" ")[0]
 

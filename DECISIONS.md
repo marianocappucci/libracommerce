@@ -798,7 +798,8 @@ motor: con esto, **venta, anulación, devolución, transferencia y ajuste** de u
 siguen el lote. Estado intermedio que termina acá: el PR-2 solo existía en `develop`; **PR-2 y PR-3 se promueven JUNTOS**.
 
 - **Devolución (`erp.ventas.devolver_items`): un PAR por lote, y la devolución de un perecedero va a merma.** Por cada tramo
-  devuelto de un ítem marcado se escriben, **los dos en el `deposito_id` del parámetro** y con el lote y vencimiento de origen:
+  devuelto de un ítem **cuya venta salió de un lote** (lo dicen las filas `sale` de ESA venta, con `lot_code` o `expires_at`; **no la
+  marca actual**: desmarcar el producto después de vender no cambia a dónde vuelve, igual que `anular_venta`) se escriben, **los dos en el `deposito_id` del parámetro** y con el lote y vencimiento de origen:
   un `devolucion +q` (`reason_code='devolucion'`, `source_type='venta'`, `source_id` la venta, con `lot_code` y `expires_at`) y
   una `merma −q` (`movement_type='waste'`, `reason_code='merma'`, `source_id` la venta, nota `Merma: devolución venta ID n —
   lote X`). **Por qué el par:** lo que lee el tope (`_COND_DEVUELTO`), `anular_venta` y `margen._devuelto_por_clave` son las filas
@@ -808,9 +809,9 @@ siguen el lote. Estado intermedio que termina acá: el PR-2 solo existía en `de
   restando lo ya devuelto por lote (`_acumular` aprendió `con_lote`; `_lotes_a_devolver` y `_repartir_devolucion`); el **tope no
   cambia**: sigue siendo por (ítem, variante) total, sin lote. Lo que ningún lote puede recibir (una venta de antes de A-4, una
   devolución anterior sin lote, el faltante de la venta) cae en «sin lote» **sin par**: una fila `devolucion` suelta, como
-  siempre. Un producto sin marcar y un marcado cuya venta no salió de ningún lote escriben la fila suelta de siempre (idéntica,
-  `INSERT` de 11 columnas). Antes de leer lo ya devuelto se toman los marcados pedidos (`lotes.tomar_productos`, en orden
-  ascendente de id): dos devoluciones simultáneas del mismo producto se serializan y la segunda ve el tope que dejó la primera
+  siempre. Un producto sin marcar, y cualquiera cuya venta no salió de ningún lote (marcado o desmarcado), escriben la fila suelta de siempre (idéntica,
+  `INSERT` de 11 columnas). Antes de leer lo ya devuelto se toma la unión de los marcados AHORA y los que la venta sacó de un lote
+  (`lotes.tomar_productos`, en orden ascendente de id): dos devoluciones simultáneas del mismo producto se serializan y la segunda ve el tope que dejó la primera
   (hay tests con dos conexiones en PostgreSQL, y con líneas en orden cruzado). La atomicidad es la de siempre (no commitea; si
   falla a mitad el caller hace rollback).
 - **Transferencia (`usecases.inventory.transfer_stock(tramos=...)` y `catalogo.transferir_stock`): un par por tramo FEFO.**
@@ -865,6 +866,9 @@ marquen productos. Margen y reposición leen lo mismo (un test compara un marcad
 - 🔵 `listar_ventas` y `erp.reportes._rango` filtran `sales.occurred_on <= hasta` sobre texto libre: una venta con hora del día `hasta`
   queda afuera (el margen lo evita con `_filtro_de_ventas`). Preexistente, no se tocó.
 - 🔵 La edición de un producto no es atómica respecto de un código duplicado (ver la nota de la carga). Preexistente, no se tocó.
+- 🔵 La **transferencia y el ajuste** siguen la marca ACTUAL (son operaciones sobre stock presente, no sobre una venta pasada): un producto
+  desmarcado con lotes en el ledger transfiere y ajusta «sin lote» como uno sin marcar; al volver a marcarlo, por FEFO otra vez (hay test).
+  La devolución y la anulación, en cambio, siguen lo que dice la venta.
 - 🔵 Los avisos del `GET` de una venta usan «hoy» (Argentina), no la fecha de la venta: un lote que estaba vigente al vender
   puede figurar vencido al consultar meses después. Una venta anulada conserva sus avisos (son historia).
 - 🔵 Con `tramos`, `transfer_stock` devuelve sólo el par del primer tramo; quien necesite todos los lee del ledger.
