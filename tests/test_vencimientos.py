@@ -20,6 +20,7 @@ import io
 import sqlite3
 import threading
 import time
+import uuid
 from decimal import Decimal
 
 import pytest
@@ -123,6 +124,22 @@ def _ledger(conn) -> list[tuple]:
 
 
 # ── Helpers de datos ─────────────────────────────────────────────────────
+
+
+def _k() -> str:
+    """Una `clave_operacion` nueva (un UUID, como la genera un cliente por cada intento del usuario)."""
+    return uuid.uuid4().hex
+
+
+def _asignar(conn, *args, **kw):
+    kw.setdefault("clave_operacion", _k())
+    return vencimientos.asignar_vencimiento_a_saldo(conn, *args, **kw)
+
+
+def _baja(conn, *args, **kw):
+    kw.setdefault("clave_operacion", _k())
+    return vencimientos.dar_de_baja_lote(conn, *args, **kw)
+
 
 
 def _producto(conn, nombre="Yogur", *, vence=True, categoria="", unidad="u", activo=True):
@@ -526,6 +543,7 @@ def test_el_resumen_cuenta_lotes_y_unidades(abrir_vto):
     assert _proximos(abrir_vto)["resumen"] == {
         "lotes_por_vencer": 1, "lotes_vencidos": 2, "unidades_por_vencer": 2.5, "unidades_vencidas": 10,
         "productos": 1, "productos_sin_lote": 1, "productos_con_salidas_sin_lote": 0,
+        "saldos_sin_fecha": 1, "saldos_con_salidas_sin_lote": 0,
     }
 
 
@@ -561,6 +579,41 @@ def test_las_salidas_sin_lote_se_marcan_porque_hasta_A4_dejan_los_lotes_sobreest
     assert [(x["lote"], x["saldo"]) for x in r["lotes"]] == [("L1", 10)]
     assert [(x["nombre"], x["saldo"], x["situacion"]) for x in r["sin_lote"]] == [("Yogur", -3, "salidas_sin_lote")]
     assert r["resumen"]["productos_con_salidas_sin_lote"] == 1 and r["resumen"]["productos_sin_lote"] == 0
+
+
+def test_los_saldos_sin_lote_se_clasifican_por_deposito_y_no_se_cancelan_entre_depositos(abrir_vto):
+    """−5 sin lote en un depósito y +5 en otro NO suman 0: el negativo (salidas que todavía no bajaron ningún lote de
+    ese depósito) se conserva en la respuesta y en los contadores, y el positivo se sigue avisando como sin fecha."""
+    with abrir_vto() as conn:
+        yogur = _producto(conn, "Yogur")
+        norte = catalogo.create_deposito(conn, "Norte")
+        principal = catalogo.get_default_deposito_id(conn)
+        _entrada(conn, yogur, 10, lote="L1", vence=_dias(5), deposito=principal)
+        stock.descontar_stock_venta(conn, 1, [{"producto_id": yogur, "qty": 5}], fecha="2026-09-10",
+                                    deposito_id=principal)                      # −5 sin lote en principal
+        _entrada(conn, yogur, 5, deposito=norte)                                # +5 sin lote en norte
+    r = _proximos(abrir_vto)
+    assert [(x["deposito_id"], x["saldo"], x["situacion"]) for x in r["sin_lote"]] == [
+        (principal, -5, "salidas_sin_lote"), (norte, 5, "sin_fecha")]
+    assert r["resumen"]["productos_con_salidas_sin_lote"] == 1 and r["resumen"]["productos_sin_lote"] == 1
+    assert r["resumen"]["saldos_con_salidas_sin_lote"] == 1 and r["resumen"]["saldos_sin_fecha"] == 1
+    # Filtrando por depósito se ve sólo lo de ese depósito.
+    assert [x["situacion"] for x in _proximos(abrir_vto, deposito_id=principal)["sin_lote"]] == ["salidas_sin_lote"]
+    assert [x["situacion"] for x in _proximos(abrir_vto, deposito_id=norte)["sin_lote"]] == ["sin_fecha"]
+
+
+def test_los_saldos_sin_lote_se_clasifican_tambien_por_variante(abrir_vto):
+    with abrir_vto() as conn:
+        pid = _producto(conn, "Yogur")
+        rojo = catalogo.create_variante(conn, pid, "SKU-R", "Frutilla")["id"]
+        azul = catalogo.create_variante(conn, pid, "SKU-A", "Durazno")["id"]
+        _entrada(conn, pid, 4, variante=rojo)
+        _entrada(conn, pid, 4, variante=azul)
+        stock.descontar_stock_venta(conn, 1, [{"producto_id": pid, "qty": 6, "variante_id": azul}],
+                                    fecha="2026-09-10")            # el neto del producto es +2: no debe esconder −2
+    r = _proximos(abrir_vto)
+    assert [(x["variante"], x["saldo"], x["situacion"]) for x in r["sin_lote"]] == [
+        ("Durazno", -2, "salidas_sin_lote"), ("Frutilla", 4, "sin_fecha")]
 
 
 def test_varios_depositos_y_sucursales_se_filtran_y_se_ordenan_por_vencimiento(abrir_vto):
@@ -674,7 +727,7 @@ def test_asignar_es_un_par_aditivo_y_no_toca_las_filas_viejas_ni_el_total(abrir_
         _entrada(conn, pid, 3, lote="L0", vence=_dias(60))
         antes = [tuple(f) for f in _todo_el_ledger(conn)]
         total = stock.get_stock_actual(conn, pid)
-        r = vencimientos.asignar_vencimiento_a_saldo(
+        r = _asignar(
             conn, pid, deposito, "  L1 ", datetime.date(2026, 10, 5), 4, usuario_id=7, nota="Conteo de góndola",
         )
         despues = [tuple(f) for f in _todo_el_ledger(conn)]
@@ -710,12 +763,12 @@ def test_asignar_falla_sin_saldo_sin_lote_y_no_escribe_nada(abrir_vto):
         _entrada(conn, pid, 8, lote="L0", vence=_dias(9))   # un lote con saldo tampoco es «sin lote»
         antes = _todo_el_ledger(conn)
         with pytest.raises(vencimientos.SaldoInsuficiente, match="saldo sin lote es 5"):
-            vencimientos.asignar_vencimiento_a_saldo(conn, pid, deposito, "L1", "2026-10-05", 6)
+            _asignar(conn, pid, deposito, "L1", "2026-10-05", 6)
         assert [tuple(f) for f in _todo_el_ledger(conn)] == [tuple(f) for f in antes]
         # Justo lo que hay sí se puede.
-        vencimientos.asignar_vencimiento_a_saldo(conn, pid, deposito, "L1", "2026-10-05", 5)
+        _asignar(conn, pid, deposito, "L1", "2026-10-05", 5)
         with pytest.raises(vencimientos.SaldoInsuficiente):
-            vencimientos.asignar_vencimiento_a_saldo(conn, pid, deposito, "L2", "2026-10-06", 1)
+            _asignar(conn, pid, deposito, "L2", "2026-10-06", 1)
 
 
 def test_asignar_respeta_la_variante(abrir_vto):
@@ -725,8 +778,8 @@ def test_asignar_respeta_la_variante(abrir_vto):
         variante = catalogo.create_variante(conn, pid, "SKU-1", "Frutilla")["id"]
         _entrada(conn, pid, 5, variante=variante)
         with pytest.raises(vencimientos.SaldoInsuficiente):  # el saldo es de la variante, no del producto a secas
-            vencimientos.asignar_vencimiento_a_saldo(conn, pid, deposito, "L1", "2026-10-05", 1)
-        vencimientos.asignar_vencimiento_a_saldo(conn, pid, deposito, "L1", "2026-10-05", 2, variante_id=variante)
+            _asignar(conn, pid, deposito, "L1", "2026-10-05", 1)
+        _asignar(conn, pid, deposito, "L1", "2026-10-05", 2, variante_id=variante)
     filas = _lotes(abrir_vto, pid)
     assert [(f["variante"], f["lote"], f["saldo"]) for f in filas] == [
         ("Frutilla", "L1", 2), ("Frutilla", None, 3)]
@@ -753,13 +806,13 @@ def test_asignar_valida_entradas_producto_y_deposito(abrir_vto):
         ]
         for mal in malos:
             with pytest.raises(ValueError):
-                vencimientos.asignar_vencimiento_a_saldo(conn, pid, deposito, **mal)
+                _asignar(conn, pid, deposito, **mal)
         with pytest.raises(ValueError, match="depósito 999"):
-            vencimientos.asignar_vencimiento_a_saldo(conn, pid, 999, "L1", "2026-10-05", 1)
+            _asignar(conn, pid, 999, "L1", "2026-10-05", 1)
         with pytest.raises(vencimientos.ProductoNoEncontrado):
-            vencimientos.asignar_vencimiento_a_saldo(conn, 9999, deposito, "L1", "2026-10-05", 1)
+            _asignar(conn, 9999, deposito, "L1", "2026-10-05", 1)
         with pytest.raises(vencimientos.ReglaDeNegocio, match="no está marcado"):
-            vencimientos.asignar_vencimiento_a_saldo(conn, sin_marca, deposito, "L1", "2026-10-05", 1)
+            _asignar(conn, sin_marca, deposito, "L1", "2026-10-05", 1)
         assert [tuple(f) for f in _todo_el_ledger(conn)] == antes
 
 
@@ -768,7 +821,7 @@ def test_asignar_acepta_cantidades_fraccionarias(abrir_vto):
         pid = _producto(conn, "Queso", unidad="kg")
         deposito = catalogo.get_default_deposito_id(conn)
         _entrada(conn, pid, 2.5)
-        vencimientos.asignar_vencimiento_a_saldo(conn, pid, deposito, "Q1", "2026-10-05", Decimal("0.75"))
+        _asignar(conn, pid, deposito, "Q1", "2026-10-05", Decimal("0.75"))
     assert [(f["lote"], f["saldo"]) for f in _lotes(abrir_vto, pid)] == [("Q1", 0.75), (None, 1.75)]
 
 
@@ -781,7 +834,7 @@ def test_la_merma_de_un_lote_baja_su_saldo_con_tipo_merma_y_no_deja_negativo(abr
         deposito = catalogo.get_default_deposito_id(conn)
         _entrada(conn, pid, 10, lote="L1", vence=_dias(-2))
         _entrada(conn, pid, 5, lote="L2", vence=_dias(20))
-        r = vencimientos.dar_de_baja_lote(conn, pid, deposito, "L1", _dias(-2), 4, usuario_id=7, nota="Heladera 2")
+        r = _baja(conn, pid, deposito, "L1", _dias(-2), 4, usuario_id=7, nota="Heladera 2")
         assert r["saldo_restante"] == 6 and r["cantidad"] == 4
         fila = conn.execute(
             "SELECT quantity_delta, movement_type, reason_code, lot_code, expires_at, note, created_by "
@@ -792,12 +845,12 @@ def test_la_merma_de_un_lote_baja_su_saldo_con_tipo_merma_y_no_deja_negativo(abr
         assert fila[5].startswith("Merma: Vencimiento") and "L1" in fila[5] and "Heladera 2" in fila[5]
         # Justo lo que queda sí; una unidad más, no.
         with pytest.raises(vencimientos.SaldoInsuficiente, match="tiene 6"):
-            vencimientos.dar_de_baja_lote(conn, pid, deposito, "L1", _dias(-2), 7)
+            _baja(conn, pid, deposito, "L1", _dias(-2), 7)
         antes = [tuple(f) for f in _todo_el_ledger(conn)]
         with pytest.raises(vencimientos.SaldoInsuficiente):
-            vencimientos.dar_de_baja_lote(conn, pid, deposito, "L1", _dias(-2), 6.0001)
+            _baja(conn, pid, deposito, "L1", _dias(-2), 6.0001)
         assert [tuple(f) for f in _todo_el_ledger(conn)] == antes
-        vencimientos.dar_de_baja_lote(conn, pid, deposito, "L1", _dias(-2), 6, motivo="Rotura")
+        _baja(conn, pid, deposito, "L1", _dias(-2), 6, motivo="Rotura")
     assert [(f["lote"], f["saldo"]) for f in _lotes(abrir_vto, pid)] == [("L2", 5)]
     reporte = _proximos(abrir_vto)
     assert reporte["lotes"] == [] or all(x["lote"] != "L1" for x in reporte["lotes"])
@@ -816,7 +869,7 @@ def test_la_merma_no_puede_sacar_de_un_lote_que_no_existe_ni_de_otro_deposito_ni
         for args in ((deposito, "NO-EXISTE", _dias(3)), (norte, "L1", _dias(3)), (deposito, "L1", _dias(4)),
                      (deposito, "L1", None)):
             with pytest.raises(vencimientos.SaldoInsuficiente):
-                vencimientos.dar_de_baja_lote(conn, pid, *args, 1)
+                _baja(conn, pid, *args, 1)
         assert [tuple(f) for f in _todo_el_ledger(conn)] == antes
 
 
@@ -826,16 +879,16 @@ def test_la_merma_valida_entradas(abrir_vto):
         deposito = catalogo.get_default_deposito_id(conn)
         _entrada(conn, pid, 10, lote="L1", vence=_dias(3))
         with pytest.raises(ValueError, match="lote o el vencimiento"):
-            vencimientos.dar_de_baja_lote(conn, pid, deposito, None, None, 1)
+            _baja(conn, pid, deposito, None, None, 1)
         for cantidad in (0, -1, "x", None):
             with pytest.raises(ValueError):
-                vencimientos.dar_de_baja_lote(conn, pid, deposito, "L1", _dias(3), cantidad)
+                _baja(conn, pid, deposito, "L1", _dias(3), cantidad)
         with pytest.raises(ValueError):
-            vencimientos.dar_de_baja_lote(conn, pid, deposito, "L1", "mañana", 1)
+            _baja(conn, pid, deposito, "L1", "mañana", 1)
         with pytest.raises(ValueError, match="depósito 999"):
-            vencimientos.dar_de_baja_lote(conn, pid, 999, "L1", _dias(3), 1)
+            _baja(conn, pid, 999, "L1", _dias(3), 1)
         with pytest.raises(vencimientos.ProductoNoEncontrado):
-            vencimientos.dar_de_baja_lote(conn, 9999, deposito, "L1", _dias(3), 1)
+            _baja(conn, 9999, deposito, "L1", _dias(3), 1)
 
 
 def test_se_puede_dar_de_baja_un_lote_que_solo_tiene_fecha(abrir_vto):
@@ -843,7 +896,7 @@ def test_se_puede_dar_de_baja_un_lote_que_solo_tiene_fecha(abrir_vto):
         pid = _producto(conn)
         deposito = catalogo.get_default_deposito_id(conn)
         _entrada(conn, pid, 3, vence="2026-10-05")
-        vencimientos.dar_de_baja_lote(conn, pid, deposito, None, "2026-10-05", 3)
+        _baja(conn, pid, deposito, None, "2026-10-05", 3)
     assert _lotes(abrir_vto, pid) == []
 
 
@@ -852,9 +905,9 @@ def test_dos_bajas_o_asignaciones_seguidas_no_gastan_dos_veces_el_mismo_saldo(ab
         pid = _producto(conn)
         deposito = catalogo.get_default_deposito_id(conn)
         _entrada(conn, pid, 5, lote="L1", vence=_dias(3))
-        vencimientos.dar_de_baja_lote(conn, pid, deposito, "L1", _dias(3), 3)
+        _baja(conn, pid, deposito, "L1", _dias(3), 3)
         with pytest.raises(vencimientos.SaldoInsuficiente):
-            vencimientos.dar_de_baja_lote(conn, pid, deposito, "L1", _dias(3), 3)
+            _baja(conn, pid, deposito, "L1", _dias(3), 3)
 
 
 def test_en_postgres_dos_escrituras_del_mismo_producto_se_serializan(abrir_vto):
@@ -871,12 +924,12 @@ def test_en_postgres_dos_escrituras_del_mismo_producto_se_serializan(abrir_vto):
     primera = core.get_connection()
     try:
         deposito = catalogo.get_default_deposito_id(primera)
-        vencimientos.dar_de_baja_lote(primera, pid, deposito, "L1", _dias(3), 4)  # sin commit: tiene el producto
+        _baja(primera, pid, deposito, "L1", _dias(3), 4)  # sin commit: tiene el producto
 
         def segunda():
             c = core.get_connection()
             try:
-                vencimientos.dar_de_baja_lote(c, pid, deposito, "L1", _dias(3), 4)
+                _baja(c, pid, deposito, "L1", _dias(3), 4)
                 c.commit()
                 resultados.append("pasó")
             except vencimientos.SaldoInsuficiente:
@@ -895,6 +948,276 @@ def test_en_postgres_dos_escrituras_del_mismo_producto_se_serializan(abrir_vto):
         primera.close()
     assert resultados == ["saldo insuficiente"]
     assert [(f["lote"], f["saldo"]) for f in _lotes(abrir_vto, pid)] == [("L1", 1)]
+
+
+# ═══════════════════════════════════════════ Idempotencia: `clave_operacion`
+
+
+def _sin_id(filas):
+    return [tuple(f) for f in filas]
+
+
+def test_un_reintento_de_asignar_con_la_misma_clave_no_duplica_y_devuelve_lo_de_la_primera_vez(abrir_vto):
+    with abrir_vto() as conn:
+        pid = _producto(conn)
+        deposito = catalogo.get_default_deposito_id(conn)
+        _entrada(conn, pid, 10)
+        clave = _k()
+        primera = _asignar(conn, pid, deposito, "L1", "2026-10-05", 4, clave_operacion=clave, nota="Conteo")
+        assert primera["repetida"] is False
+        despues_de_la_primera = _sin_id(_todo_el_ledger(conn))
+        stock.descontar_stock_venta(conn, 1, [{"producto_id": pid, "qty": 2}], fecha="2026-09-20")  # pasa el tiempo
+        con_la_venta = _sin_id(_todo_el_ledger(conn))
+        segunda = _asignar(conn, pid, deposito, "L1", "2026-10-05", 4, clave_operacion=clave, nota="otra nota")
+        assert _sin_id(_todo_el_ledger(conn)) == con_la_venta, "el reintento escribió"
+        assert len(con_la_venta) == len(despues_de_la_primera) + 1
+    assert segunda == {**primera, "repetida": True}, "el resultado repetido no es el de la primera vez"
+    assert segunda["saldo_sin_lote"] == 6            # el de entonces (10 − 4), no el de ahora (6 − 2)
+    assert [(f["lote"], f["saldo"]) for f in _lotes(abrir_vto, pid)] == [("L1", 4), (None, 4)]
+
+
+def test_la_clave_viaja_al_final_de_la_nota_de_los_dos_movimientos_en_la_misma_transaccion(abrir_vto):
+    with abrir_vto() as conn:
+        pid = _producto(conn)
+        deposito = catalogo.get_default_deposito_id(conn)
+        _entrada(conn, pid, 10)
+        clave = _k()
+        _asignar(conn, pid, deposito, "L1", "2026-10-05", 4, clave_operacion=clave)
+        _baja(conn, pid, deposito, "L1", "2026-10-05", 1, clave_operacion="baja-" + clave)
+        notas = [f[0] for f in conn.execute("SELECT note FROM stock_movements ORDER BY id").fetchall()]
+    assert [n.endswith(f"[op:{clave}]") for n in notas] == [False, True, True, False]
+    assert notas[-1].endswith(f"[op:baja-{clave}]")
+    # Una transacción que se deshace se lleva la marca con los movimientos: la clave no queda «gastada».
+    with pytest.raises(RuntimeError):
+        with abrir_vto() as conn:
+            _asignar(conn, pid, deposito, "L2", "2026-10-06", 1, clave_operacion="se-deshace")
+            raise RuntimeError("falló algo después")
+    with abrir_vto() as conn:
+        assert _asignar(conn, pid, deposito, "L2", "2026-10-06", 1, clave_operacion="se-deshace")["repetida"] is False
+
+
+def test_la_misma_clave_con_otros_parametros_es_un_error_y_no_escribe(abrir_vto):
+    with abrir_vto() as conn:
+        pid = _producto(conn)
+        otro = _producto(conn, "Leche")
+        deposito = catalogo.get_default_deposito_id(conn)
+        norte = catalogo.create_deposito(conn, "Norte")
+        variante = catalogo.create_variante(conn, pid, "SKU-1", "Frutilla")["id"]
+        _entrada(conn, pid, 20)
+        _entrada(conn, otro, 20)
+        clave = _k()
+        _asignar(conn, pid, deposito, "L1", "2026-10-05", 4, clave_operacion=clave)
+        antes = _sin_id(_todo_el_ledger(conn))
+        distintos = [
+            (pid, deposito, "L1", "2026-10-05", 5, {}), (pid, deposito, "L2", "2026-10-05", 4, {}),
+            (pid, deposito, "L1", "2026-10-06", 4, {}), (pid, norte, "L1", "2026-10-05", 4, {}),
+            (otro, deposito, "L1", "2026-10-05", 4, {}), (pid, deposito, "L1", "2026-10-05", 4, {"variante_id": variante}),
+        ]
+        for item, dep, lote, vence, cantidad, kw in distintos:
+            with pytest.raises(vencimientos.ClaveDeOperacionReusada, match="otros parámetros"):
+                _asignar(conn, item, dep, lote, vence, cantidad, clave_operacion=clave, **kw)
+        # Ni una baja con la clave de una asignación, ni al revés.
+        with pytest.raises(vencimientos.ClaveDeOperacionReusada):
+            _baja(conn, pid, deposito, "L1", "2026-10-05", 4, clave_operacion=clave)
+        clave_baja = _k()
+        _baja(conn, pid, deposito, "L1", "2026-10-05", 1, clave_operacion=clave_baja)
+        con_la_baja = _sin_id(_todo_el_ledger(conn))
+        with pytest.raises(vencimientos.ClaveDeOperacionReusada):
+            _asignar(conn, pid, deposito, "L9", "2026-10-05", 1, clave_operacion=clave_baja)
+        with pytest.raises(vencimientos.ClaveDeOperacionReusada):
+            _baja(conn, pid, deposito, "L1", "2026-10-05", 2, clave_operacion=clave_baja)
+        assert _sin_id(_todo_el_ledger(conn)) == con_la_baja and con_la_baja[:len(antes)] == antes
+
+
+def test_un_reintento_de_la_baja_no_descuenta_dos_veces(abrir_vto):
+    with abrir_vto() as conn:
+        pid = _producto(conn)
+        deposito = catalogo.get_default_deposito_id(conn)
+        _entrada(conn, pid, 10, lote="L1", vence=_dias(-2))
+        clave = _k()
+        primera = _baja(conn, pid, deposito, "L1", _dias(-2), 10, clave_operacion=clave)   # vacía el lote
+        assert primera["saldo_restante"] == 0 and primera["repetida"] is False
+        n = len(_todo_el_ledger(conn))
+        segunda = _baja(conn, pid, deposito, "L1", _dias(-2), 10, clave_operacion=clave)   # el lote ya no tiene saldo
+        assert len(_todo_el_ledger(conn)) == n
+        assert segunda == {**primera, "repetida": True}
+        assert stock.get_stock_actual(conn, pid) == 0
+        # La clave de una operación que FALLÓ no se gasta: con saldo, la misma clave sirve.
+        clave2 = _k()
+        with pytest.raises(vencimientos.SaldoInsuficiente):
+            _baja(conn, pid, deposito, "L1", _dias(-2), 3, clave_operacion=clave2)
+        _entrada(conn, pid, 3, lote="L1", vence=_dias(-2))
+        assert _baja(conn, pid, deposito, "L1", _dias(-2), 3, clave_operacion=clave2)["repetida"] is False
+
+
+def test_un_reintento_tras_desmarcar_el_producto_devuelve_igual_lo_anterior(abrir_vto):
+    with abrir_vto() as conn:
+        pid = _producto(conn)
+        deposito = catalogo.get_default_deposito_id(conn)
+        _entrada(conn, pid, 5)
+        clave = _k()
+        primera = _asignar(conn, pid, deposito, "L1", "2026-10-05", 2, clave_operacion=clave)
+        vencimientos.marcar_vence(conn, pid, False)
+        assert _asignar(conn, pid, deposito, "L1", "2026-10-05", 2, clave_operacion=clave) == {**primera,
+                                                                                            "repetida": True}
+
+
+@pytest.mark.parametrize("mala", ["", "   ", "x" * 65, "a[b", "a]b", "a\nb", 5, None, b"k"])
+def test_la_clave_de_operacion_se_valida_antes_de_escribir(abrir_vto, mala):
+    with abrir_vto() as conn:
+        pid = _producto(conn)
+        deposito = catalogo.get_default_deposito_id(conn)
+        _entrada(conn, pid, 5, lote="L1", vence=_dias(3))
+        _entrada(conn, pid, 5)
+        antes = _sin_id(_todo_el_ledger(conn))
+        with pytest.raises(ValueError, match="clave_operacion"):
+            _asignar(conn, pid, deposito, "L2", "2026-10-05", 1, clave_operacion=mala)
+        with pytest.raises(ValueError, match="clave_operacion"):
+            _baja(conn, pid, deposito, "L1", _dias(3), 1, clave_operacion=mala)
+        assert _sin_id(_todo_el_ledger(conn)) == antes
+
+
+def test_la_clave_es_obligatoria_en_las_funciones(abrir_vto):
+    with abrir_vto() as conn:
+        pid = _producto(conn)
+        deposito = catalogo.get_default_deposito_id(conn)
+        with pytest.raises(TypeError, match="clave_operacion"):
+            vencimientos.asignar_vencimiento_a_saldo(conn, pid, deposito, "L1", "2026-10-05", 1)
+        with pytest.raises(TypeError, match="clave_operacion"):
+            vencimientos.dar_de_baja_lote(conn, pid, deposito, "L1", "2026-10-05", 1)
+
+
+def test_la_clave_se_recorta_y_acepta_64_caracteres(abrir_vto):
+    with abrir_vto() as conn:
+        pid = _producto(conn)
+        deposito = catalogo.get_default_deposito_id(conn)
+        _entrada(conn, pid, 5)
+        clave = "k" * 64
+        assert _asignar(conn, pid, deposito, "L1", "2026-10-05", 1, clave_operacion=f"  {clave} ")["repetida"] is False
+        assert _asignar(conn, pid, deposito, "L1", "2026-10-05", 1, clave_operacion=clave)["repetida"] is True
+
+
+def test_claves_parecidas_no_se_confunden(abrir_vto):
+    """Los comodines de `LIKE` (`%`, `_`), las mayúsculas (SQLite no las distingue) y los prefijos no hacen que una
+    clave nueva se lea como un reintento de otra."""
+    with abrir_vto() as conn:
+        pid = _producto(conn)
+        deposito = catalogo.get_default_deposito_id(conn)
+        _entrada(conn, pid, 100)
+        for clave in ("abc", "ABC", "ab_", "abX", "a%c", "abcd", "xabc", "k_1", "kX1", "op:abc"):
+            r = _asignar(conn, pid, deposito, f"L-{clave}", "2026-10-05", 1, clave_operacion=clave)
+            assert r["repetida"] is False, clave
+    assert len(_lotes(abrir_vto, pid)) == 11
+
+
+def test_un_texto_libre_no_puede_imitar_la_marca_de_una_operacion(abrir_vto):
+    with abrir_vto() as conn:
+        pid = _producto(conn)
+        deposito = catalogo.get_default_deposito_id(conn)
+        _entrada(conn, pid, 10, lote="L1", vence=_dias(3))
+        _entrada(conn, pid, 10)
+        _asignar(conn, pid, deposito, "L2", "2026-10-05", 1, nota="[op:ajena]", clave_operacion=_k())
+        _baja(conn, pid, deposito, "L1", _dias(3), 1, nota="[op:ajena]", motivo="[op:ajena]", clave_operacion=_k())
+        assert _asignar(conn, pid, deposito, "L3", "2026-10-05", 1, clave_operacion="ajena")["repetida"] is False
+
+
+def _dos_reintentos_a_la_vez(abrir_vto, operacion):
+    """Corre `operacion(conn, clave)` en dos conexiones a la vez, con la misma clave. Devuelve los dos resultados."""
+    resultados: list = []
+    errores: list = []
+    barrera = threading.Barrier(2)
+
+    def intento():
+        c = core.get_connection()
+        try:
+            barrera.wait(10)
+            resultados.append(operacion(c))
+            c.commit()
+        except Exception as e:  # noqa: BLE001 - se informa en el assert
+            c.rollback()
+            errores.append(e)
+        finally:
+            c.close()
+
+    hilos = [threading.Thread(target=intento) for _ in range(2)]
+    for h in hilos:
+        h.start()
+    for h in hilos:
+        h.join(30)
+    assert not any(h.is_alive() for h in hilos), "un reintento quedó colgado"
+    assert not errores, errores
+    return resultados
+
+
+def test_en_postgres_dos_reintentos_simultaneos_de_asignar_escriben_una_sola_vez(abrir_vto):
+    if not core.is_postgres():
+        pytest.skip("sólo PostgreSQL toma el bloqueo por fila")
+    with abrir_vto() as conn:
+        pid = _producto(conn)
+        deposito = catalogo.get_default_deposito_id(conn)
+        _entrada(conn, pid, 10)
+        antes = len(_todo_el_ledger(conn))
+    clave = _k()
+    resultados = _dos_reintentos_a_la_vez(
+        abrir_vto, lambda c: _asignar(c, pid, deposito, "L1", "2026-10-05", 4, clave_operacion=clave))
+    assert sorted(r["repetida"] for r in resultados) == [False, True]
+    assert {r["referencia"] for r in resultados} == {resultados[0]["referencia"]}
+    with abrir_vto() as conn:
+        assert len(_todo_el_ledger(conn)) == antes + 2
+    assert [(f["lote"], f["saldo"]) for f in _lotes(abrir_vto, pid)] == [("L1", 4), (None, 6)]
+
+
+def test_en_postgres_dos_reintentos_simultaneos_de_la_baja_descuentan_una_sola_vez(abrir_vto):
+    if not core.is_postgres():
+        pytest.skip("sólo PostgreSQL toma el bloqueo por fila")
+    with abrir_vto() as conn:
+        pid = _producto(conn)
+        deposito = catalogo.get_default_deposito_id(conn)
+        _entrada(conn, pid, 10, lote="L1", vence=_dias(3))
+        antes = len(_todo_el_ledger(conn))
+    clave = _k()
+    resultados = _dos_reintentos_a_la_vez(
+        abrir_vto, lambda c: _baja(c, pid, deposito, "L1", _dias(3), 4, clave_operacion=clave))
+    assert sorted(r["repetida"] for r in resultados) == [False, True]
+    assert {r["saldo_restante"] for r in resultados} == {6}
+    with abrir_vto() as conn:
+        assert len(_todo_el_ledger(conn)) == antes + 1
+    assert [(f["lote"], f["saldo"]) for f in _lotes(abrir_vto, pid)] == [("L1", 6)]
+
+
+def test_en_postgres_el_reintento_espera_a_la_primera_que_no_termino_de_confirmar(abrir_vto):
+    """El caso deterministico de la carrera: la primera transaccion escribio y todavia no hizo commit; el reintento
+    tiene que esperar (no ve la marca hasta el commit) y, cuando llega, devolver lo escrito sin repetirlo."""
+    if not core.is_postgres():
+        pytest.skip("sólo PostgreSQL toma el bloqueo por fila")
+    with abrir_vto() as conn:
+        pid = _producto(conn)
+        deposito = catalogo.get_default_deposito_id(conn)
+        _entrada(conn, pid, 10)
+    clave = _k()
+    resultado: list = []
+    primera = core.get_connection()
+    try:
+        _asignar(primera, pid, deposito, "L1", "2026-10-05", 4, clave_operacion=clave)  # sin commit
+
+        def reintento():
+            c = core.get_connection()
+            try:
+                resultado.append(_asignar(c, pid, deposito, "L1", "2026-10-05", 4, clave_operacion=clave))
+                c.commit()
+            finally:
+                c.close()
+
+        hilo = threading.Thread(target=reintento)
+        hilo.start()
+        time.sleep(1.0)
+        assert hilo.is_alive() and not resultado, "el reintento no esperó a la primera"
+        primera.commit()
+        hilo.join(10)
+    finally:
+        primera.close()
+    assert [r["repetida"] for r in resultado] == [True]
+    assert [(f["lote"], f["saldo"]) for f in _lotes(abrir_vto, pid)] == [("L1", 4), (None, 6)]
 
 
 # ════════════════════════════════════════════ La recepción de compra llega al ledger
@@ -939,7 +1262,13 @@ def test_la_recepcion_de_compra_con_lote_y_vencimiento_llega_al_ledger_y_al_repo
 # ═══════════════════════════════════════════════════════════════ El router
 
 
+def _libre():
+    """Un gate que deja pasar: las pruebas que no miran la autorización igual tienen que declarar una."""
+
+
 def _app(abrir, **kw_escritura):
+    kw_escritura.setdefault("dependencias_marcar", [Depends(_libre)])
+    kw_escritura.setdefault("dependencias_movimientos", [Depends(_libre)])
     app = FastAPI()
     app.include_router(build_vencimientos_router(conexion=abrir))
     app.include_router(build_vencimientos_escritura_router(
@@ -1029,7 +1358,7 @@ def test_asignar_por_http(abrir_vto, monkeypatch):
     yogur, deposito = _sembrar_para_el_router(abrir_vto)
     c = _app(abrir_vto)
     cuerpo = {"producto_id": yogur, "deposito_id": deposito, "lote": "L9", "vence": "2026-11-03", "cantidad": 2.5,
-              "nota": "Conteo"}
+              "nota": "Conteo", "clave_operacion": _k()}
     r = c.post("/api/vencimientos/asignar", json=cuerpo)
     assert r.status_code == 200, r.text
     assert r.json()["saldo_sin_lote"] == 3.5 and r.json()["lote"] == "L9" and r.json()["cantidad"] == 2.5
@@ -1037,24 +1366,25 @@ def test_asignar_por_http(abrir_vto, monkeypatch):
         creadores = {f[0] for f in conn.execute("SELECT created_by FROM stock_movements WHERE note LIKE 'Conteo%'")}
     assert creadores == {USUARIO["id"]}
     # Sin saldo sin lote suficiente: 409 y el mensaje dice cuánto hay.
-    r = c.post("/api/vencimientos/asignar", json={**cuerpo, "cantidad": 99})
+    r = c.post("/api/vencimientos/asignar", json={**cuerpo, "clave_operacion": _k(), "cantidad": 99})
     assert r.status_code == 409 and "saldo sin lote es 3.5" in r.json()["detail"]
     invalidos = [{"lote": "  "}, {"vence": "mañana"}, {"cantidad": 0}, {"cantidad": -1}, {"cantidad": "x"},
                  {"deposito_id": 999}, {"lote": None}, {"vence": None}]
     for cambio in invalidos:
-        assert c.post("/api/vencimientos/asignar", json={**cuerpo, **cambio}).status_code == 422, cambio
-    assert c.post("/api/vencimientos/asignar", json={**cuerpo, "producto_id": 9999}).status_code == 404
+        assert c.post("/api/vencimientos/asignar", json={**cuerpo, "clave_operacion": _k(), **cambio}).status_code == 422, cambio
+    assert c.post("/api/vencimientos/asignar", json={**cuerpo, "clave_operacion": _k(), "producto_id": 9999}).status_code == 404
     with abrir_vto() as conn:
         sin_marca = _producto(conn, "Sin marca", vence=False)
         _entrada(conn, sin_marca, 5)
-    assert c.post("/api/vencimientos/asignar", json={**cuerpo, "producto_id": sin_marca}).status_code == 409
+    assert c.post("/api/vencimientos/asignar", json={**cuerpo, "clave_operacion": _k(), "producto_id": sin_marca}).status_code == 409
 
 
 def test_merma_por_http(abrir_vto, monkeypatch):
     _hoy_fijo(monkeypatch)
     yogur, deposito = _sembrar_para_el_router(abrir_vto)
     c = _app(abrir_vto)
-    cuerpo = {"producto_id": yogur, "deposito_id": deposito, "lote": "L0", "vence": _dias(-2), "cantidad": 3}
+    cuerpo = {"producto_id": yogur, "deposito_id": deposito, "lote": "L0", "vence": _dias(-2), "cantidad": 3,
+              "clave_operacion": _k()}
     r = c.post("/api/vencimientos/merma", json=cuerpo)
     assert r.status_code == 200, r.text
     assert r.json()["saldo_restante"] == 1
@@ -1062,13 +1392,13 @@ def test_merma_por_http(abrir_vto, monkeypatch):
         fila = conn.execute("SELECT movement_type, created_by, note FROM stock_movements ORDER BY id DESC LIMIT 1"
                             ).fetchone()
     assert (fila[0], fila[1]) == ("waste", USUARIO["id"]) and fila[2].startswith("Merma: Vencimiento")
-    r = c.post("/api/vencimientos/merma", json={**cuerpo, "cantidad": 2})
+    r = c.post("/api/vencimientos/merma", json={**cuerpo, "clave_operacion": _k(), "cantidad": 2})
     assert r.status_code == 409 and "tiene 1" in r.json()["detail"]
-    r = c.post("/api/vencimientos/merma", json={**cuerpo, "motivo": "Rotura", "cantidad": 1})
+    r = c.post("/api/vencimientos/merma", json={**cuerpo, "clave_operacion": _k(), "motivo": "Rotura", "cantidad": 1})
     assert r.status_code == 200
     for cambio in ({"cantidad": 0}, {"lote": None, "vence": None}, {"vence": "ayer"}, {"deposito_id": 999}):
-        assert c.post("/api/vencimientos/merma", json={**cuerpo, **cambio}).status_code == 422, cambio
-    assert c.post("/api/vencimientos/merma", json={**cuerpo, "producto_id": 9999}).status_code == 404
+        assert c.post("/api/vencimientos/merma", json={**cuerpo, "clave_operacion": _k(), **cambio}).status_code == 422, cambio
+    assert c.post("/api/vencimientos/merma", json={**cuerpo, "clave_operacion": _k(), "producto_id": 9999}).status_code == 404
 
 
 def test_un_error_de_negocio_no_deja_nada_escrito_por_http(abrir_vto):
@@ -1077,16 +1407,89 @@ def test_un_error_de_negocio_no_deja_nada_escrito_por_http(abrir_vto):
         antes = [tuple(f) for f in _todo_el_ledger(conn)]
     c = _app(abrir_vto)
     c.post("/api/vencimientos/asignar", json={"producto_id": yogur, "deposito_id": deposito, "lote": "X",
-                                              "vence": "2026-11-03", "cantidad": 999})
+                                              "vence": "2026-11-03", "cantidad": 999, "clave_operacion": _k()})
     c.post("/api/vencimientos/merma", json={"producto_id": yogur, "deposito_id": deposito, "lote": "L1",
-                                            "vence": _dias(5), "cantidad": 999})
+                                            "vence": _dias(5), "cantidad": 999, "clave_operacion": _k()})
     with abrir_vto() as conn:
         assert [tuple(f) for f in _todo_el_ledger(conn)] == antes
 
 
+def test_un_reintento_por_http_devuelve_lo_anterior_con_repetida_y_no_escribe(abrir_vto, monkeypatch):
+    _hoy_fijo(monkeypatch)
+    yogur, deposito = _sembrar_para_el_router(abrir_vto)
+    c = _app(abrir_vto)
+    clave = _k()
+    asignar = {"producto_id": yogur, "deposito_id": deposito, "lote": "L9", "vence": "2026-11-03", "cantidad": 2,
+               "clave_operacion": clave}
+    primera = c.post("/api/vencimientos/asignar", json=asignar)
+    with abrir_vto() as conn:
+        n = len(_todo_el_ledger(conn))
+    segunda = c.post("/api/vencimientos/asignar", json=asignar)
+    assert primera.status_code == segunda.status_code == 200
+    assert primera.json()["repetida"] is False and segunda.json() == {**primera.json(), "repetida": True}
+    # Los mismos datos con otra clave sí son otra operación; con la misma clave y otros datos, 409.
+    r = c.post("/api/vencimientos/asignar", json={**asignar, "cantidad": 3})
+    assert r.status_code == 409 and "otros parámetros" in r.json()["detail"]
+    with abrir_vto() as conn:
+        assert len(_todo_el_ledger(conn)) == n
+    assert c.post("/api/vencimientos/asignar", json={**asignar, "clave_operacion": _k()}).json()["repetida"] is False
+
+    merma = {"producto_id": yogur, "deposito_id": deposito, "lote": "L0", "vence": _dias(-2), "cantidad": 3,
+             "clave_operacion": _k()}
+    m1, m2 = c.post("/api/vencimientos/merma", json=merma), c.post("/api/vencimientos/merma", json=merma)
+    assert (m1.status_code, m2.status_code) == (200, 200) and m2.json() == {**m1.json(), "repetida": True}
+    assert m1.json()["saldo_restante"] == 1
+    assert c.post("/api/vencimientos/merma", json={**merma, "cantidad": 1}).status_code == 409
+    assert c.post("/api/vencimientos/asignar", json={**asignar, "clave_operacion": merma["clave_operacion"]}
+                  ).status_code == 409
+    with abrir_vto() as conn:
+        assert stock.get_stock_actual(conn, yogur, deposito) == 20 - 3
+
+
+def test_la_clave_de_operacion_es_obligatoria_en_los_cuerpos(abrir_vto):
+    yogur, deposito = _sembrar_para_el_router(abrir_vto)
+    c = _app(abrir_vto)
+    base_a = {"producto_id": yogur, "deposito_id": deposito, "lote": "L9", "vence": "2026-11-03", "cantidad": 1}
+    base_m = {"producto_id": yogur, "deposito_id": deposito, "lote": "L1", "vence": _dias(5), "cantidad": 1}
+    with abrir_vto() as conn:
+        antes = _sin_id(_todo_el_ledger(conn))
+    for ruta, base in (("asignar", base_a), ("merma", base_m)):
+        for clave in ({}, {"clave_operacion": None}, {"clave_operacion": ""}, {"clave_operacion": "   "},
+                      {"clave_operacion": "x" * 65}, {"clave_operacion": 7}, {"clave_operacion": "a[b"}):
+            r = c.post(f"/api/vencimientos/{ruta}", json={**base, **clave})
+            assert r.status_code == 422, (ruta, clave, r.text)
+    with abrir_vto() as conn:
+        assert _sin_id(_todo_el_ledger(conn)) == antes
+
+
+def test_la_factory_de_escritura_falla_al_construirse_sin_usuario_o_sin_autorizacion(abrir_vto):
+    libre = [Depends(_libre)]
+    ok = dict(conexion=abrir_vto, usuario_actual=lambda: USUARIO, dependencias_marcar=libre,
+              dependencias_movimientos=libre)
+    build_vencimientos_escritura_router(**ok)  # completa: se construye
+    build_vencimientos_escritura_router(**{**ok, "dependencias_marcar": tuple(libre)})
+
+    with pytest.raises(ValueError, match="usuario_actual"):
+        build_vencimientos_escritura_router(**{**ok, "usuario_actual": None})
+    sin_usuario = {k: v for k, v in ok.items() if k != "usuario_actual"}
+    with pytest.raises(ValueError, match="usuario_actual"):
+        build_vencimientos_escritura_router(**sin_usuario)
+    for nombre in ("dependencias_marcar", "dependencias_movimientos"):
+        for malo in (None, [], (), Depends(_libre), "gate"):
+            with pytest.raises(ValueError, match=nombre):
+                build_vencimientos_escritura_router(**{**ok, nombre: malo})
+        ausente = {k: v for k, v in ok.items() if k != nombre}
+        with pytest.raises(ValueError, match=nombre):
+            build_vencimientos_escritura_router(**ausente)
+    with pytest.raises(ValueError):
+        build_vencimientos_escritura_router(conexion=abrir_vto)  # como se montaba antes: ya no se puede
+
+
 def test_el_router_de_lectura_solo_lee_y_el_de_escritura_solo_escribe(abrir_vto):
     lectura = build_vencimientos_router(conexion=abrir_vto)
-    escritura = build_vencimientos_escritura_router(conexion=abrir_vto)
+    escritura = build_vencimientos_escritura_router(
+        conexion=abrir_vto, usuario_actual=lambda: USUARIO, dependencias_marcar=[Depends(_libre)],
+        dependencias_movimientos=[Depends(_libre)])
     assert {m for r in lectura.routes for m in r.methods} == {"GET"}
     assert {m for r in escritura.routes for m in r.methods} == {"PUT", "POST"}
     rutas = {(m, r.path) for router in (lectura, escritura) for r in router.routes for m in r.methods}
@@ -1114,7 +1517,8 @@ def test_las_escrituras_se_pueden_guardar_por_dependencia_distinta_a_las_lectura
         dependencies=[rol("encargado", "deposito", "cajero")],
     )
     c = TestClient(app)
-    asignar = {"producto_id": yogur, "deposito_id": deposito, "lote": "L9", "vence": "2026-11-03", "cantidad": 1}
+    asignar = {"producto_id": yogur, "deposito_id": deposito, "lote": "L9", "vence": "2026-11-03", "cantidad": 1,
+               "clave_operacion": _k()}
 
     def ir(rol_, metodo, ruta, **kw):
         return c.request(metodo, ruta, headers={"x-rol": rol_}, **kw).status_code
@@ -1125,7 +1529,7 @@ def test_las_escrituras_se_pueden_guardar_por_dependencia_distinta_a_las_lectura
     assert ir("cajero", "PUT", f"/api/vencimientos/productos/{yogur}", json={"vence": True}) == 403
     assert ir("deposito", "POST", "/api/vencimientos/asignar", json=asignar) == 200
     assert ir("deposito", "POST", "/api/vencimientos/merma",
-              json={**asignar, "lote": "L9", "cantidad": 1}) == 200
+              json={**asignar, "clave_operacion": _k()}) == 200
     assert ir("deposito", "PUT", f"/api/vencimientos/productos/{yogur}", json={"vence": True}) == 403  # marcar: encargado
     assert ir("encargado", "PUT", f"/api/vencimientos/productos/{yogur}", json={"vence": True}) == 200
     assert ir("", "GET", "/api/vencimientos") == 403

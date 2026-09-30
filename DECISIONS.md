@@ -539,7 +539,11 @@ asignar un vencimiento al stock que no lo tiene y dar de baja un lote. **No toca
   `lotes_de` (existencias por lote, incluido el bucket sin lote y los saldos negativos), `proximos_a_vencer` (por lote
   con saldo > 0 de los productos marcados y activos: producto, código, depósito, sucursal, lote, vencimiento, días para
   vencer —negativo = vencido—, saldo y estado `vencido` | `por_vencer`, por vencimiento; más un resumen y la lista
-  `sin_lote`), `asignar_vencimiento_a_saldo` y `dar_de_baja_lote`.
+  `sin_lote`), `asignar_vencimiento_a_saldo` y `dar_de_baja_lote`. **`sin_lote` se clasifica por depósito y variante,
+  nunca por producto**: un −5 sin lote en un depósito y un +5 en otro no se cancelan (el negativo son salidas que no
+  bajaron ningún lote de ese depósito, y sus lotes están sobreestimados); cada saldo ≠ 0 sale como una fila
+  (`deposito_id`, `variante_id`, `saldo`, `situacion`) y el resumen los cuenta (`productos_sin_lote`,
+  `productos_con_salidas_sin_lote`, `saldos_sin_fecha`, `saldos_con_salidas_sin_lote`).
 - **Asignar un vencimiento** al saldo sin lote es un **par aditivo** de ajustes: una fila negativa sin lote y una positiva
   con lote y vencimiento, con la misma referencia (la `nota` más un identificador `[asignación xxxxxxxx]` que las une),
   la misma fecha, depósito y usuario; **nunca un `UPDATE`** de una fila ya escrita. Valida que el producto esté marcado y
@@ -550,10 +554,22 @@ asignar un vencimiento al stock que no lo tiene y dar de baja un lote. **No toca
   guarda el tipo en `reason_code` (`merma`) y `vencimiento` no es un tipo de `TIPOS`; agregarlo cambiaría la lista que
   muestran las pantallas. El motivo va en la referencia (`Merma: Vencimiento — lote L1, vence ...`), que es la convención
   que ya usa la merma de Restolibra (`Merma: <motivo>`).
+- **Idempotencia: `clave_operacion` obligatoria** en `asignar_vencimiento_a_saldo`, `dar_de_baja_lote` y en los cuerpos
+  de `POST /asignar` y `POST /merma` (un texto único por intento del usuario —un UUID que el cliente genera y reenvía
+  igual al reintentar—, no vacío, de hasta 64 caracteres, sin corchetes). Sin ella un reintento tras un commit con la
+  respuesta perdida duplicaría el par o descontaría dos veces. El ledger no tiene columna: la clave viaja **al final de la
+  nota** de cada movimiento como `[op:<clave>]` (el mismo recurso que `[asignación xxxxxxxx]`), en la **misma transacción**,
+  y se busca con el producto ya tomado. Un reintento con la misma clave y los mismos parámetros **no escribe nada** y
+  devuelve el resultado de la primera vez (con el saldo de entonces) más `repetida: true` (200); con la misma clave y otros
+  parámetros u otra operación, 409 (`ClaveDeOperacionReusada`). Una operación que falla no gasta la clave. Sólo cuenta la
+  marca al final de la nota, así que un texto libre no la puede imitar. Costo: la búsqueda recorre `note` de todo el
+  ledger (sin índice): son operaciones manuales y poco frecuentes. La clave se compara exacta (mayúsculas incluidas, en
+  Python: `LIKE` sólo preselecciona). Límites: no hay expiración de claves, y la clave es global, no por producto.
 - **Concurrencia de las escrituras.** `asignar` y `dar_de_baja` **toman el producto** antes de leer el saldo, con un
   `UPDATE catalog_items SET tracks_expiry = tracks_expiry WHERE id = ?`: en PostgreSQL bloquea la fila hasta el commit, así
-  que dos escrituras simultáneas sobre el mismo producto se serializan y no gastan dos veces el mismo saldo (hay un test
-  con dos conexiones); en SQLite toda escritura ya se serializa.
+  que dos escrituras simultáneas sobre el mismo producto se serializan y no gastan dos veces el mismo saldo, y **dos
+  reintentos simultáneos con la misma clave escriben una sola vez** (hay tests con dos conexiones en PostgreSQL); en SQLite
+  toda escritura ya se serializa.
 - **«Hoy» es la fecha de Argentina** (UTC-3 fijo, como `erp.listas_precio`; no depende de la base de zonas horarias de la
   imagen), no la del servidor: un vencimiento no puede correrse de día porque el contenedor esté en UTC. La ventana es
   cerrada: entra lo que vence hasta `hoy + dias` inclusive; **vencido es `vence < hoy`** (lo que vence hoy es `por_vencer`
@@ -562,8 +578,12 @@ asignar un vencimiento al stock que no lo tiene y dar de baja un lote. **No toca
   `build_vencimientos_router` (`GET /api/vencimientos`, `/export` CSV y `/productos/{id}/lotes`) y
   `build_vencimientos_escritura_router` (`PUT /productos/{id}`, `POST /asignar`, `POST /merma`), este último con gates
   por operación (`dependencias_marcar`, `dependencias_movimientos`) además de los que el producto ponga al montarlo.
-  Errores: parámetro o cuerpo inválido y sucursal o depósito inexistentes, 422; producto inexistente, 404; regla de negocio
-  (saldo insuficiente, producto sin marcar, servicio), 409; base sin la revisión, 503. Quién puede qué es del producto:
+  🔴 **La factory de escritura FALLA al construirse (`ValueError`) si falta `usuario_actual` o si alguna de las dos
+  listas de dependencias está vacía o ausente**: no hay sustituto (`{}`) ni forma de exponer escrituras del ledger sin
+  autorización y sin usuario en `created_by`. Firma: `build_vencimientos_escritura_router(*, conexion=None,
+  usuario_actual, dependencias_marcar, dependencias_movimientos, prefix="/api/vencimientos")`; las dos listas son de
+  `Depends(...)` y no pueden ser vacías. Errores: parámetro o cuerpo inválido y sucursal o depósito inexistentes, 422; producto inexistente, 404; regla de negocio
+  (saldo insuficiente, producto sin marcar, servicio, `clave_operacion` ya usada con otros datos), 409; base sin la revisión, 503. Quién puede qué es del producto:
   la propuesta es que lea encargado y depósito, marque el encargado, y asignen y den de baja encargado y depósito.
 
 **Defaults de producto decididos (2026-09-30).** Los usa A-4; A-1 sólo usa el último.
@@ -576,8 +596,8 @@ asignar un vencimiento al stock que no lo tiene y dar de baja un lote. **No toca
 la entrada manual de `POST /api/stock/{pid}/ajuste`: todos siguen escribiendo movimientos **sin lote**. Es A-4 (FEFO), y
 es el paso más delicado. 🔴 **Consecuencia que hay que tener presente:** en un producto marcado, hasta A-4, lo que sale
 resta del bucket «sin lote» (que queda negativo) y **no** del lote del que salió la mercadería, así que el saldo de los
-lotes está **sobreestimado**. El reporte no lo esconde: `sin_lote` lista los productos con saldo sin lote negativo
-(`situacion='salidas_sin_lote'`), y `lotes_de` muestra el negativo. Lo mismo `ajustar_stock`: lleva el stock **total** de un
+lotes está **sobreestimado**. El reporte no lo esconde: `sin_lote` lista, por depósito y variante, los saldos sin lote
+negativos (`situacion='salidas_sin_lote'`, sin compensarlos con los positivos de otro depósito), y `lotes_de` muestra el negativo. Lo mismo `ajustar_stock`: lleva el stock **total** de un
 producto al valor pedido y su fila va sin lote, así que en un producto con lotes su efecto por lote es ambiguo hasta A-4.
 Mientras tanto, la forma segura de usarlo es marcar el producto, asignar vencimiento a lo que hay y dar de baja lo que vence.
 
@@ -598,6 +618,6 @@ pantalla, con lo que decida el producto); y exponer la marca «vence» en el cat
 
 **Consecuencias.** Un producto la monta con
 `app.include_router(build_vencimientos_router(conexion=...), dependencies=...)` y
-`build_vencimientos_escritura_router(conexion=..., usuario_actual=..., dependencias_marcar=..., dependencias_movimientos=...)`,
-después de correr `libracommerce-migrar upgrade`. Un producto que no los monte, o que no marque ninguno, no ve
+`build_vencimientos_escritura_router(conexion=..., usuario_actual=..., dependencias_marcar=[Depends(...)],
+dependencias_movimientos=[Depends(...)])` (las tres últimas obligatorias), después de correr `libracommerce-migrar upgrade`. Un producto que no los monte, o que no marque ninguno, no ve
 ninguna diferencia.

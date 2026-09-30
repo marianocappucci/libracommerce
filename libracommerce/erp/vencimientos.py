@@ -54,6 +54,9 @@ MAX_DIAS_AVISO = 365
 
 ESTADOS = ("vencido", "por_vencer")
 
+#: Largo máximo de la `clave_operacion` (un UUID en texto son 36).
+MAX_LARGO_CLAVE = 64
+
 #: Decimales con que se limpia el ruido de `float` de una suma (mismo criterio que `erp.reposicion`).
 _ESCALA_RUIDO = 10
 _CERO = Decimal("0")
@@ -73,6 +76,10 @@ class ReglaDeNegocio(VencimientosError):
 
 class SaldoInsuficiente(ReglaDeNegocio):
     """No hay saldo suficiente en el bucket del que se quiere sacar."""
+
+
+class ClaveDeOperacionReusada(ReglaDeNegocio):
+    """La `clave_operacion` ya se usó con otros parámetros (u otra operación): el router lo traduce a 409."""
 
 
 class SinRevision(VencimientosError):
@@ -314,14 +321,16 @@ def proximos_a_vencer(conn, *, dias: int = DIAS_AVISO, sucursal_id: int | None =
     `variante_id`, `variante`, `lote`, `vence`, `dias_para_vencer` (negativo = vencido), `saldo` y `estado`
     (`vencido` si `vence < hoy`, si no `por_vencer`; un producto que vence hoy es `por_vencer`, con 0 días).
 
-    `sin_lote`: los productos marcados cuyo saldo **sin lote** (sin código ni fecha) es ≠ 0 en lo que se mira, porque
-    ese stock no tiene fecha y el reporte no lo puede avisar. `situacion='sin_fecha'` si el saldo es positivo (hay que
+    `sin_lote`: los saldos **sin lote** (sin código ni fecha) ≠ 0 de los productos marcados, **uno por producto,
+    depósito y variante** (nunca sumados entre depósitos: un −5 en uno y un +5 en otro no se cancelan), porque ese
+    stock no tiene fecha y el reporte no lo puede avisar. `situacion='sin_fecha'` si el saldo es positivo (hay que
     asignarle vencimiento); `situacion='salidas_sin_lote'` si es negativo: 🔴 son salidas (ventas, ajustes...) que hasta
     A-4 no bajan ningún lote, así que **los saldos de sus lotes están sobreestimados** (ver el docstring del módulo).
 
     `resumen`: `lotes_por_vencer`, `lotes_vencidos`, `unidades_por_vencer`, `unidades_vencidas` (suma de cantidades,
     cada una en la unidad de su producto), `productos` (los distintos con lotes en la lista), `productos_sin_lote` y
-    `productos_con_salidas_sin_lote`. No incluye lotes sin vencimiento (no hay qué avisar).
+    `productos_con_salidas_sin_lote` (productos distintos) y `saldos_sin_fecha` y `saldos_con_salidas_sin_lote` (saldos por
+    depósito y variante). No incluye lotes sin vencimiento (no hay qué avisar).
 
     `hoy` es para las pruebas: el default es la fecha de Argentina. `ValueError` con `dias` fuera de 1..365 o con una
     sucursal o un depósito que no existen. `SinRevision` sin la revisión `0002`. No escribe."""
@@ -335,12 +344,21 @@ def proximos_a_vencer(conn, *, dias: int = DIAS_AVISO, sucursal_id: int | None =
     variantes = _nombres_de_variantes(conn)
 
     lotes: list[dict] = []
-    sin_lote: dict[int, Decimal] = {}
+    filas_sin_lote: list[dict] = []
     for (item, dep, variante, lote, vence), saldo in saldos.items():
         if item not in productos:
             continue
         if lote is None and vence is None:
-            sin_lote[item] = sin_lote.get(item, _CERO) + saldo
+            # Cada bucket sin lote se clasifica POR DEPÓSITO Y VARIANTE, sin sumar antes: −5 en un depósito y +5 en
+            # otro no se cancelan (el negativo son salidas que no bajaron ningún lote de ese depósito).
+            d, p = depositos[dep], productos[item]
+            filas_sin_lote.append({
+                "producto_id": item, "codigo": p["codigo"], "nombre": p["nombre"], "unidad": p["unidad"],
+                "categoria": p["categoria"], "deposito_id": dep, "deposito": d["nombre"],
+                "deposito_activo": d["activo"], "sucursal_id": d["sucursal_id"], "sucursal": d["sucursal"],
+                "variante_id": variante, "variante": variantes.get(variante) if variante is not None else None,
+                "saldo": _num(saldo), "situacion": "sin_fecha" if saldo > 0 else "salidas_sin_lote",
+            })
             continue
         if vence is None or saldo <= 0:
             continue
@@ -359,13 +377,8 @@ def proximos_a_vencer(conn, *, dias: int = DIAS_AVISO, sucursal_id: int | None =
     lotes.sort(key=lambda r: (r["vence"], r["nombre"].casefold(), r["deposito_id"], r["lote"] or "",
                               r["producto_id"], r["variante_id"] or 0))
 
-    filas_sin_lote = [
-        {"producto_id": item, "codigo": productos[item]["codigo"], "nombre": productos[item]["nombre"],
-         "unidad": productos[item]["unidad"], "categoria": productos[item]["categoria"], "saldo": _num(saldo),
-         "situacion": "sin_fecha" if saldo > 0 else "salidas_sin_lote"}
-        for item, saldo in sin_lote.items() if item in productos and saldo != 0
-    ]
-    filas_sin_lote.sort(key=lambda r: (r["situacion"] != "salidas_sin_lote", r["nombre"].casefold(), r["producto_id"]))
+    filas_sin_lote.sort(key=lambda r: (r["situacion"] != "salidas_sin_lote", r["nombre"].casefold(), r["producto_id"],
+                                       r["deposito_id"], r["variante_id"] or 0))
 
     vencidos = [r for r in lotes if r["estado"] == "vencido"]
     por_vencer = [r for r in lotes if r["estado"] == "por_vencer"]
@@ -374,8 +387,13 @@ def proximos_a_vencer(conn, *, dias: int = DIAS_AVISO, sucursal_id: int | None =
         "unidades_por_vencer": _num(sum((_dec(r["saldo"]) for r in por_vencer), _CERO)),
         "unidades_vencidas": _num(sum((_dec(r["saldo"]) for r in vencidos), _CERO)),
         "productos": len({r["producto_id"] for r in lotes}),
-        "productos_sin_lote": sum(1 for r in filas_sin_lote if r["situacion"] == "sin_fecha"),
-        "productos_con_salidas_sin_lote": sum(1 for r in filas_sin_lote if r["situacion"] == "salidas_sin_lote"),
+        # Productos distintos con al menos un saldo sin lote de cada clase (un producto puede estar en las dos), y
+        # cuántos saldos (depósito × variante) hay de cada clase.
+        "productos_sin_lote": len({r["producto_id"] for r in filas_sin_lote if r["situacion"] == "sin_fecha"}),
+        "productos_con_salidas_sin_lote": len({r["producto_id"] for r in filas_sin_lote
+                                               if r["situacion"] == "salidas_sin_lote"}),
+        "saldos_sin_fecha": sum(1 for r in filas_sin_lote if r["situacion"] == "sin_fecha"),
+        "saldos_con_salidas_sin_lote": sum(1 for r in filas_sin_lote if r["situacion"] == "salidas_sin_lote"),
     }
     return {"hoy": hoy.isoformat(), "dias": dias, "hasta": hasta.isoformat(), "resumen": resumen,
             "lotes": lotes, "sin_lote": filas_sin_lote}
@@ -395,11 +413,63 @@ def _preparar_escritura(conn, item_id: int, deposito_id: int) -> None:
 
 
 def _saldo_del_bucket(conn, item_id: int, deposito_id: int, variante_id: int | None, lote: str | None,
-                      vence: str | None) -> Decimal:
-    depositos = {deposito_id: {}}
-    saldos = _saldos(conn, "sm.item_id = ? AND sm.location_id = ?", [item_id, deposito_id], depositos)
+                      vence: str | None, hasta_id: int | None = None) -> Decimal:
+    """El saldo de un bucket; con `hasta_id`, el que tenía justo después de escribir el movimiento con ese `id`."""
+    sql, params = "sm.item_id = ? AND sm.location_id = ?", [item_id, deposito_id]
+    if hasta_id is not None:
+        sql, params = sql + " AND sm.id <= ?", params + [hasta_id]
+    saldos = _saldos(conn, sql, params, {deposito_id: {}})
     return sum((s for (_, _, v, lo, ve), s in saldos.items() if v == variante_id and lo == lote and ve == vence),
                _CERO)
+
+
+# ── Idempotencia de las escrituras ────────────────────────────────────────
+#
+# Un reintento tras un commit con la respuesta perdida no puede duplicar el par ni descontar dos veces. El ledger no
+# tiene columna para la clave, así que viaja **al final de la nota** de cada movimiento como `[op:<clave>]` (el mismo
+# recurso que `[asignación xxxxxxxx]`) y se escribe en la MISMA transacción que los movimientos. Se busca por ella con
+# el producto ya tomado (`_preparar_escritura`): dos reintentos simultáneos se serializan y el segundo ve la marca.
+# Sólo cuenta si está al final de la nota, así que un texto libre (`nota`, `motivo`) no la puede imitar. La búsqueda
+# recorre `note` de todo el ledger (no hay índice por ahí): son operaciones manuales y poco frecuentes.
+
+
+def _normalizar_clave(clave) -> str:
+    """La `clave_operacion` recortada: un texto imprimible, no vacío, de hasta `MAX_LARGO_CLAVE` caracteres y sin
+    corchetes (delimitan la marca). `ValueError` si no."""
+    if not isinstance(clave, str):
+        raise ValueError(f"clave_operacion tiene que ser un texto (p. ej. un UUID): {clave!r}")
+    clave = clave.strip()
+    if not clave:
+        raise ValueError("clave_operacion no puede estar vacía: es obligatoria para poder reintentar sin duplicar")
+    if len(clave) > MAX_LARGO_CLAVE:
+        raise ValueError(f"clave_operacion no puede pasar de {MAX_LARGO_CLAVE} caracteres")
+    if "[" in clave or "]" in clave or not clave.isprintable():
+        raise ValueError("clave_operacion no puede tener corchetes ni caracteres no imprimibles")
+    return clave
+
+
+def _marca_de_operacion(clave: str) -> str:
+    return f"[op:{clave}]"
+
+
+def _movimientos_de_la_operacion(conn, clave: str) -> list:
+    """Los movimientos que ya escribió una operación con esta clave, en orden de escritura (`[]` si es nueva)."""
+    marca = _marca_de_operacion(clave)
+    patron = "%" + marca.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    filas = conn.execute(
+        "SELECT id, item_id, location_id, variant_id, movement_type, quantity_delta, lot_code, expires_at, note "
+        "FROM stock_movements WHERE note LIKE ? ESCAPE '\\' ORDER BY id",
+        (patron,),
+    ).fetchall()
+    return [f for f in filas if str(f["note"]).endswith(marca)]  # LIKE no distingue mayúsculas en SQLite
+
+
+def _misma_operacion(previa: dict, pedida: dict) -> None:
+    if previa != pedida:
+        raise ClaveDeOperacionReusada(
+            "la clave_operacion ya se usó con otros parámetros u otra operación: para una operación distinta hace "
+            "falta otra clave"
+        )
 
 
 def _texto_del_saldo(valor: Decimal) -> str:
@@ -408,8 +478,8 @@ def _texto_del_saldo(valor: Decimal) -> str:
 
 
 def asignar_vencimiento_a_saldo(conn, item_id: int, deposito_id: int, lot_code: str, expires_at, cantidad, *,
-                                variante_id: int | None = None, usuario_id: int | None = None, nota: str = "",
-                                fecha: str = "") -> dict:
+                                clave_operacion: str, variante_id: int | None = None,
+                                usuario_id: int | None = None, nota: str = "", fecha: str = "") -> dict:
     """Le pone lote y vencimiento a `cantidad` unidades del saldo **sin lote** de un producto marcado en un depósito
     (el stock que había antes de usar lotes, o el que entró por una vía que no los pide).
 
@@ -418,15 +488,27 @@ def asignar_vencimiento_a_saldo(conn, item_id: int, deposito_id: int, lot_code: 
     el vencimiento**. Nunca modifica una fila ya escrita y el stock total del producto en ese depósito no cambia.
     Si `fecha` no viene es hoy en Argentina.
 
-    `ValueError` con datos inválidos (lote vacío, fecha ilegible, cantidad ≤ 0, depósito inexistente);
+    **Idempotente por `clave_operacion`** (obligatoria: un texto no vacío de hasta 64 caracteres, sin corchetes; p. ej.
+    un UUID que el cliente genera una vez por intento del usuario). Viaja al final de la nota de los dos movimientos
+    (`[op:<clave>]`), en la misma transacción, y se busca con el producto ya tomado. Un **reintento con la misma clave y
+    los mismos parámetros** no escribe nada y devuelve el resultado de la primera vez con `repetida: True`; con la misma
+    clave y **otros** parámetros (u otra operación), `ClaveDeOperacionReusada` (409).
+
+    `ValueError` con datos inválidos (lote vacío, fecha ilegible, cantidad ≤ 0, clave inválida, depósito inexistente);
     `ProductoNoEncontrado`; `ReglaDeNegocio` si el producto no está marcado con `marcar_vence`; `SaldoInsuficiente` si
     el saldo sin lote de ese depósito y variante es menor a `cantidad`. Todo se valida antes de escribir la primera
-    fila. Devuelve `{producto_id, deposito_id, variante_id, lote, vence, cantidad, referencia, saldo_sin_lote}` (el
-    saldo que queda sin lote)."""
+    fila. Devuelve `{producto_id, deposito_id, variante_id, lote, vence, cantidad, referencia, saldo_sin_lote,
+    repetida}` (`saldo_sin_lote` es el que quedó sin lote al terminar la operación)."""
+    clave = _normalizar_clave(clave_operacion)
     lote = normalizar_lote(lot_code)
     vence = normalizar_vencimiento(expires_at)
     cant = _cantidad_positiva(cantidad)
     _preparar_escritura(conn, item_id, deposito_id)
+    previas = _movimientos_de_la_operacion(conn, clave)
+    if previas:
+        return _asignacion_repetida(conn, clave, previas, {
+            "tipo": "asignar", "producto_id": item_id, "deposito_id": deposito_id, "variante_id": variante_id,
+            "lote": lote, "vence": vence, "cantidad": _saldo(cant)})
     producto = _fila_de_producto(conn, item_id)
     if not producto["tracks_expiry"]:
         raise ReglaDeNegocio(f"el producto {item_id} no está marcado como perecedero: marcalo antes de asignar un "
@@ -440,29 +522,66 @@ def asignar_vencimiento_a_saldo(conn, item_id: int, deposito_id: int, lot_code: 
     marca = f"[asignación {uuid.uuid4().hex[:8]}]"
     referencia = f"{nota.strip()} {marca}" if nota.strip() else f"Asignación de vencimiento {marca}"
     detalle = f"{referencia}: lote {lote}, vence {vence}"
+    op = _marca_de_operacion(clave)
     destino = {"usuario_id": usuario_id, "fecha": fecha, "deposito_id": deposito_id, "variant_id": variante_id}
-    add_movimiento_stock(conn, item_id, "ajuste", -float(cant), f"{detalle} (sale de sin lote)", **destino)
-    add_movimiento_stock(conn, item_id, "ajuste", float(cant), f"{detalle} (entra al lote)",
+    add_movimiento_stock(conn, item_id, "ajuste", -float(cant), f"{detalle} {_SALE_DE_SIN_LOTE} {op}", **destino)
+    add_movimiento_stock(conn, item_id, "ajuste", float(cant), f"{detalle} (entra al lote) {op}",
                          lot_code=lote, expires_at=vence, **destino)
     return {"producto_id": item_id, "deposito_id": deposito_id, "variante_id": variante_id, "lote": lote,
             "vence": vence, "cantidad": _num(cant), "referencia": referencia,
-            "saldo_sin_lote": _num(sin_lote - cant)}
+            "saldo_sin_lote": _num(sin_lote - cant), "repetida": False}
+
+
+_SALE_DE_SIN_LOTE = "(sale de sin lote)"
+
+
+def _asignacion_repetida(conn, clave: str, filas: list, pedida: dict) -> dict:
+    """El resultado de una asignación que ya se escribió con esta clave, o `ClaveDeOperacionReusada` si lo pedido ahora
+    no es lo mismo. Sin escribir nada."""
+    previa = {"tipo": "otra"}
+    if len(filas) == 2 and all(f["movement_type"] == "adjustment" for f in filas):
+        neg, pos = filas  # en orden de escritura: primero la que sale de sin lote
+        cantidad = _saldo(_dec(pos["quantity_delta"]))
+        es_par = (
+            cantidad > 0 and _saldo(_dec(neg["quantity_delta"])) == -cantidad
+            and neg["item_id"] == pos["item_id"] and neg["location_id"] == pos["location_id"]
+            and neg["variant_id"] == pos["variant_id"]
+            and _lote_de_fila(neg["lot_code"]) is None and _vence_de_fila(neg["expires_at"]) is None
+        )
+        if es_par:
+            previa = {"tipo": "asignar", "producto_id": pos["item_id"], "deposito_id": pos["location_id"],
+                      "variante_id": pos["variant_id"], "lote": _lote_de_fila(pos["lot_code"]),
+                      "vence": _vence_de_fila(pos["expires_at"]), "cantidad": cantidad}
+    _misma_operacion(previa, pedida)
+    nota = filas[0]["note"]
+    sufijo = f": lote {previa['lote']}, vence {previa['vence']} {_SALE_DE_SIN_LOTE} {_marca_de_operacion(clave)}"
+    saldo = _saldo_del_bucket(conn, previa["producto_id"], previa["deposito_id"], previa["variante_id"], None, None,
+                              hasta_id=filas[0]["id"])
+    return {"producto_id": previa["producto_id"], "deposito_id": previa["deposito_id"],
+            "variante_id": previa["variante_id"], "lote": previa["lote"], "vence": previa["vence"],
+            "cantidad": _num(previa["cantidad"]), "referencia": nota[:-len(sufijo)] if nota.endswith(sufijo) else nota,
+            "saldo_sin_lote": _num(saldo), "repetida": True}
 
 
 def dar_de_baja_lote(conn, item_id: int, deposito_id: int, lot_code: str | None, expires_at, cantidad, *,
-                     variante_id: int | None = None, motivo: str = "Vencimiento", usuario_id: int | None = None,
-                     nota: str = "", fecha: str = "") -> dict:
+                     clave_operacion: str, variante_id: int | None = None, motivo: str = "Vencimiento",
+                     usuario_id: int | None = None, nota: str = "", fecha: str = "") -> dict:
     """La merma de `cantidad` unidades de **un lote concreto** de un depósito: un movimiento `merma` negativo con el
     lote y el vencimiento del bucket, sin dejar su saldo negativo. La referencia sigue la convención de las mermas
     del motor: `Merma: <motivo>`, más el lote y la `nota`. **No hay un `reason_code` propio** `vencimiento`: el
     ledger guarda el tipo (`merma`, `movement_type='waste'`) y el motivo va en la referencia, como en el resto de
     las mermas (agregar un tipo cambiaría `erp.stock.TIPOS`, que listan las pantallas).
 
+    **Idempotente por `clave_operacion`**, igual que `asignar_vencimiento_a_saldo` (obligatoria; `[op:<clave>]` al
+    final de la nota del movimiento): un reintento con la misma clave y los mismos parámetros no descuenta otra vez y
+    devuelve el resultado de la primera con `repetida: True`; con otros parámetros, `ClaveDeOperacionReusada` (409).
+
     `lot_code` y `expires_at` son los del bucket tal como los devuelve `lotes_de` (al menos uno tiene que venir: la
     merma del stock sin lote es un ajuste común). `ValueError` con datos inválidos o un depósito inexistente;
     `ProductoNoEncontrado`; `SaldoInsuficiente` si el lote no tiene `cantidad` en ese depósito y variante (un lote
     que no existe tiene saldo 0). No exige que el producto esté marcado. Devuelve `{producto_id, deposito_id,
-    variante_id, lote, vence, cantidad, saldo_restante}`."""
+    variante_id, lote, vence, cantidad, saldo_restante, repetida}`."""
+    clave = _normalizar_clave(clave_operacion)
     lote = normalizar_lote(lot_code) if lot_code is not None else None
     vence = normalizar_vencimiento(expires_at) if expires_at is not None else None
     if lote is None and vence is None:
@@ -470,6 +589,11 @@ def dar_de_baja_lote(conn, item_id: int, deposito_id: int, lot_code: str | None,
     cant = _cantidad_positiva(cantidad)
     motivo = (motivo or "").strip() or "Vencimiento"
     _preparar_escritura(conn, item_id, deposito_id)
+    previas = _movimientos_de_la_operacion(conn, clave)
+    if previas:
+        return _baja_repetida(conn, previas, {
+            "tipo": "merma", "producto_id": item_id, "deposito_id": deposito_id, "variante_id": variante_id,
+            "lote": lote, "vence": vence, "cantidad": _saldo(cant)})
     _fila_de_producto(conn, item_id)
     saldo = _saldo_del_bucket(conn, item_id, deposito_id, variante_id, lote, vence)
     if saldo < cant:
@@ -480,8 +604,27 @@ def dar_de_baja_lote(conn, item_id: int, deposito_id: int, lot_code: str | None,
     referencia = f"Merma: {motivo} — lote {lote or '(sin código)'}, vence {vence or 'sin fecha'}"
     if nota.strip():
         referencia += f" — {nota.strip()}"
+    referencia = f"{referencia} {_marca_de_operacion(clave)}"
     add_movimiento_stock(conn, item_id, "merma", -float(cant), referencia, usuario_id=usuario_id,
                          fecha=fecha or hoy_argentina().isoformat(), deposito_id=deposito_id,
                          variant_id=variante_id, lot_code=lote, expires_at=vence)
     return {"producto_id": item_id, "deposito_id": deposito_id, "variante_id": variante_id, "lote": lote,
-            "vence": vence, "cantidad": _num(cant), "saldo_restante": _num(saldo - cant)}
+            "vence": vence, "cantidad": _num(cant), "saldo_restante": _num(saldo - cant),
+            "repetida": False}
+
+
+def _baja_repetida(conn, filas: list, pedida: dict) -> dict:
+    """El resultado de una baja que ya se escribió con esta clave, o `ClaveDeOperacionReusada` si lo pedido ahora no
+    es lo mismo. Sin escribir nada."""
+    previa = {"tipo": "otra"}
+    if len(filas) == 1 and filas[0]["movement_type"] == "waste" and _dec(filas[0]["quantity_delta"]) < 0:
+        f = filas[0]
+        previa = {"tipo": "merma", "producto_id": f["item_id"], "deposito_id": f["location_id"],
+                  "variante_id": f["variant_id"], "lote": _lote_de_fila(f["lot_code"]),
+                  "vence": _vence_de_fila(f["expires_at"]), "cantidad": _saldo(-_dec(f["quantity_delta"]))}
+    _misma_operacion(previa, pedida)
+    saldo = _saldo_del_bucket(conn, previa["producto_id"], previa["deposito_id"], previa["variante_id"],
+                              previa["lote"], previa["vence"], hasta_id=filas[0]["id"])
+    return {"producto_id": previa["producto_id"], "deposito_id": previa["deposito_id"],
+            "variante_id": previa["variante_id"], "lote": previa["lote"], "vence": previa["vence"],
+            "cantidad": _num(previa["cantidad"]), "saldo_restante": _num(saldo), "repetida": True}

@@ -71,7 +71,9 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
   `erp.reposicion`; ADR-017) y
   `vencimientos_router` (`build_vencimientos_router`, de lectura, y `build_vencimientos_escritura_router`, con
   gates por operación: próximos a vencer, lotes de un producto, marcar «vence», asignar vencimiento a saldo sin
-  lote y dar de baja un lote, sobre `erp.vencimientos`; ADR-018).
+  lote y dar de baja un lote, sobre `erp.vencimientos`; ADR-018). La de escritura **falla al construirse** sin
+  `usuario_actual` o sin listas no vacías `dependencias_marcar` y `dependencias_movimientos`, y `asignar` y `merma`
+  exigen `clave_operacion` (idempotencia de los reintentos).
 - **`adapters/`** e **`integrations/`** — puentes hacia afuera: `adapters/
   contalibra` lee datos del schema legado de Contalibra; `integrations/libraedge`
   traduce una venta confirmada a una operación de sincronización del nodo edge
