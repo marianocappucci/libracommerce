@@ -52,7 +52,9 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
   `sales`/`sale_items`/`catalog_items`: la implementación del `PuertoDeReportes` de
   LibraCore para un producto que vende con este motor) y `actividad` (las partes
   de ventas y stock de la línea de tiempo de `libracore.db.logs`) y `vencimientos` (lotes y
-  vencimientos como dimensión del ledger, opt-in por producto, sin tabla `lots`; ADR-018), todos con la conexión
+  vencimientos como dimensión del ledger, opt-in por producto, sin tabla `lots`; ADR-018; `erp/lotes.py` es su piso, sin
+  depender de `stock`: saldos por bucket, FEFO de la venta para los productos marcados, lote de origen en la anulación y
+  los avisos de la venta), todos con la conexión
   como primer parámetro —salvo `crear_venta_directa`, que recibe la fábrica porque el
   reintento por número repetido necesita una transacción nueva—; y `erp.hooks`, los
   puntos de extensión tipados que un producto engancha (`al_confirmar_venta` /

@@ -57,6 +57,7 @@ from contextlib import AbstractContextManager
 from decimal import Decimal
 from typing import Any
 
+from . import lotes
 from .catalogo import DepositoInexistente, validar_deposito
 from .hooks import SIN_GANCHOS, Hooks
 from .stock import add_movimiento_stock, descontar_stock_venta
@@ -689,9 +690,11 @@ _COND_DEVUELTO = (
 
 
 def _movimientos_de_venta(conn, vid: int, condicion_sql: str) -> list:
+    # `ORDER BY id`: el orden de escritura, que es el de la reposición de `anular_venta` (antes dependía del orden físico
+    # de la tabla). `lot_code` y `expires_at` (ADR-018, A-4 PR-2) son el bucket de origen de cada fila.
     return conn.execute(
-        f"SELECT item_id, variant_id, location_id, quantity_delta FROM stock_movements "
-        f"WHERE source_id=? AND ({condicion_sql})",
+        f"SELECT item_id, variant_id, location_id, quantity_delta, lot_code, expires_at FROM stock_movements "
+        f"WHERE source_id=? AND ({condicion_sql}) ORDER BY id",
         (vid,),
     ).fetchall()
 
@@ -761,6 +764,15 @@ def anular_venta(conn, vid: int, usuario_id: int | None = None,
     movimientos. Nunca hace `UPDATE` sobre `stock_movements`: el ledger es
     aditivo, siempre.
 
+    🔑 **Vuelve al lote de origen (ADR-018, A-4 PR-2).** Cada fila de reposición copia el `lot_code` y el `expires_at`
+    de la fila de venta que revierte: como la venta escribe una fila por lote consumido, la anulación devuelve cada
+    cantidad EXACTAMENTE al lote del que salió (receta incluida, y también el faltante, que vuelve al bucket «sin lote»
+    de donde salió). **No consulta la marca** `tracks_expiry`: lo que dice el ledger manda, así que desmarcar un producto
+    entre la venta y la anulación no cambia a dónde vuelve, y una venta sin lote (todo lo vendido antes de A-4 y todo lo
+    de un producto sin marcar) repone sin lote, con el `INSERT` de siempre. Repone aunque el lote se haya dado de baja
+    (merma) después de la venta: el lote reaparece con esa cantidad, que es lo que dice el ledger (la merma ya descontó
+    lo que tenía entonces). No bloquea: suma stock.
+
     Devuelve `False` si ya estaba anulada —no-op, para no revertir dos veces
     si se reintenta la acción—. Levanta `ValueError` si no existe. No
     commitea.
@@ -793,6 +805,8 @@ def anular_venta(conn, vid: int, usuario_id: int | None = None,
             cantidad=-m["quantity_delta"], referencia=f"Anulación venta ID {vid}",
             venta_id=vid, usuario_id=usuario_id, fecha=fecha,
             deposito_id=m["location_id"], variant_id=m["variant_id"],
+            # El lote y el vencimiento de la fila que salió (`None` si salió sin lote: el INSERT de siempre).
+            lot_code=lotes.lote_de_fila(m["lot_code"]), expires_at=lotes.vence_de_fila(m["expires_at"]),
         )
 
     pagos = [

@@ -31,6 +31,10 @@ la transferencia y `ajustar_stock` siguen escribiendo movimientos **sin lote**, 
 `sin_lote` incluye los productos con saldo sin lote **negativo** (`situacion='salidas_sin_lote'`), que son exactamente
 los que tienen salidas todavía no descontadas de ningún lote. Los saldos ≠ 0 de `lotes_de` también lo muestran.
 
+**Actualización (A-4 PR-2, 2026-09-30):** para la venta y la anulación lo de arriba ya no aplica: un producto marcado vende por
+FEFO (`erp.lotes`) y la anulación repone al lote de origen. Sigue valiendo para la devolución, la transferencia y
+`ajustar_stock` (hasta el PR-3) y para las ventas anteriores.
+
 Las consultas son las mismas en SQLite y PostgreSQL: se agrupa en SQL y se limpia y fusiona en Python con `Decimal`
 (un mismo lote puede estar guardado como `'2026-10-05'` o como `'2026-10-05T00:00:00'` según quién lo escribió: la
 recepción de compras guarda el `isoformat()` del `datetime`; se normaliza al leer). Depósitos: se miran **todos**
@@ -46,6 +50,12 @@ import uuid
 from decimal import Decimal, InvalidOperation
 
 from .listas_precio import _ZONA_LOCAL
+from .lotes import CERO as _CERO
+from .lotes import dec as _dec
+from .lotes import lote_de_fila as _lote_de_fila
+from .lotes import saldo_limpio as _saldo
+from .lotes import saldos_por_bucket as _saldos
+from .lotes import vence_de_fila as _vence_de_fila
 from .stock import add_movimiento_stock, normalizar_lote, normalizar_vencimiento
 
 DIAS_AVISO = 15
@@ -56,10 +66,6 @@ ESTADOS = ("vencido", "por_vencer")
 
 #: Largo máximo de la `clave_operacion` (un UUID en texto son 36).
 MAX_LARGO_CLAVE = 64
-
-#: Decimales con que se limpia el ruido de `float` de una suma (mismo criterio que `erp.reposicion`).
-_ESCALA_RUIDO = 10
-_CERO = Decimal("0")
 
 
 class VencimientosError(Exception):
@@ -93,15 +99,6 @@ def hoy_argentina(ahora: datetime.datetime | None = None) -> datetime.date:
 
 
 # ── Utilidades ───────────────────────────────────────────────────────────
-
-
-def _dec(valor) -> Decimal:
-    return Decimal(str(valor)) if valor is not None else _CERO
-
-
-def _saldo(valor) -> Decimal:
-    """Un saldo como `Decimal` sin el ruido de la suma en `float` (`0.1 + 0.2`): a 10 decimales."""
-    return round(_dec(valor), _ESCALA_RUIDO)
 
 
 def _num(valor: Decimal):
@@ -139,23 +136,6 @@ def _exigir_revision(conn) -> None:
         )
 
 
-def _lote_de_fila(valor) -> str | None:
-    """El lote guardado, normalizado: un texto vacío o de espacios es «sin código»."""
-    texto = str(valor).strip() if valor is not None else ""
-    return texto or None
-
-
-def _vence_de_fila(valor) -> str | None:
-    """El vencimiento guardado como `'AAAA-MM-DD'`, sea cual sea la forma en que se escribió. Uno que no se puede
-    leer cuenta como sin vencimiento (el ledger lo escriben varios caminos; un reporte no debe caerse por uno)."""
-    if valor is None:
-        return None
-    try:
-        return normalizar_vencimiento(str(valor))
-    except ValueError:
-        return None
-
-
 def _sucursal_y_depositos(conn, sucursal_id: int | None, deposito_id: int | None) -> dict[int, dict]:
     """Los depósitos que se miran, `{id: {nombre, activo, sucursal_id, sucursal}}`. `ValueError` si la sucursal o
     el depósito pedidos no existen. Sin filtros, todos."""
@@ -176,27 +156,6 @@ def _sucursal_y_depositos(conn, sucursal_id: int | None, deposito_id: int | None
         i: d for i, d in todos.items()
         if (deposito_id is None or i == deposito_id) and (sucursal_id is None or d["sucursal_id"] == sucursal_id)
     }
-
-
-def _saldos(conn, sql_items: str, params: list, depositos: dict[int, dict]) -> dict[tuple, Decimal]:
-    """`{(item, depósito, variante, lote, vence): saldo}` de los movimientos de `sql_items` (un `WHERE` sobre
-    `sm`), en los depósitos dados, con el lote y el vencimiento normalizados. Los saldos en cero se descartan."""
-    filas = conn.execute(
-        f"""SELECT sm.item_id, sm.location_id, sm.variant_id, sm.lot_code, sm.expires_at,
-                   SUM(sm.quantity_delta) AS saldo
-            FROM stock_movements sm
-            WHERE {sql_items}
-            GROUP BY sm.item_id, sm.location_id, sm.variant_id, sm.lot_code, sm.expires_at""",
-        params,
-    ).fetchall()
-    saldos: dict[tuple, Decimal] = {}
-    for f in filas:
-        if f["location_id"] not in depositos:
-            continue
-        clave = (f["item_id"], f["location_id"], f["variant_id"], _lote_de_fila(f["lot_code"]),
-                 _vence_de_fila(f["expires_at"]))
-        saldos[clave] = saldos.get(clave, _CERO) + _saldo(f["saldo"])
-    return {k: _saldo(v) for k, v in saldos.items() if _saldo(v) != 0}
 
 
 def _nombres_de_variantes(conn) -> dict[int, str]:
