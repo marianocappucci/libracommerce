@@ -500,3 +500,104 @@ por el consumo de sus insumos.
 **Consecuencias.** Un producto lo monta con `app.include_router(build_reposicion_router(conexion=...), dependencies=...)`;
 la pantalla es del kit (`libra-ui`) y la capacidad que la gatea, del producto. No escribe nada, así que no hay nada que
 deshacer.
+
+## ADR-018 — Vencimientos y lotes, la parte informativa: el lote es una dimensión del ledger y se activa por producto (2026-09-30)
+
+**Contexto.** Roadmap de producto de VentaLibra, A-1 (decisión del humano, 2026-09-30: arrancar con los defaults
+recomendados). Contalibra, Restolibra y VentaLibra comparten este motor, así que lo que entra tiene que ser **aditivo y
+opt-in**: un producto que nadie marca no cambia en nada. El motor ya tenía `stock_movements.lot_code` y `expires_at`
+(desde la baseline) y la recepción de compras ya los escribía (`usecases.purchasing.confirm_purchase_receipt` →
+`repository.append_stock_movement`, con `expires_at` como `datetime.isoformat()`), pero `erp.stock.add_movimiento_stock`
+no los aceptaba y nada los leía. Esta decisión es sólo la parte **informativa**: aviso de lo que vence, lotes visibles,
+asignar un vencimiento al stock que no lo tiene y dar de baja un lote. **No toca el camino de ventas** (eso es A-4).
+
+**Decisión.**
+- **Sin tabla `lots`: el lote es una dimensión del ledger.** Las existencias por lote son `SUM(quantity_delta)`
+  agrupado por producto, depósito, variante, `lot_code` y `expires_at`. El bucket con lote y vencimiento en NULL es el
+  stock **«sin lote»**. Una tabla aparte sería una segunda fuente de verdad que se desincroniza del ledger (el mismo
+  argumento de ADR-007 contra re-expresar el schema), y partir el ledger en más grupos no cambia el stock total de un
+  producto/depósito: `get_stock_actual` y `get_stock_por_deposito` siguen sumando todo (hay un test).
+- **Revisión Alembic `0002_vencimientos_lotes`** (la primera revisión real de la cadena; `init_schema()` sigue congelado y
+  por eso las fixtures del gate `test_schema_congelado` **no cambian**): `ALTER TABLE catalog_items ADD COLUMN
+  tracks_expiry INTEGER NOT NULL DEFAULT 0` y `CREATE INDEX IF NOT EXISTS idx_stock_item_location_lot ON
+  stock_movements(item_id, location_id, lot_code)`. El mismo texto en SQLite y PostgreSQL (sin índice parcial).
+  Idempotente por introspección (la columna sólo se agrega si falta), con `downgrade` (baja el índice y la columna;
+  el ledger, que es aditivo, no se toca; perder la columna borra la marca «vence», no los lotes). **Compatibilidad con
+  los tres productos:** no reescribe ninguna fila (todos los productos quedan en 0), y un producto que no marque nada
+  sigue escribiendo el mismo `INSERT` de siempre. Verificado con `upgrade head` sobre una base con datos de la revisión
+  anterior en los dos motores, ledger idéntico antes y después. 🔴 **Como `init_schema()` no la crea, una base que sólo
+  corrió el arranque no tiene la columna:** el producto tiene que declarar `libracommerce-migrar upgrade --prefijo ...`
+  en su deploy **antes** de montar los routers (ADR-007). Sin ella `erp.vencimientos` levanta `SinRevision` y el router
+  responde 503 con el comando; nada del resto del motor lee la columna.
+- **`erp.stock.add_movimiento_stock`** recibe `lot_code` y `expires_at` opcionales. Sin ellos el `INSERT` es carácter por
+  carácter el de hoy (hay un test que lo compara). `lot_code` se recorta, no puede quedar vacío ni pasar de 64
+  caracteres; `expires_at` acepta un `date`, un `datetime` o un texto ISO 8601 y se guarda como `'AAAA-MM-DD'` (de un
+  `datetime` se toma la fecha tal como viene, sin convertir de zona); cualquier otra cosa es un `ValueError` **antes** de
+  escribir. La recepción de compra **no se tocó**: ya llegaba con lote y vencimiento al ledger (hay un test que lo
+  prueba en los dos motores); como esa vía guarda `AAAA-MM-DDTHH:MM:SS`, el lector normaliza a fecha al agrupar.
+- **`erp.vencimientos`:** `marcar_vence` (la marca `tracks_expiry`; no escribe movimientos; un servicio no se marca),
+  `lotes_de` (existencias por lote, incluido el bucket sin lote y los saldos negativos), `proximos_a_vencer` (por lote
+  con saldo > 0 de los productos marcados y activos: producto, código, depósito, sucursal, lote, vencimiento, días para
+  vencer —negativo = vencido—, saldo y estado `vencido` | `por_vencer`, por vencimiento; más un resumen y la lista
+  `sin_lote`), `asignar_vencimiento_a_saldo` y `dar_de_baja_lote`.
+- **Asignar un vencimiento** al saldo sin lote es un **par aditivo** de ajustes: una fila negativa sin lote y una positiva
+  con lote y vencimiento, con la misma referencia (la `nota` más un identificador `[asignación xxxxxxxx]` que las une),
+  la misma fecha, depósito y usuario; **nunca un `UPDATE`** de una fila ya escrita. Valida que el producto esté marcado y
+  que el saldo sin lote de ese depósito y variante alcance, todo antes de escribir la primera fila. No usa `source_id`
+  (en este motor es el id de la venta o de la recepción de origen; reusarlo para otra cosa lo volvería ambiguo).
+- **Dar de baja un lote** es una `merma` (`movement_type='waste'`) sobre el bucket exacto (lote y vencimiento tal como los
+  devuelve `lotes_de`), sin dejar su saldo negativo. 🔵 **No hay un `reason_code` propio `vencimiento`**: `add_movimiento_stock`
+  guarda el tipo en `reason_code` (`merma`) y `vencimiento` no es un tipo de `TIPOS`; agregarlo cambiaría la lista que
+  muestran las pantallas. El motivo va en la referencia (`Merma: Vencimiento — lote L1, vence ...`), que es la convención
+  que ya usa la merma de Restolibra (`Merma: <motivo>`).
+- **Concurrencia de las escrituras.** `asignar` y `dar_de_baja` **toman el producto** antes de leer el saldo, con un
+  `UPDATE catalog_items SET tracks_expiry = tracks_expiry WHERE id = ?`: en PostgreSQL bloquea la fila hasta el commit, así
+  que dos escrituras simultáneas sobre el mismo producto se serializan y no gastan dos veces el mismo saldo (hay un test
+  con dos conexiones); en SQLite toda escritura ya se serializa.
+- **«Hoy» es la fecha de Argentina** (UTC-3 fijo, como `erp.listas_precio`; no depende de la base de zonas horarias de la
+  imagen), no la del servidor: un vencimiento no puede correrse de día porque el contenedor esté en UTC. La ventana es
+  cerrada: entra lo que vence hasta `hoy + dias` inclusive; **vencido es `vence < hoy`** (lo que vence hoy es `por_vencer`
+  con 0 días). ADR-017 (reposición) sigue con la fecha del servidor: no se tocó.
+- **Los routers son dos**, para que el producto ponga capacidades distintas a leer y a escribir:
+  `build_vencimientos_router` (`GET /api/vencimientos`, `/export` CSV y `/productos/{id}/lotes`) y
+  `build_vencimientos_escritura_router` (`PUT /productos/{id}`, `POST /asignar`, `POST /merma`), este último con gates
+  por operación (`dependencias_marcar`, `dependencias_movimientos`) además de los que el producto ponga al montarlo.
+  Errores: parámetro o cuerpo inválido y sucursal o depósito inexistentes, 422; producto inexistente, 404; regla de negocio
+  (saldo insuficiente, producto sin marcar, servicio), 409; base sin la revisión, 503. Quién puede qué es del producto:
+  la propuesta es que lea encargado y depósito, marque el encargado, y asignen y den de baja encargado y depósito.
+
+**Defaults de producto decididos (2026-09-30).** Los usa A-4; A-1 sólo usa el último.
+1. Un producto vencido **se vende con aviso, no se bloquea**.
+2. El stock **«sin lote» sale último** en FEFO (primero vence, primero sale).
+3. La devolución de un perecedero **va a merma**, no vuelve al lote.
+4. Aviso de vencimiento con **15 días** de anticipación por defecto (parámetro `dias`, tope 365).
+
+**Lo que A-1 NO hace, a propósito.** No cambia la venta, la anulación, la devolución, la transferencia ni `ajustar_stock`, ni
+la entrada manual de `POST /api/stock/{pid}/ajuste`: todos siguen escribiendo movimientos **sin lote**. Es A-4 (FEFO), y
+es el paso más delicado. 🔴 **Consecuencia que hay que tener presente:** en un producto marcado, hasta A-4, lo que sale
+resta del bucket «sin lote» (que queda negativo) y **no** del lote del que salió la mercadería, así que el saldo de los
+lotes está **sobreestimado**. El reporte no lo esconde: `sin_lote` lista los productos con saldo sin lote negativo
+(`situacion='salidas_sin_lote'`), y `lotes_de` muestra el negativo. Lo mismo `ajustar_stock`: lleva el stock **total** de un
+producto al valor pedido y su fila va sin lote, así que en un producto con lotes su efecto por lote es ambiguo hasta A-4.
+Mientras tanto, la forma segura de usarlo es marcar el producto, asignar vencimiento a lo que hay y dar de baja lo que vence.
+
+**Riesgos.** (1) **Concurrencia en PostgreSQL al elegir lote en A-4**: la venta tendrá que elegir el lote dentro de su
+transacción (`SELECT ... FOR UPDATE` o aceptar un lote negativo); el bloqueo del producto de A-1 no cubre ese camino.
+(2) El camino viejo `usecases.sales` (venta por el dominio) queda **fuera de alcance** y seguirá escribiendo sin lote.
+(3) `erp.ventas.crear_venta` no valida stock: un lote puede quedar negativo por una venta (A-4 decidirá). (4) El saldo
+por depósito: la jerarquía sucursal/depósito ya cambió cómo se piensa el stock; las existencias por lote se miden por
+depósito y `sucursal_id` sólo filtra por los depósitos de esa sucursal. (5) Un `expires_at` que no se puede leer, escrito
+por otro camino, cuenta como sin vencimiento (un reporte no debe caerse por una fila). (6) `proximos_a_vencer` suma
+«unidades» de productos con unidades distintas (kg y u): es un total de cantidades, no de pesos.
+
+**Se difiere, a propósito.** Costo por lote (la recepción actualiza el `default_cost` del producto, último costo, no el de un lote); bloqueo configurable
+de la venta de vencidos; alertas por correo o WhatsApp; trazabilidad hacia atrás (de qué lote salió cada venta); fraccionar un
+lote; vencimiento por defecto por días de vida útil del producto; lote y vencimiento en la entrada manual de stock (A-2 en la
+pantalla, con lo que decida el producto); y exponer la marca «vence» en el catálogo (hoy sale de
+`GET /api/vencimientos/productos/{id}/lotes`, para no cambiar la respuesta de `GET /api/productos` en los tres productos).
+
+**Consecuencias.** Un producto la monta con
+`app.include_router(build_vencimientos_router(conexion=...), dependencies=...)` y
+`build_vencimientos_escritura_router(conexion=..., usuario_actual=..., dependencias_marcar=..., dependencias_movimientos=...)`,
+después de correr `libracommerce-migrar upgrade`. Un producto que no los monte, o que no marque ninguno, no ve
+ninguna diferencia.

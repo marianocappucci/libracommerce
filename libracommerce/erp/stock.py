@@ -80,12 +80,48 @@ def _tipo_de_row(movement_type: str, reason_code: str | None) -> str:
     return reason_code or _MOVEMENT_TYPE_A_TIPO.get(movement_type, movement_type)
 
 
+#: Largo máximo de un código de lote: es lo que se imprime en el envase, no un texto libre.
+MAX_LARGO_LOTE = 64
+
+
+def normalizar_lote(lot_code) -> str:
+    """El código de lote recortado. `ValueError` si no es un texto, si queda vacío o si pasa de `MAX_LARGO_LOTE`
+    caracteres: un lote sin código se expresa con `None` (no mandando el parámetro), no con una cadena vacía."""
+    if not isinstance(lot_code, str):
+        raise ValueError(f"lot_code tiene que ser un texto: {lot_code!r}")
+    lote = lot_code.strip()
+    if not lote:
+        raise ValueError("lot_code no puede estar vacío; para un movimiento sin lote no se manda")
+    if len(lote) > MAX_LARGO_LOTE:
+        raise ValueError(f"lot_code no puede pasar de {MAX_LARGO_LOTE} caracteres: {lote[:20]!r}...")
+    return lote
+
+
+def normalizar_vencimiento(expires_at) -> str:
+    """Un vencimiento como `'AAAA-MM-DD'`. Acepta un `date`, un `datetime` (se toma su fecha, tal como viene: sin
+    convertir de zona) o un texto ISO 8601, con o sin hora (`'2026-10-05'`, `'2026-10-05T00:00:00'`,
+    `'2026-10-05 10:30'`, `'...Z'`). Cualquier otra cosa es un `ValueError` con el valor a la vista."""
+    if isinstance(expires_at, _datetime):
+        return expires_at.date().isoformat()
+    if isinstance(expires_at, _date):
+        return expires_at.isoformat()
+    if isinstance(expires_at, str) and expires_at.strip():
+        texto = expires_at.strip()
+        try:
+            return _datetime.fromisoformat(texto).date().isoformat()  # 3.11+: acepta también la fecha sola
+        except ValueError:
+            pass
+    raise ValueError(f"expires_at no es una fecha válida (AAAA-MM-DD o ISO 8601): {expires_at!r}")
+
+
 def add_movimiento_stock(conn, producto_id: int, tipo: str, cantidad: float,
                          referencia: str = "", fecha: str = "",
                          venta_id: int | None = None,
                          usuario_id: int | None = None,
                          deposito_id: int | None = None,
-                         variant_id: int | None = None):
+                         variant_id: int | None = None,
+                         lot_code: str | None = None,
+                         expires_at: _date | _datetime | str | None = None):
     """Agrega un movimiento. cantidad positiva = entrada, negativa = salida.
 
     Un movimiento de cantidad 0 se ignora: `stock_movements` tiene
@@ -93,11 +129,19 @@ def add_movimiento_stock(conn, producto_id: int, tipo: str, cantidad: float,
 
     `variant_id` viaja al ledger tal cual: `None` (el default, y lo único que
     manda hoy Contalibra/Restolibra) es "este ítem no tiene variantes".
+
+    `lot_code` y `expires_at` (ADR-018, A-1) son ADITIVOS: el lote es una dimensión del ledger, no una tabla. Con
+    los dos en `None` (el default, y lo único que mandan hoy los tres productos) el `INSERT` es carácter por
+    carácter el de siempre. `lot_code` se recorta y no puede quedar vacío (`normalizar_lote`); `expires_at` se
+    guarda como `'AAAA-MM-DD'` (`normalizar_vencimiento`). Un valor inválido es un `ValueError` **antes** de
+    escribir nada. No cambian el stock total: sólo lo parten en el ledger.
     """
     if not cantidad:
         return
     if tipo not in _TIPO_A_MOVEMENT_TYPE:
         raise ValueError(f"tipo de movimiento desconocido: {tipo!r}")
+    _lote = normalizar_lote(lot_code) if lot_code is not None else None
+    _vence = normalizar_vencimiento(expires_at) if expires_at is not None else None
     # `fecha` llega como 'YYYY-MM-DD'; `occurred_at` es un timestamp ISO. Se
     # normaliza siempre a la forma canónica completa para que todos los
     # movimientos ordenen igual entre sí.
@@ -108,6 +152,16 @@ def add_movimiento_stock(conn, producto_id: int, tipo: str, cantidad: float,
     # ningún test ni caller del motor usa 0 como "sin depósito" (búsqueda en
     # `tests/` y `libracommerce/`, 2026-09-15).
     _deposito = deposito_id if deposito_id is not None else get_default_deposito_id(conn)
+    if _lote is not None or _vence is not None:
+        conn.execute(
+            """INSERT INTO stock_movements
+               (item_id, variant_id, location_id, movement_type, quantity_delta, occurred_at,
+                source_type, source_id, note, created_by, reason_code, lot_code, expires_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (producto_id, variant_id, _deposito, _TIPO_A_MOVEMENT_TYPE[tipo], cantidad, _fecha,
+             "venta" if venta_id else None, venta_id, referencia, usuario_id, tipo, _lote, _vence),
+        )
+        return
     conn.execute(
         """INSERT INTO stock_movements
            (item_id, variant_id, location_id, movement_type, quantity_delta, occurred_at,
