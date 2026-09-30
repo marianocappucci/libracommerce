@@ -24,7 +24,7 @@ import uuid
 from decimal import Decimal
 
 import pytest
-from conftest import USUARIO, _deposito_principal, url_postgres
+from conftest import USUARIO, _deposito_principal, _schema_de_producto, url_postgres
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.testclient import TestClient
 from libracore.db import core
@@ -33,7 +33,7 @@ from libracommerce import migrar
 from libracommerce.db.repository import repositorio_de
 from libracommerce.db.schema import init_schema
 from libracommerce.domain.entities import Party, PartyType
-from libracommerce.erp import catalogo, compras, stock, vencimientos
+from libracommerce.erp import catalogo, compras, stock, vencimientos, ventas
 from libracommerce.web.vencimientos_router import build_vencimientos_escritura_router, build_vencimientos_router
 
 #: «Hoy» de las pruebas: la ventana de 15 días llega hasta el 15 de octubre.
@@ -94,6 +94,23 @@ def _crear_base_al_dia_de_0001(destino: str):
 def abrir_vto(destino):
     """Un `conexion()` como el de un producto, con la revisión 0002 ya aplicada (`upgrade head`)."""
     _crear_base_al_dia_de_0001(destino)
+    migrar.upgrade(destino)
+    core.configure(destino)
+    yield core.get_connection
+    _liberar()
+
+
+@pytest.fixture
+def abrir_vto_ventas(destino):
+    """Como `abrir_vto`, pero con los dos schemas de un producto (LibraCore y LibraCommerce): es lo que necesita una
+    venta de mostrador real (`erp.ventas`), que escribe en los dos dentro de la misma transacción."""
+    core.configure(destino)
+    conn = core.get_connection()
+    try:
+        _schema_de_producto(conn)
+    finally:
+        conn.close()
+    _liberar()
     migrar.upgrade(destino)
     core.configure(destino)
     yield core.get_connection
@@ -1388,6 +1405,134 @@ def test_la_variante_ajena_es_422_por_http_en_asignar_merma_y_lotes(abrir_vto):
         assert _sin_id(_todo_el_ledger(conn)) == antes
 
 
+# ═══════ Parche hasta A-4: la merma mira también el stock total y las salidas sin conciliar (ADR-018, 2026-10-01)
+
+
+def _vender(abrir, pid, cantidad, *, deposito=None, fecha="2026-09-10"):
+    """Una venta de mostrador por el mismo camino que `POST /api/ventas` (`erp.ventas.crear_venta_directa`): descuenta
+    del bucket «sin lote», porque hasta A-4 la venta no elige lote."""
+    linea = {"nombre": "Yogur", "qty": cantidad, "precio": 100.0, "subtotal": round(cantidad * 100.0, 2),
+             "producto_id": pid}
+    total = linea["subtotal"]
+    pagos = [{"medio": "efectivo", "monto": total, "estado": "aprobado"}]
+    return ventas.crear_venta_directa(
+        abrir, fecha=fecha, items=[linea], subtotal=total, descuento=0.0, total=total, cliente_id=None,
+        cliente_nombre="", usuario_id=USUARIO["id"], observaciones="",
+        estado=ventas.estado_segun_pagos(total, pagos), pagos=pagos, stock_habilitado=True, deposito_id=deposito,
+    )
+
+
+def test_asignar_vender_todo_y_dar_de_baja_el_lote_es_409_y_no_escribe(abrir_vto_ventas):
+    """El caso de Codex: se asignan 10 a un lote, se venden 10 (quedan −10 sin lote y el lote conserva 10) y mermar el
+    lote descontaría dos veces lo vendido (stock total −10)."""
+    abrir = abrir_vto_ventas
+    with abrir() as conn:
+        pid = _producto(conn)
+        deposito = catalogo.get_default_deposito_id(conn)
+        _entrada(conn, pid, 10)
+        _asignar(conn, pid, deposito, "L1", _dias(3), 10)
+    _vender(abrir, pid, 10, deposito=deposito)
+    with abrir() as conn:
+        assert stock.get_stock_actual(conn, pid) == 0
+        assert [(f["lote"], f["saldo"]) for f in vencimientos.lotes_de(conn, pid, hoy=HOY)] == [("L1", 10),
+                                                                                                 (None, -10)]
+        antes = _sin_id(_todo_el_ledger(conn))
+        with pytest.raises(vencimientos.ReglaDeNegocio, match="salidas sin lote sin conciliar en este depósito") as e:
+            _baja(conn, pid, deposito, "L1", _dias(3), 10)
+        assert "conciliá con el conteo físico antes de dar de baja" in str(e.value)
+        assert not isinstance(e.value, vencimientos.SaldoInsuficiente)
+        with pytest.raises(vencimientos.ReglaDeNegocio):
+            _baja(conn, pid, deposito, "L1", _dias(3), 1)             # ni una unidad
+        assert _sin_id(_todo_el_ledger(conn)) == antes
+        assert stock.get_stock_actual(conn, pid) == 0
+
+
+def test_la_salida_sin_lote_de_otro_deposito_o_variante_no_bloquea_la_merma(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    with abrir() as conn:
+        pid = _producto(conn)
+        principal = catalogo.get_default_deposito_id(conn)
+        norte = catalogo.create_deposito(conn, "Norte")
+        variante = catalogo.create_variante(conn, pid, "Y-1", "Frutilla")["id"]
+        _entrada(conn, pid, 10, lote="L1", vence=_dias(3), deposito=principal)
+        _entrada(conn, pid, 5, deposito=norte)
+        _entrada(conn, pid, 5, variante=variante)
+        stock.add_movimiento_stock(conn, pid, "venta", -8, "otra variante", fecha="2026-09-10",
+                                   deposito_id=principal, variant_id=variante)   # −3 sin lote de OTRA variante
+        stock.add_movimiento_stock(conn, pid, "venta", -7, "otro depósito", fecha="2026-09-10", deposito_id=norte)
+        assert _baja(conn, pid, principal, "L1", _dias(3), 4)["saldo_restante"] == 6
+        with pytest.raises(vencimientos.ReglaDeNegocio):                 # la variante con −3 sin lote sí se frena
+            _entrada(conn, pid, 6, lote="LV", vence=_dias(3), variante=variante)
+            _baja(conn, pid, principal, "LV", _dias(3), 1, variante_id=variante)
+
+
+def test_sin_salidas_sin_lote_y_con_stock_suficiente_la_merma_sigue_funcionando(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    with abrir() as conn:
+        pid = _producto(conn)
+        deposito = catalogo.get_default_deposito_id(conn)
+        _entrada(conn, pid, 10)
+        _asignar(conn, pid, deposito, "L1", _dias(3), 6)              # L1: 6 y sin lote: 4
+    _vender(abrir, pid, 3, deposito=deposito)                          # sin lote: 4 − 3 = 1 (no negativo)
+    with abrir() as conn:
+        r = _baja(conn, pid, deposito, "L1", _dias(3), 6)              # vence el lote entero
+        assert (r["saldo_restante"], r["repetida"]) == (0, False)
+        assert stock.get_stock_actual(conn, pid, deposito) == 1
+
+
+def test_el_stock_total_insuficiente_es_409_aunque_el_lote_alcance(abrir_vto):
+    """Otro lote en negativo (lo que dejaría una salida que sí eligió lote) deja el total corto: 10 en L1, −5 en L2."""
+    with abrir_vto() as conn:
+        pid = _producto(conn)
+        deposito = catalogo.get_default_deposito_id(conn)
+        _entrada(conn, pid, 10, lote="L1", vence=_dias(3))
+        stock.add_movimiento_stock(conn, pid, "venta", -5, "salió de L2", fecha=PREVIA, lot_code="L2",
+                                   expires_at=_dias(9))
+        antes = _sin_id(_todo_el_ledger(conn))
+        with pytest.raises(vencimientos.SaldoInsuficiente, match="stock total del producto en el depósito .* es 5"):
+            _baja(conn, pid, deposito, "L1", _dias(3), 8)
+        assert _sin_id(_todo_el_ledger(conn)) == antes
+        assert _baja(conn, pid, deposito, "L1", _dias(3), 5)["saldo_restante"] == 5      # justo lo que hay en total
+        with pytest.raises(vencimientos.SaldoInsuficiente):
+            _baja(conn, pid, deposito, "L1", _dias(3), 1)
+
+
+def test_la_idempotencia_va_primero_un_reintento_de_una_merma_hecha_devuelve_lo_anterior_aunque_ahora_no_pase(
+        abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    with abrir() as conn:
+        pid = _producto(conn)
+        deposito = catalogo.get_default_deposito_id(conn)
+        _entrada(conn, pid, 10)
+        _asignar(conn, pid, deposito, "L1", _dias(3), 10)
+        clave = _k()
+        primera = _baja(conn, pid, deposito, "L1", _dias(3), 4, clave_operacion=clave)
+        assert primera["repetida"] is False
+    _vender(abrir, pid, 1, deposito=deposito)    # después: sin lote −1 (salidas sin conciliar) y el lote con 6
+    with abrir() as conn:
+        with pytest.raises(vencimientos.ReglaDeNegocio):   # una baja NUEVA ya no pasa...
+            _baja(conn, pid, deposito, "L1", _dias(3), 1)
+        n = len(_todo_el_ledger(conn))
+        # ...pero el reintento de la ya hecha sí devuelve lo de la primera vez, sin escribir.
+        assert _baja(conn, pid, deposito, "L1", _dias(3), 4, clave_operacion=clave) == {**primera, "repetida": True}
+        assert len(_todo_el_ledger(conn)) == n
+
+
+def test_la_merma_con_salidas_sin_conciliar_es_409_por_http(abrir_vto_ventas, monkeypatch):
+    _hoy_fijo(monkeypatch)
+    abrir = abrir_vto_ventas
+    with abrir() as conn:
+        pid = _producto(conn)
+        deposito = catalogo.get_default_deposito_id(conn)
+        _entrada(conn, pid, 10)
+        _asignar(conn, pid, deposito, "L1", _dias(3), 10)
+    _vender(abrir, pid, 10, deposito=deposito)
+    c = _app(abrir)
+    r = c.post("/api/vencimientos/merma", json={"producto_id": pid, "deposito_id": deposito, "lote": "L1",
+                                                "vence": _dias(3), "cantidad": 1, "clave_operacion": _k()})
+    assert r.status_code == 409 and "conciliá con el conteo físico" in r.json()["detail"]
+
+
 # ════════════════════════════════════════════ La recepción de compra llega al ledger
 
 
@@ -1491,6 +1636,30 @@ def test_export_csv(abrir_vto, monkeypatch):
         ("Yogur", "L0", _dias(-2), "-2", "4", "vencido"), ("Yogur", "L1", _dias(5), "5", "10", "por_vencer")]
     assert list(filas[0]) == ["producto_id", "codigo", "nombre", "categoria", "unidad", "sucursal", "deposito",
                               "variante", "lote", "vence", "dias_para_vencer", "saldo", "estado"]
+
+
+def test_el_export_de_vencimientos_neutraliza_formulas_y_no_toca_los_numeros_negativos(abrir_vto, monkeypatch):
+    _hoy_fijo(monkeypatch)
+    with abrir_vto() as conn:
+        malo = _producto(conn, "=HYPERLINK(\"http://x\",\"a\")", categoria="-Lácteos")
+        normal = _producto(conn, "Yogur - 1 kg")
+        dep = catalogo.create_deposito(conn, "@Norte")
+        _entrada(conn, malo, 4, lote="+LOTE-1", vence=_dias(-3), deposito=dep)     # vencido: días_para_vencer = −3
+        _entrada(conn, malo, 2, lote="@L2", vence=_dias(5))
+        _entrada(conn, malo, 1, lote="-L3", vence=_dias(6))
+        _entrada(conn, normal, 7, lote="L-9", vence=_dias(2))
+    r = _app(abrir_vto).get("/api/vencimientos/export")
+    assert r.status_code == 200
+    filas = list(csv.DictReader(io.StringIO(r.text)))
+    del_malo = [f for f in filas if f["producto_id"] == str(malo)]
+    assert {f["nombre"] for f in del_malo} == {"'=HYPERLINK(\"http://x\",\"a\")"}
+    assert {f["categoria"] for f in del_malo} == {"'-Lácteos"}
+    assert {f["lote"] for f in del_malo} == {"'+LOTE-1", "'@L2", "'-L3"}
+    assert {f["deposito"] for f in del_malo} >= {"'@Norte"}
+    vencido = next(f for f in del_malo if f["lote"] == "'+LOTE-1")
+    assert vencido["dias_para_vencer"] == "-3" and vencido["saldo"] == "4", "los números (negativos también) no se tocan"
+    bueno = next(f for f in filas if f["producto_id"] == str(normal))
+    assert (bueno["nombre"], bueno["lote"], bueno["dias_para_vencer"]) == ("Yogur - 1 kg", "L-9", "2")
 
 
 def test_get_lotes_de_un_producto(abrir_vto, monkeypatch):

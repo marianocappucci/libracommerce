@@ -630,3 +630,23 @@ pantalla, con lo que decida el producto); y exponer la marca «vence» en el cat
 `build_vencimientos_escritura_router(conexion=..., usuario_actual=..., dependencias_marcar=[Depends(...)],
 dependencias_movimientos=[Depends(...)])` (las tres últimas obligatorias), después de correr `libracommerce-migrar upgrade`. Un producto que no los monte, o que no marque ninguno, no ve
 ninguna diferencia.
+
+**Nota (2026-09-30, revisión de Codex sobre el montaje en VentaLibra) — parche hasta A-4: la merma de un lote mira también el
+stock total y las salidas sin conciliar.** `dar_de_baja_lote` validaba sólo el saldo **del lote**. Como hasta A-4 las ventas
+descuentan del bucket «sin lote» y no del lote, el caso asignar 10 a un lote → vender 10 (queda −10 sin lote y el lote conserva
+10) → dar de baja el lote pasaba y dejaba el stock total en −10 (descontaba dos veces lo vendido). Ahora, con el producto
+ya tomado y **después** de buscar la `clave_operacion` (un reintento de una baja ya hecha sigue devolviendo lo anterior con
+`repetida: true` aunque el estado haya cambiado), se exige además: (a) que el **stock total** del producto en ese depósito y
+variante (todos los buckets, lotes y sin lote) alcance (`SaldoInsuficiente`, 409), y (b) que **no haya saldo «sin lote»
+negativo** en ese depósito y variante (`ReglaDeNegocio`, 409: «hay salidas sin lote sin conciliar en este depósito: el saldo
+del lote puede estar sobreestimado; conciliá con el conteo físico antes de dar de baja»). **Es un parche, no el modelo:** lo
+resuelve A-4 (FEFO), que hará que la venta baje el lote del que sale la mercadería; ahí (b) deja de tener sentido y se
+revisa. Costo aceptado: mientras haya salidas sin conciliar en un depósito/variante no se puede mermar ninguno de sus lotes
+hasta conciliar con el conteo físico (un ajuste que lleve el bucket sin lote a cero). Una salida sin lote de **otro**
+depósito o variante no bloquea.
+
+**Nota (2026-09-30) — los CSV del motor no dejan pasar fórmulas.** Los exports de margen, reposición y vencimientos salen todos
+por `web.margen_router._csv`; ahora cada celda de **texto** que empieza con `=`, `+`, `-`, `@`, tab o retorno de carro se
+prefija con `'` (`web/csv_seguro.celda_segura`), porque un nombre de producto, un código, un lote, un depósito o una nota
+cargados por el personal podían ser una fórmula al abrir la planilla. Los números (también los negativos) y `None` no se
+tocan. Un test barre el paquete y falla si aparece otro export con su propio `csv.writer`.

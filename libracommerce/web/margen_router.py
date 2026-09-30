@@ -29,6 +29,7 @@ import io
 from ..erp import margen
 from . import fastapi as _fastapi
 from .catalogo_router import Conexion, _deps
+from .csv_seguro import celda_segura
 
 _fastapi()
 from fastapi import APIRouter, HTTPException  # noqa: E402
@@ -58,7 +59,8 @@ def _csv(filas: list[dict], campos: list[str], nombre: str) -> StreamingResponse
     w.writeheader()
     for fila in filas:
         # Un booleano como "True"/"False" no le dice nada a quien abre la planilla.
-        w.writerow({k: ("si" if v else "no") if isinstance(v, bool) else ("" if v is None else v)
+        # Los textos que una planilla leería como fórmula (`=`, `+`, `-`, `@`) salen con un `'` (`csv_seguro`).
+        w.writerow({k: celda_segura(("si" if v else "no") if isinstance(v, bool) else ("" if v is None else v))
                     for k, v in fila.items()})
     return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv",
                              headers={"Content-Disposition": f'attachment; filename="{nombre}"'})
