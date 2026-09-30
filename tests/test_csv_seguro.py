@@ -20,7 +20,7 @@ from libracommerce.web.csv_seguro import celda_segura
 from libracommerce.web.margen_router import build_margen_router
 from libracommerce.web.reposicion_router import build_reposicion_router
 
-PELIGROSOS = ["=1+1", "+SUMA(1;1)", "-2+3", "@SUMA(1)", "=HYPERLINK(\"http://x\",\"a\")", "\t=1", "\r=1"]
+PELIGROSOS = ["=1+1", "+SUMA(1;1)", "-2+3", "@SUMA(1)", "=HYPERLINK(\"http://x\",\"a\")", "\t=1", "\r=1", "\n=1", "\n=HYPERLINK(\"http://x\",\"a\")"]
 
 
 @pytest.mark.parametrize("texto", PELIGROSOS)
