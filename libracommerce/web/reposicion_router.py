@@ -31,7 +31,7 @@ _fastapi()
 from fastapi import APIRouter, HTTPException, Query  # noqa: E402
 
 _CAMPOS = [
-    "producto_id", "codigo", "nombre", "categoria", "unidad", "stock", "en_camino", "en_camino_sin_sucursal",
+    "producto_id", "codigo", "nombre", "categoria", "unidad", "stock", "vencido", "en_camino", "en_camino_sin_sucursal",
     "stock_minimo", "unidades_vendidas", "dias_con_stock", "rotacion_diaria", "cobertura_dias", "sugerido",
     "motivo", "sin_ventas", "posible_quiebre", "variantes",
 ]
@@ -45,18 +45,21 @@ def build_reposicion_router(
     """`GET ""` (los parámetros y la lista de productos a pedir) y `GET /export` (CSV). Sólo lee. Parámetros:
     `dias_rotacion` (30), `dias_cobertura` (15) y `plazo_entrega_dias` (3): enteros de 1 hasta su tope
     (`erp.reposicion.MAX_*`); `sucursal_id` (sin él, toda la instancia), `categoria`, `producto_id` y `solo_a_pedir`
-    (`true` por default: sólo los de `sugerido > 0`). Un parámetro inválido, o una sucursal que no existe, es 422."""
+    (`true` por default: sólo los de `sugerido > 0`) y `descontar_vencido` (`true` por default: lo que está en lotes
+    vencidos no cuenta como stock). Un parámetro inválido, o una sucursal que no existe, es 422."""
     abrir, _ = _deps(None, conexion)
     router = APIRouter(prefix=prefix, tags=["reportes"])
 
     def _reporte(dias_rotacion: int, dias_cobertura: int, plazo_entrega_dias: int, sucursal_id: int | None,
-                 categoria: str | None, producto_id: int | None, solo_a_pedir: bool) -> list[dict]:
+                 categoria: str | None, producto_id: int | None, solo_a_pedir: bool,
+                 descontar_vencido: bool) -> list[dict]:
         try:
             with abrir() as conn:
                 return reposicion.sugerencia_reposicion(
                     conn, dias_rotacion=dias_rotacion, dias_cobertura=dias_cobertura,
                     plazo_entrega_dias=plazo_entrega_dias, sucursal_id=sucursal_id, categoria=categoria or None,
                     producto_id=producto_id, solo_a_pedir=solo_a_pedir,
+                    descontar_vencido=descontar_vencido,
                 )
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
@@ -67,13 +70,13 @@ def build_reposicion_router(
                 plazo_entrega_dias: int = Query(reposicion.PLAZO_ENTREGA_DIAS, ge=1,
                                                 le=reposicion.MAX_PLAZO_ENTREGA_DIAS),
                 sucursal_id: int | None = None, categoria: str | None = None, producto_id: int | None = None,
-                solo_a_pedir: bool = True):
+                solo_a_pedir: bool = True, descontar_vencido: bool = True):
         productos = _reporte(dias_rotacion, dias_cobertura, plazo_entrega_dias, sucursal_id, categoria, producto_id,
-                             solo_a_pedir)
+                             solo_a_pedir, descontar_vencido)
         return {
             "dias_rotacion": dias_rotacion, "dias_cobertura": dias_cobertura,
             "plazo_entrega_dias": plazo_entrega_dias, "sucursal_id": sucursal_id, "categoria": categoria,
-            "producto_id": producto_id, "solo_a_pedir": solo_a_pedir,
+            "producto_id": producto_id, "solo_a_pedir": solo_a_pedir, "descontar_vencido": descontar_vencido,
             "resumen": {
                 "productos": len(productos),
                 "a_pedir": sum(1 for p in productos if p["sugerido"] > 0),
@@ -89,9 +92,9 @@ def build_reposicion_router(
                  plazo_entrega_dias: int = Query(reposicion.PLAZO_ENTREGA_DIAS, ge=1,
                                                  le=reposicion.MAX_PLAZO_ENTREGA_DIAS),
                  sucursal_id: int | None = None, categoria: str | None = None, producto_id: int | None = None,
-                 solo_a_pedir: bool = True):
+                 solo_a_pedir: bool = True, descontar_vencido: bool = True):
         productos = _reporte(dias_rotacion, dias_cobertura, plazo_entrega_dias, sucursal_id, categoria, producto_id,
-                             solo_a_pedir)
+                             solo_a_pedir, descontar_vencido)
         return _csv(productos, _CAMPOS, f"reposicion_{datetime.date.today().isoformat()}.csv")
 
     return router

@@ -12,6 +12,7 @@ import inspect
 from decimal import Decimal
 
 import pytest
+import test_vencimientos as _vto
 from conftest import USUARIO
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -20,7 +21,7 @@ from libracommerce.db.repository import SqliteCommerceRepository, repositorio_de
 from libracommerce.domain.catalog import CatalogItemType
 from libracommerce.domain.entities import Party, PartyType
 from libracommerce.domain.sales import Sale, SaleItem
-from libracommerce.erp import catalogo, compras, reposicion, stock, ventas
+from libracommerce.erp import catalogo, compras, reposicion, stock, vencimientos, ventas
 from libracommerce.usecases.sales import confirm_sale
 from libracommerce.web.reposicion_router import build_reposicion_router
 
@@ -667,13 +668,13 @@ def test_export_csv(abrir_ventas):
     assert r.status_code == 200 and r.headers["content-type"].startswith("text/csv")
     assert f'filename="reposicion_{datetime.date.today().isoformat()}.csv"' in r.headers["content-disposition"]
     lineas = r.text.splitlines()
-    assert lineas[0] == ("producto_id,codigo,nombre,categoria,unidad,stock,en_camino,en_camino_sin_sucursal,"
+    assert lineas[0] == ("producto_id,codigo,nombre,categoria,unidad,stock,vencido,en_camino,en_camino_sin_sucursal,"
                          "stock_minimo,unidades_vendidas,dias_con_stock,rotacion_diaria,cobertura_dias,sugerido,"
                          "motivo,sin_ventas,posible_quiebre,variantes")
     # Yerba: hay 10, rota 1 por día y vienen 5 (sin sucursal): 18 − 10 − 5 = 3. Quieto: sin rotación, va al final y sólo lo
     # empuja el mínimo (8 − 5 = 3). Los booleanos, legibles, y el `None` de la cobertura, vacío.
-    assert lineas[1] == f"{_id_de(abrir, 'Yerba')},,Yerba,,u,10.0,5.0,5.0,0.0,30.0,30,1.0,10.0,3,por_rotacion,no,no,0"
-    assert lineas[2] == f"{quieto},,Quieto,,u,5.0,0.0,0.0,8.0,0.0,30,0.0,,3,bajo_minimo,si,no,0"
+    assert lineas[1] == f"{_id_de(abrir, 'Yerba')},,Yerba,,u,10.0,0.0,5.0,5.0,0.0,30.0,30,1.0,10.0,3,por_rotacion,no,no,0"
+    assert lineas[2] == f"{quieto},,Quieto,,u,5.0,0.0,0.0,0.0,8.0,0.0,30,0.0,,3,bajo_minimo,si,no,0"
     assert len(lineas) == 3
 
 
@@ -685,3 +686,130 @@ def _id_de(abrir, nombre):
 def test_el_router_no_expone_nada_que_escriba(abrir_ventas):
     router = build_reposicion_router(conexion=abrir_ventas)
     assert {m for r in router.routes for m in r.methods} == {"GET"}
+
+
+# ── Reposición v2: lo vencido no es stock ────────────────────────────────
+
+# La base de `tests/test_vencimientos.py`: los dos schemas de un producto y la revisión 0002 aplicada.
+destino = _vto.destino
+abrir_vto_ventas = _vto.abrir_vto_ventas
+
+
+def _lote(abrir, pid, lote, vence, cantidad, *, deposito=None):
+    """Marca el producto como perecedero y le carga `cantidad` en un lote que vence el `vence`."""
+    with abrir() as conn:
+        deposito = deposito or catalogo.get_default_deposito_id(conn)
+        vencimientos.marcar_vence(conn, pid, True)
+        vencimientos.registrar_entrada_con_lote(conn, pid, deposito, lote, vence, cantidad,
+                                                clave_operacion=f"t-{pid}-{lote}-{deposito}", fecha=PREVIA)
+        conn.commit()
+
+
+def test_lo_vencido_no_cuenta_como_stock(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    yerba = _yerba_de_referencia(abrir)                       # stock 10, rota 1 por día: 18 − 10 = 8
+    _lote(abrir, yerba, "V1", "2026-09-01", 6)                # +6 vencidos: stock 16, utilizable 10
+    fila = _por_nombre(_reporte(abrir))["Yerba"]
+    assert fila["stock"] == 16 and fila["vencido"] == 6
+    assert fila["sugerido"] == 8                              # 18 − (16 − 6); sin descontar daría 2
+    v1 = _por_nombre(_reporte(abrir, descontar_vencido=False))["Yerba"]
+    assert v1["sugerido"] == 2 and v1["vencido"] == 0
+
+
+def test_un_lote_que_vence_hoy_o_despues_todavia_es_stock(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    yerba = _yerba_de_referencia(abrir)
+    _lote(abrir, yerba, "H", HOY.isoformat(), 3)
+    _lote(abrir, yerba, "F", "2026-12-01", 2)
+    fila = _por_nombre(_reporte(abrir))["Yerba"]
+    assert fila["vencido"] == 0 and fila["stock"] == 15 and fila["sugerido"] == 3
+
+
+def test_un_producto_sin_marcar_no_cambia(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    yerba = _yerba_de_referencia(abrir)
+    _lote(abrir, yerba, "V1", "2026-09-01", 6)
+    with abrir() as conn:                                      # lote vencido, pero el producto ya no está marcado
+        vencimientos.marcar_vence(conn, yerba, False)
+        conn.commit()
+    fila = _por_nombre(_reporte(abrir))["Yerba"]
+    assert fila["vencido"] == 0 and fila["sugerido"] == 2
+
+
+def test_lo_vencido_mueve_la_cobertura(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    yerba = _yerba_de_referencia(abrir)
+    _lote(abrir, yerba, "V1", "2026-09-01", 10)               # stock real 20: 10 útil + 10 vencido
+    con = _por_nombre(_reporte(abrir, solo_a_pedir=False))["Yerba"]
+    sin = _por_nombre(_reporte(abrir, solo_a_pedir=False, descontar_vencido=False))["Yerba"]
+    assert con["cobertura_dias"] == 10.0 and sin["cobertura_dias"] == 20.0
+
+
+def test_con_todo_el_stock_vencido_la_cobertura_es_cero_y_se_pide(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    with abrir() as conn:
+        yerba = _producto(conn, "Yerba")
+    _lote(abrir, yerba, "V1", "2026-09-01", 50)               # 50 en el depósito, todo vencido
+    _venta(abrir, [(yerba, "Yerba", 20, 100.0)], "2026-09-20", deposito_id=None)   # sale del lote (FEFO): quedan 30
+    fila = _por_nombre(_reporte(abrir))["Yerba"]
+    assert fila["vencido"] == 30 and fila["stock"] == 30
+    assert fila["sugerido"] > 0 and fila["cobertura_dias"] == 0.0
+
+
+def test_lo_vencido_se_descuenta_en_la_sucursal_que_lo_tiene(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    a, b, dep_a, dep_b = _dos_sucursales(abrir)
+    with abrir() as conn:
+        yerba = _producto(conn, "Yerba")
+    _lote(abrir, yerba, "VA", "2026-09-01", 9, deposito=dep_a)     # vencido en Centro
+    _lote(abrir, yerba, "OK", "2026-12-01", 9, deposito=dep_b)     # vigente en Norte
+    en_a = _por_nombre(_reporte(abrir, sucursal_id=a, solo_a_pedir=False))["Yerba"]
+    en_b = _por_nombre(_reporte(abrir, sucursal_id=b, solo_a_pedir=False))["Yerba"]
+    assert (en_a["stock"], en_a["vencido"]) == (9, 9)
+    assert (en_b["stock"], en_b["vencido"]) == (9, 0)
+    assert _por_nombre(_reporte(abrir, solo_a_pedir=False))["Yerba"]["vencido"] == 9
+
+
+def test_una_base_sin_la_revision_no_falla_y_no_descuenta(abrir_ventas):
+    abrir = abrir_ventas                                       # sin la revisión 0002
+    _yerba_de_referencia(abrir)
+    fila = _por_nombre(_reporte(abrir))["Yerba"]
+    assert fila["vencido"] == 0 and fila["sugerido"] == 8
+
+
+def test_el_router_acepta_y_devuelve_descontar_vencido(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    _yerba_de_hoy(abrir)
+    c = _cliente(abrir)
+    assert c.get("/api/reportes/reposicion").json()["descontar_vencido"] is True
+    cuerpo = c.get("/api/reportes/reposicion", params={"descontar_vencido": "false"}).json()
+    assert cuerpo["descontar_vencido"] is False and "vencido" in cuerpo["productos"][0]
+    assert c.get("/api/reportes/reposicion/export", params={"descontar_vencido": "false"}).status_code == 200
+
+
+def test_lo_vencido_se_consulta_solo_de_los_productos_marcados_y_los_depositos_que_se_miran(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    a, b, dep_a, dep_b = _dos_sucursales(abrir)
+    with abrir() as conn:
+        yerba = _producto(conn, "Yerba")
+        otro = _producto(conn, "Otro")
+    _lote(abrir, yerba, "VA", "2026-09-01", 9, deposito=dep_a)
+    _lote(abrir, otro, "VO", "2026-09-01", 4, deposito=dep_b)
+    with abrir() as conn:
+        antes = reposicion.saldos_por_bucket
+        pedidos = []
+
+        def espia(c, donde, params, depositos=None):
+            pedidos.append((donde, list(params)))
+            return antes(c, donde, params, depositos)
+
+        reposicion.saldos_por_bucket = espia
+        try:
+            fila = _por_nombre(reposicion.sugerencia_reposicion(conn, hoy=HOY, producto_id=yerba, sucursal_id=a,
+                                                                solo_a_pedir=False))["Yerba"]
+        finally:
+            reposicion.saldos_por_bucket = antes
+    assert fila["vencido"] == 9
+    [(donde, params)] = pedidos
+    assert "sm.item_id IN" in donde and "sm.location_id IN" in donde
+    assert params == [yerba, dep_a]

@@ -47,6 +47,13 @@ distinguen), depende de que el ledger esté bien cargado, y con menos de `7` dí
 divide por 7 para que un solo día con stock no dispare la rotación. `posible_quiebre` es «stock ≤ 0 o algún día sin
 stock en la ventana»: la rotación de ese producto es una estimación y quien pide debe mirarla.
 
+**Lo vencido no se cuenta como stock (v2, 2026-10-01).** Para un producto marcado como perecedero
+(`catalog_items.tracks_expiry`), la mercadería de un lote con `vence < hoy` no se puede ofrecer: se descuenta del
+stock disponible para la cuenta, así que el producto se pide aunque la góndola esté «llena» de lo vencido. El campo
+`stock` sigue mostrando el real y `vencido` dice cuánto se descontó. Sólo cuentan los lotes con saldo positivo de los
+depósitos que se miran; el saldo «sin lote» (sin fecha) no se descuenta. `descontar_vencido=False` vuelve a la cuenta
+de la v1. Un producto sin marcar, o una base sin la revisión `0002`, no cambia en nada.
+
 Agrupa por producto, no por variante (`variantes` dice cuántas activas tiene). Sólo productos activos, de tipo
 `product` y `purchasable`; se agrega en Python con `Decimal` y las consultas son las mismas en SQLite y PostgreSQL.
 """
@@ -57,7 +64,9 @@ import datetime
 from decimal import ROUND_CEILING, Decimal
 
 from . import margen
+from .lotes import saldos_por_bucket
 from .stock import get_stock_por_deposito
+from .vencimientos import tiene_revision
 
 DIAS_ROTACION = 30
 DIAS_COBERTURA = 15
@@ -163,6 +172,27 @@ def _en_camino(conn, sucursal_id: int | None) -> tuple[dict[int, Decimal], dict[
     return total, sin_sucursal
 
 
+def _vencido(conn, ids: set[int], depositos: set[int], hoy: datetime.date) -> dict[int, Decimal]:
+    """Por producto marcado, la suma de los saldos positivos de los lotes ya vencidos (`vence < hoy`) en `depositos`.
+    Vacío si la base no tiene la revisión `0002` o nadie está marcado. Ver "Lo vencido no se cuenta" en el módulo."""
+    if not ids or not tiene_revision(conn):
+        return {}
+    marcados = {f["id"] for f in conn.execute("SELECT id FROM catalog_items WHERE tracks_expiry = 1").fetchall()}
+    marcados &= ids
+    if not marcados or not depositos:
+        return {}
+    vencido: dict[int, Decimal] = {}
+    # Sólo los productos marcados y los depósitos que se miran, ya en el SQL: un reporte de un producto no agrupa el
+    # historial de toda la instancia.
+    donde = (f"sm.expires_at IS NOT NULL AND sm.item_id IN ({','.join('?' for _ in marcados)}) "
+             f"AND sm.location_id IN ({','.join('?' for _ in depositos)})")
+    saldos = saldos_por_bucket(conn, donde, [*sorted(marcados), *sorted(depositos)], depositos)
+    for (item, _dep, _variante, _lote, vence), saldo in saldos.items():
+        if item in marcados and vence is not None and saldo > 0 and datetime.date.fromisoformat(vence) < hoy:
+            vencido[item] = vencido.get(item, _CERO) + saldo
+    return vencido
+
+
 def _dias_sin_stock(saldo_final: Decimal, movimientos: list[tuple[str, Decimal]], desde: datetime.date,
                     dias: int, dias_con_venta: set[str]) -> int:
     """Los días de la ventana en que el saldo nunca fue positivo y no hubo ninguna venta.
@@ -188,14 +218,16 @@ def _dias_sin_stock(saldo_final: Decimal, movimientos: list[tuple[str, Decimal]]
 def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobertura: int = DIAS_COBERTURA,
                           plazo_entrega_dias: int = PLAZO_ENTREGA_DIAS, sucursal_id: int | None = None,
                           categoria: str | None = None, producto_id: int | None = None,
-                          solo_a_pedir: bool = True, hoy: datetime.date | None = None) -> list[dict]:
+                          solo_a_pedir: bool = True, descontar_vencido: bool = True,
+                          hoy: datetime.date | None = None) -> list[dict]:
     """Qué pedir, por producto, del más urgente al menos (menor cobertura primero, luego mayor `sugerido`; los
     que no tienen rotación, al final). Cada fila: `producto_id`, `codigo`, `nombre`, `unidad`, `categoria`, `stock`,
-    `en_camino`, `en_camino_sin_sucursal`, `stock_minimo`, `unidades_vendidas`, `dias_con_stock`, `rotacion_diaria`,
+    `vencido`, `en_camino`, `en_camino_sin_sucursal`, `stock_minimo`, `unidades_vendidas`, `dias_con_stock`, `rotacion_diaria`,
     `cobertura_dias` (`None` sin rotación), `sugerido`, `motivo` (`bajo_minimo`, `por_rotacion`, `ambos`, o `None`
     si no hay nada que pedir), `sin_ventas`, `posible_quiebre` y `variantes`. Ver el docstring del módulo.
 
-    `solo_a_pedir` (el default) deja sólo los de `sugerido > 0`. `hoy` es para las pruebas: el default es la fecha
+    `solo_a_pedir` (el default) deja sólo los de `sugerido > 0`. `descontar_vencido` (el default) resta del stock lo
+    que está en lotes vencidos. `hoy` es para las pruebas: el default es la fecha
     del servidor. Levanta `ValueError` con un parámetro fuera de rango o una `sucursal_id` que no existe.
     No commitea (no escribe)."""
     _entero_en_rango("dias_rotacion", dias_rotacion, MAX_DIAS_ROTACION)
@@ -233,6 +265,7 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
             vendidas[item_id] = vendidas.get(item_id, _CERO) + unidades
             dias_con_venta.setdefault(item_id, set()).add(str(occurred_on)[:10])
 
+    vencidos = _vencido(conn, ids, depositos, hoy) if descontar_vencido else {}
     en_camino, en_camino_sin_sucursal = _en_camino(conn, sucursal_id)
     variantes = {
         f["item_id"]: f["n"]
@@ -259,7 +292,9 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
         dias_de_muestra = max(dias_con_stock, muestra_minima)
         sin_ventas = unidades <= 0
 
-        disponible = max(stock, _CERO) + pedido
+        vencido = vencidos.get(pid, _CERO)
+        utilizable = max(stock - vencido, _CERO)
+        disponible = utilizable + pedido
         por_rotacion = _techo(max(unidades * horizonte / dias_de_muestra - disponible, _CERO), escala)
         bajo_minimo = minimo > 0 and disponible < minimo
         sugerido = max(por_rotacion, _techo(minimo - disponible, escala)) if bajo_minimo else por_rotacion
@@ -270,10 +305,11 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
         if solo_a_pedir and sugerido <= 0:
             continue
 
-        cobertura = None if sin_ventas else float(round(max(stock, _CERO) * dias_de_muestra / unidades, 1))
+        cobertura = None if sin_ventas else float(round(utilizable * dias_de_muestra / unidades, 1))
         filas.append({
             "producto_id": pid, "codigo": p["codigo"], "nombre": p["name"], "unidad": p["unit_code"],
-            "categoria": p["categoria"], "stock": _cantidad(stock, informe), "en_camino": _cantidad(pedido, informe),
+            "categoria": p["categoria"], "stock": _cantidad(stock, informe),
+            "vencido": _cantidad(vencido, informe), "en_camino": _cantidad(pedido, informe),
             "en_camino_sin_sucursal": _cantidad(en_camino_sin_sucursal.get(pid, _CERO), informe),
             "stock_minimo": _cantidad(minimo, informe), "unidades_vendidas": _cantidad(unidades, informe),
             "dias_con_stock": dias_con_stock, "rotacion_diaria": _cantidad(unidades / dias_de_muestra, informe),
