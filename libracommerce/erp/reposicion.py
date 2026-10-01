@@ -179,10 +179,14 @@ def _vencido(conn, ids: set[int], depositos: set[int], hoy: datetime.date) -> di
         return {}
     marcados = {f["id"] for f in conn.execute("SELECT id FROM catalog_items WHERE tracks_expiry = 1").fetchall()}
     marcados &= ids
-    if not marcados:
+    if not marcados or not depositos:
         return {}
     vencido: dict[int, Decimal] = {}
-    saldos = saldos_por_bucket(conn, "sm.expires_at IS NOT NULL", [], depositos)
+    # Sólo los productos marcados y los depósitos que se miran, ya en el SQL: un reporte de un producto no agrupa el
+    # historial de toda la instancia.
+    donde = (f"sm.expires_at IS NOT NULL AND sm.item_id IN ({','.join('?' for _ in marcados)}) "
+             f"AND sm.location_id IN ({','.join('?' for _ in depositos)})")
+    saldos = saldos_por_bucket(conn, donde, [*sorted(marcados), *sorted(depositos)], depositos)
     for (item, _dep, _variante, _lote, vence), saldo in saldos.items():
         if item in marcados and vence is not None and saldo > 0 and datetime.date.fromisoformat(vence) < hoy:
             vencido[item] = vencido.get(item, _CERO) + saldo
