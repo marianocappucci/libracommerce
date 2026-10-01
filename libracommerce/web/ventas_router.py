@@ -29,6 +29,7 @@ instala cualquier producto que monte ventas.
 
 from __future__ import annotations
 
+import logging
 import math
 import sqlite3
 from collections.abc import Callable
@@ -50,6 +51,8 @@ from pydantic import BaseModel, field_validator, model_validator  # noqa: E402
 #: El medio con el que cobra el QR de caja. Pasa por `medios_pago.validar` y no
 #: es un literal suelto: la grafía se normalizó a `mercadopago` el 2026-08-25.
 MEDIO_DEL_QR = medios_pago.validar("mercadopago")
+
+_log = logging.getLogger(__name__)
 
 
 class ItemPayload(BaseModel):
@@ -222,7 +225,15 @@ def _agregar_avisos(conn, venta: dict | None, venta_id: int) -> None:
     """Agrega `avisos` a la venta **sólo si hay alguno** (sin avisos la respuesta es la de siempre)."""
     if venta is None:
         return
-    avisos = lotes.avisos_de_venta(conn, venta_id)
+    # 🔴 **Falla ABIERTO.** En `POST /api/ventas` esto corre DESPUÉS del commit de la venta y del descuento de stock: si el cálculo de
+    # los avisos lanzara, la respuesta sería un error aunque la venta ya está registrada, y el POS reintentaría el cobro (duplicando
+    # venta y cobro) o, en el cobro por QR, perdería el id de la venta pendiente (hallazgo de Codex, 2026-10-01). Un aviso es un
+    # complemento informativo: si no se puede calcular se omite, se registra el error y se devuelve la venta confirmada.
+    try:
+        avisos = lotes.avisos_de_venta(conn, venta_id)
+    except Exception:  # noqa: BLE001 -- deliberadamente amplio: nada de esto puede ocultar una venta ya registrada
+        _log.warning("No se pudieron calcular los avisos de vencimiento de la venta %s; se omiten", venta_id, exc_info=True)
+        return
     if avisos:
         venta["avisos"] = avisos
 
