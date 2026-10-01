@@ -928,3 +928,21 @@ siguen «sin lote»**: el saldo «sin lote» negativo heredado mantiene la guard
 concilie con el conteo físico. Si el producto usa alguno de los caminos (a)–(c), el saldo de sus lotes puede volver a sobreestimarse.
 La guarda de stock total y de saldo «sin lote» negativo de la nota del 2026-09-30 sigue en pie.
 > **Nota 2026-10-01 (hallazgo de Codex sobre el montaje en VentaLibra):** `_agregar_avisos` corre en `POST /api/ventas` DESPUÉS del commit de la venta y del descuento de stock; si el cálculo de los avisos fallaba, la respuesta era un error aunque la venta ya estaba registrada, y el POS reintentaba el cobro (venta y cobro duplicados) o, en el cobro por QR, perdía el id de la venta pendiente. Ahora **falla abierto**: se omite `avisos`, se registra el error y se devuelve la venta confirmada (v0.30.1). Un aviso es un complemento informativo y nunca puede ocultar una venta ya registrada.
+
+## ADR-019 — Reposición v2: lo que está en un lote vencido no cuenta como stock (2026-10-01)
+
+**Contexto.** ADR-017 dejó diferido «descontar lo vencido» hasta que existiera FEFO por lote (ADR-018, A-4). Con A-4
+hecho, un producto perecedero puede tener la góndola llena de mercadería que ya no se puede ofrecer, y la v1 lo
+daba por cubierto y no sugería pedir.
+
+**Decisión.** Para un producto marcado (`catalog_items.tracks_expiry = 1`), la suma de los saldos positivos de los
+lotes con `vence < hoy` en los depósitos que se miran se resta del stock disponible para la cuenta (`sugerido`,
+`cobertura_dias`). El campo `stock` sigue siendo el real; `vencido` informa cuánto se descontó. Un lote que vence
+hoy todavía es stock. El saldo «sin lote» no tiene fecha y no se descuenta. Se puede apagar con
+`descontar_vencido=false` (router y función), y es el default `true`: sólo cambia a los productos marcados, así
+que un producto sin marcar, o una base sin la revisión `0002`, devuelve lo mismo que en la v1. Sin migración.
+
+**Consecuencias.** Un producto con todo el stock vencido figura con cobertura 0 y se sugiere pedir su necesidad
+entera. «Hoy» sigue siendo la fecha del servidor (límite de ADR-017). Sigue diferido: `lead_time_days` y
+`max_stock` por producto, proveedor por producto, orden de compra en borrador, estacionalidad, `min_stock` por
+sucursal y descontar lo que vence *dentro* del horizonte de cobertura (hoy sólo lo ya vencido).
