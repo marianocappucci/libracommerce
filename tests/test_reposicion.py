@@ -785,3 +785,31 @@ def test_el_router_acepta_y_devuelve_descontar_vencido(abrir_vto_ventas):
     cuerpo = c.get("/api/reportes/reposicion", params={"descontar_vencido": "false"}).json()
     assert cuerpo["descontar_vencido"] is False and "vencido" in cuerpo["productos"][0]
     assert c.get("/api/reportes/reposicion/export", params={"descontar_vencido": "false"}).status_code == 200
+
+
+def test_lo_vencido_se_consulta_solo_de_los_productos_marcados_y_los_depositos_que_se_miran(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    a, b, dep_a, dep_b = _dos_sucursales(abrir)
+    with abrir() as conn:
+        yerba = _producto(conn, "Yerba")
+        otro = _producto(conn, "Otro")
+    _lote(abrir, yerba, "VA", "2026-09-01", 9, deposito=dep_a)
+    _lote(abrir, otro, "VO", "2026-09-01", 4, deposito=dep_b)
+    with abrir() as conn:
+        antes = reposicion.saldos_por_bucket
+        pedidos = []
+
+        def espia(c, donde, params, depositos=None):
+            pedidos.append((donde, list(params)))
+            return antes(c, donde, params, depositos)
+
+        reposicion.saldos_por_bucket = espia
+        try:
+            fila = _por_nombre(reposicion.sugerencia_reposicion(conn, hoy=HOY, producto_id=yerba, sucursal_id=a,
+                                                                solo_a_pedir=False))["Yerba"]
+        finally:
+            reposicion.saldos_por_bucket = antes
+    assert fila["vencido"] == 9
+    [(donde, params)] = pedidos
+    assert "sm.item_id IN" in donde and "sm.location_id IN" in donde
+    assert params == [yerba, dep_a]
