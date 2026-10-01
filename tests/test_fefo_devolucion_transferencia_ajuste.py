@@ -1565,3 +1565,29 @@ def test_en_postgres_una_merma_manual_espera_a_una_venta_del_mismo_producto(abri
         venta.close()
     assert resultado == ["pasó"]
     assert _saldos(abrir_fefo, pid) == {None: -2}         # vio L1 en 1: 1 del lote y 2 de faltante
+
+
+def test_http_si_falla_el_calculo_de_avisos_la_venta_confirmada_se_devuelve_igual(abrir_fefo, monkeypatch):
+    """Hallazgo de Codex (2026-10-01): los avisos se calculan DESPUÉS del commit de la venta; si ese cálculo lanzara y la respuesta
+    fuera un error, el POS reintentaría el cobro (venta y cobro duplicados). Tiene que fallar ABIERTO: venta confirmada, sin `avisos`."""
+    from libracommerce.erp import lotes
+
+    pid = _producto(abrir_fefo)
+    dep = _principal(abrir_fefo)
+    client = _app(abrir_fefo, avisos=True, stock_habilitado=lambda: True)
+
+    def _falla(*_a, **_k):
+        raise RuntimeError("falla simulada del cálculo de avisos")
+
+    monkeypatch.setattr(lotes, "avisos_de_venta", _falla)
+    cuerpo = {"fecha": "2026-09-12", "items": [{"producto_id": pid, "nombre": "Yerba", "qty": 1, "precio": 100}],
+              "subtotal": 100, "descuento": 0, "total": 100, "deposito_id": dep,
+              "pagos": [{"medio": "efectivo", "monto": 100}]}
+    antes = _ledger(abrir_fefo)
+    r = client.post("/api/ventas", json=cuerpo)
+    assert r.status_code in (200, 201), r.text
+    venta = r.json()
+    assert venta.get("id") and "avisos" not in venta
+    assert len(_ledger(abrir_fefo)) > len(antes)                       # la venta y el descuento de stock quedaron registrados
+    d = client.get(f"/api/ventas/{venta['id']}")
+    assert d.status_code == 200 and "avisos" not in d.json()
