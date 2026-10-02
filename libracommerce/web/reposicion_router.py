@@ -37,7 +37,7 @@ _CAMPOS = [
     "producto_id", "codigo", "nombre", "categoria", "unidad", "stock", "vencido", "en_camino", "en_camino_sin_sucursal",
     "stock_minimo", "unidades_vendidas", "dias_con_stock", "rotacion_diaria", "cobertura_dias", "sugerido",
     "motivo", "sin_ventas", "posible_quiebre", "variantes", "plazo_entrega_dias", "plazo_propio", "stock_maximo",
-    "limitado_por_maximo",
+    "limitado_por_maximo", "proveedor_id", "proveedor",
 ]
 
 
@@ -46,6 +46,8 @@ class ParametrosDeReposicion(BaseModel):
     model_config = ConfigDict(extra="forbid")
     plazo_entrega_dias: int | None
     stock_maximo: float | None
+    #: Opcional: si la clave no viene, el proveedor queda como estaba; `null` lo borra (ADR-021).
+    proveedor_id: int | None = None
 
 
 def build_reposicion_router(
@@ -57,20 +59,20 @@ def build_reposicion_router(
     `dias_rotacion` (30), `dias_cobertura` (15) y `plazo_entrega_dias` (3): enteros de 1 hasta su tope
     (`erp.reposicion.MAX_*`); `sucursal_id` (sin él, toda la instancia), `categoria`, `producto_id` y `solo_a_pedir`
     (`true` por default: sólo los de `sugerido > 0`) y `descontar_vencido` (`true` por default: lo que está en lotes
-    vencidos no cuenta como stock). Un parámetro inválido, o una sucursal que no existe, es 422."""
+    vencidos no cuenta como stock) y `proveedor_id` (sólo los productos de ese proveedor habitual, ADR-021). Un parámetro inválido, o una sucursal que no existe, es 422."""
     abrir, _ = _deps(None, conexion)
     router = APIRouter(prefix=prefix, tags=["reportes"])
 
     def _reporte(dias_rotacion: int, dias_cobertura: int, plazo_entrega_dias: int, sucursal_id: int | None,
                  categoria: str | None, producto_id: int | None, solo_a_pedir: bool,
-                 descontar_vencido: bool) -> list[dict]:
+                 descontar_vencido: bool, proveedor_id: int | None) -> list[dict]:
         try:
             with abrir() as conn:
                 return reposicion.sugerencia_reposicion(
                     conn, dias_rotacion=dias_rotacion, dias_cobertura=dias_cobertura,
                     plazo_entrega_dias=plazo_entrega_dias, sucursal_id=sucursal_id, categoria=categoria or None,
                     producto_id=producto_id, solo_a_pedir=solo_a_pedir,
-                    descontar_vencido=descontar_vencido,
+                    descontar_vencido=descontar_vencido, proveedor_id=proveedor_id,
                 )
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
@@ -81,13 +83,15 @@ def build_reposicion_router(
                 plazo_entrega_dias: int = Query(reposicion.PLAZO_ENTREGA_DIAS, ge=1,
                                                 le=reposicion.MAX_PLAZO_ENTREGA_DIAS),
                 sucursal_id: int | None = None, categoria: str | None = None, producto_id: int | None = None,
-                solo_a_pedir: bool = True, descontar_vencido: bool = True):
+                solo_a_pedir: bool = True, descontar_vencido: bool = True,
+                proveedor_id: int | None = None):
         productos = _reporte(dias_rotacion, dias_cobertura, plazo_entrega_dias, sucursal_id, categoria, producto_id,
-                             solo_a_pedir, descontar_vencido)
+                             solo_a_pedir, descontar_vencido, proveedor_id)
         return {
             "dias_rotacion": dias_rotacion, "dias_cobertura": dias_cobertura,
             "plazo_entrega_dias": plazo_entrega_dias, "sucursal_id": sucursal_id, "categoria": categoria,
             "producto_id": producto_id, "solo_a_pedir": solo_a_pedir, "descontar_vencido": descontar_vencido,
+            "proveedor_id": proveedor_id,
             "resumen": {
                 "productos": len(productos),
                 "a_pedir": sum(1 for p in productos if p["sugerido"] > 0),
@@ -103,9 +107,10 @@ def build_reposicion_router(
                  plazo_entrega_dias: int = Query(reposicion.PLAZO_ENTREGA_DIAS, ge=1,
                                                  le=reposicion.MAX_PLAZO_ENTREGA_DIAS),
                  sucursal_id: int | None = None, categoria: str | None = None, producto_id: int | None = None,
-                 solo_a_pedir: bool = True, descontar_vencido: bool = True):
+                 solo_a_pedir: bool = True, descontar_vencido: bool = True,
+                proveedor_id: int | None = None):
         productos = _reporte(dias_rotacion, dias_cobertura, plazo_entrega_dias, sucursal_id, categoria, producto_id,
-                             solo_a_pedir, descontar_vencido)
+                             solo_a_pedir, descontar_vencido, proveedor_id)
         return _csv(productos, _CAMPOS, f"reposicion_{datetime.date.today().isoformat()}.csv")
 
     return router
@@ -151,8 +156,10 @@ def build_reposicion_parametros_router(
     def fijar(producto_id: int, cuerpo: ParametrosDeReposicion):
         def _op():
             with abrir() as conn:
+                # `proveedor_id` sólo se toca si la clave vino en el cuerpo (con `null` se borra).
+                extra = {"proveedor_id": cuerpo.proveedor_id} if "proveedor_id" in cuerpo.model_fields_set else {}
                 resultado = reposicion.fijar_parametros(conn, producto_id, plazo_entrega_dias=cuerpo.plazo_entrega_dias,
-                                                        stock_maximo=cuerpo.stock_maximo)
+                                                        stock_maximo=cuerpo.stock_maximo, **extra)
                 conn.commit()
                 return resultado
         return _atajar(_op)

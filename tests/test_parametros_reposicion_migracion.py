@@ -30,7 +30,7 @@ def test_la_revision_0003_corre_sobre_datos_previos_sin_tocar_una_fila_y_es_idem
     migrar.upgrade(destino, "0002_vencimientos_lotes")
     antes = _con_conexion(destino, _poblar)
 
-    migrar.upgrade(destino)
+    migrar.upgrade(destino, "0003_parametros_reposicion")
 
     def verificar(conn):
         cols = _columnas_de(conn, "catalog_items")
@@ -41,13 +41,13 @@ def test_la_revision_0003_corre_sobre_datos_previos_sin_tocar_una_fila_y_es_idem
         return [f[0] for f in conn.execute("SELECT version_num FROM alembic_version_libracommerce").fetchall()]
 
     assert _con_conexion(destino, verificar) == ["0003_parametros_reposicion"]
-    migrar.upgrade(destino)
+    migrar.upgrade(destino, "0003_parametros_reposicion")
     assert _con_conexion(destino, verificar) == ["0003_parametros_reposicion"]
 
 
 def test_la_revision_0003_baja_sin_tocar_el_ledger_ni_la_marca_de_vencimiento(destino):
     _crear_base_al_dia_de_0001(destino)
-    migrar.upgrade(destino)
+    migrar.upgrade(destino, "0003_parametros_reposicion")
     antes = _con_conexion(destino, _poblar)
 
     command.downgrade(migrar.configuracion(destino), "0002_vencimientos_lotes")
