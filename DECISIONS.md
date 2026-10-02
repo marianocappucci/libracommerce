@@ -970,3 +970,7 @@ responden `SinRevision`/503.
 **Consecuencias.** Pendiente fuera de este ADR: cargarlos desde la pantalla del producto (kit) y montar el router en VentaLibra con su
 capacidad; proveedor por producto, orden de compra en borrador, estacionalidad, `min_stock` por sucursal y descontar lo que vence dentro
 del horizonte. Un `max_stock` por sucursal tampoco existe: el techo es del producto en la instancia o la sucursal que se mira.
+
+> **Nota 2026-10-02 (hallazgo de Codex sobre el montaje en VentaLibra, v0.32.1):** `update_producto` ahora rechaza (`ValueError`, el router lo contesta 422) subir el
+> `stock_minimo` por encima del `max_stock` del producto. Antes sólo lo exigía `fijar_parametros` y una edición del producto (que puede hacer un rol que no ve los
+> parámetros) dejaba la invariante rota. El techo manda igual si ya había un mínimo mayor (datos anteriores). Una base sin la revisión `0003` no cambia.
