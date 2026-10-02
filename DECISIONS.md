@@ -1038,3 +1038,23 @@ motor ni siquiera tiene una operación que pase una orden a `sent`. Un producto 
 
 **Consecuencias.** Falta el botón en la reposición ([[libra-ui]]) y el montaje en VentaLibra. Sigue diferido: estacionalidad, `min_stock` por sucursal y descontar lo que vence
 dentro del horizonte. Una orden generada con el costo en 0 hay que completarla antes de enviarla.
+
+## ADR-023 — Reposición v2: estacionalidad por lo que pasó hace un año (2026-10-02)
+
+**Contexto.** La rotación de los últimos `N` días supone que lo que viene se parece a lo reciente. En un producto estacional no es así (el helado en octubre, el pan dulce en diciembre) y la
+reposición pide de menos justo antes de la temporada y de más justo después. Diferido desde ADR-017.
+
+**Decisión.** Parámetro **opt-in** `estacionalidad` (apagado por default: sin él, el resultado es byte a byte el de antes) en `sugerencia_reposicion`, `GET /api/reportes/reposicion` (y su export) y
+en el cuerpo de la generación de órdenes en borrador. Con él, para cada producto se comparan dos ventanas **de hace un año** (la misma fecha, un año atrás; el 29 de febrero cae en el 28):
+la **de referencia** (los `N` días que terminaban entonces, equivalente a la ventana de ahora) y la **proyectada** (los `H` días que venían después, con el horizonte propio de cada producto,
+incluido su plazo de entrega propio, cortada en hoy si pasa de un año). El `factor_estacional` es la razón de las rotaciones diarias, proyectada / de referencia, **acotado entre 0,25 y 4**, y
+multiplica la proyección: `necesidad = unidades × H / días_de_muestra × factor`. No toca el stock, lo vencido, lo que viene en camino, el mínimo ni el techo.
+
+- **Sin factor (`None`, sin ajuste)** si la ventana de referencia del año pasado tiene **menos de 3 días con venta**: una instancia con menos de un año de historia o un producto que entonces no se
+  vendía no inventa una temporada. Sin migración ni configuración: usa las ventas de siempre (`erp.margen.unidades_netas`, con el filtro de sucursal).
+- **Límites, dichos en voz alta:** confía en **un solo año** (un año atípico se hereda), no corrige los quiebres de entonces (una temporada con el producto agotado parece más floja de lo que
+  fue), no inventa temporada para un producto sin rotación reciente (necesidad cero sigue en cero) y el factor es por producto, no por categoría.
+- Cada fila trae `factor_estacional` (también en el CSV); la respuesta devuelve `estacionalidad`.
+
+**Consecuencias.** Falta el interruptor y la columna en la reposición (libra-ui) y activarlo en VentaLibra. Sigue diferido: `min_stock` por sucursal y descontar lo que vence dentro del horizonte.
+
