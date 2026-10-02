@@ -152,3 +152,22 @@ def test_las_ordenes_en_borrador_usan_el_mismo_ajuste_si_se_pide(abrir_vto_venta
     assert [float(li["cantidad"]) for o in r["ordenes"] for li in o["lineas"]] == [44.0]
     with pytest.raises(reposicion_ordenes.ClaveReusada):
         generar("est-1")
+
+
+def test_una_necesidad_que_da_un_entero_exacto_no_pide_una_unidad_de_mas(abrir_vto_ventas):
+    """3 unidades de referencia en 30 días y 1 proyectada en 18 (factor 1/3 · 18/18 ...): la cuenta exacta da un entero y un cociente decimal lo pasaba por un resto de 1e-27."""
+    abrir = abrir_vto_ventas
+    with abrir() as conn:
+        pid = catalogo.create_producto(conn, "Exacto", precio_venta=100.0, precio_costo=60.0)
+        stock.ajustar_stock(conn, pid, 1000.0, "inicial", fecha="2025-08-01")
+        conn.commit()
+    for d in (5, 10, 15):
+        _venta(abrir, [(pid, "Exacto", 1, 100.0)], AÑO_PASADO.format(d))                  # 3 unidades en la referencia
+    _venta(abrir, [(pid, "Exacto", 1, 100.0)], SIGUIENTE.format(10))                     # 1 en los 18 días que siguen
+    with abrir() as conn:
+        stock.ajustar_stock(conn, pid, 21.0, "inicial", fecha=_rep.PREVIA)
+        conn.commit()
+    _venta(abrir, [(pid, "Exacto", 21, 100.0)], "2026-09-30")                            # 21 recientes, el último día: no hay días sin stock y queda en cero
+    fila = _fila(abrir, "Exacto", estacionalidad=True)
+    # rotación 21/30 por día; horizonte 18; factor (1/18)/(3/30) = 5/9: necesidad exacta 21/30 × 18 × 5/9 = 7.
+    assert fila["stock"] == 0 and fila["sugerido"] == 7

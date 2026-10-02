@@ -84,6 +84,7 @@ from __future__ import annotations
 
 import datetime
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+from fractions import Fraction
 
 from . import margen
 from .lotes import saldos_por_bucket
@@ -100,8 +101,8 @@ MAX_PLAZO_ENTREGA_DIAS = 180
 
 #: Estacionalidad (ADR-023): el factor se acota entre estos dos valores (un producto no se pide a menos de un cuarto ni a más de cuatro veces de lo que
 #: dice la rotación reciente por lo que pasó hace un año) y exige este mínimo de días con venta en la ventana de referencia del año pasado.
-FACTOR_ESTACIONAL_MIN = Decimal("0.25")
-FACTOR_ESTACIONAL_MAX = Decimal("4")
+FACTOR_ESTACIONAL_MIN = Fraction(1, 4)
+FACTOR_ESTACIONAL_MAX = Fraction(4)
 _MIN_DIAS_CON_VENTA_ESTACIONAL = 3
 
 MOTIVOS = ("bajo_minimo", "por_rotacion", "ambos")
@@ -280,7 +281,7 @@ def _un_anio_atras(dia: datetime.date) -> datetime.date:
 
 
 def _factores_estacionales(conn, ids: set[int], hoy: datetime.date, dias_rotacion: int, horizontes: dict[int, int],
-                           sucursal_id: int | None) -> dict[int, Decimal]:
+                           sucursal_id: int | None) -> dict[int, Fraction]:
     """`{producto_id: factor}` sólo de los productos con historia suficiente de hace un año (ver "Estacionalidad" en el docstring del módulo).
 
     Una sola consulta de ventas cubre las dos ventanas del año pasado; la proyectada de cada producto es `horizontes[id]` días (el suyo: puede tener plazo propio),
@@ -292,7 +293,7 @@ def _factores_estacionales(conn, ids: set[int], hoy: datetime.date, dias_rotacio
     for occurred_on, item_id, unidades in margen.unidades_netas(conn, ref_ini.isoformat(), hasta.isoformat(), sucursal_id):
         if item_id in ids and unidades > 0:
             por_producto.setdefault(item_id, []).append((datetime.date.fromisoformat(str(occurred_on)[:10]), unidades))
-    factores: dict[int, Decimal] = {}
+    factores: dict[int, Fraction] = {}
     for item_id, ventas in por_producto.items():
         referencia = [(d, u) for d, u in ventas if ref_ini <= d <= ref_fin]
         if len({d for d, _ in referencia}) < _MIN_DIAS_CON_VENTA_ESTACIONAL:
@@ -302,8 +303,9 @@ def _factores_estacionales(conn, ids: set[int], hoy: datetime.date, dias_rotacio
         if dias_proyectados < 1:
             continue
         proyectadas = sum((u for d, u in ventas if ref_fin < d <= fin), _CERO)
-        diaria_referencia = sum((u for _, u in referencia), _CERO) / dias_rotacion
-        factor = (proyectadas / dias_proyectados) / diaria_referencia
+        # Racionales exactos: un cociente de `Decimal` deja restos (`7.000000000000000000000000001`) que el techo de `_techo` convierte en una unidad de más.
+        diaria_referencia = Fraction(sum((u for _, u in referencia), _CERO)) / dias_rotacion
+        factor = (Fraction(proyectadas) / dias_proyectados) / diaria_referencia
         factores[item_id] = min(max(factor, FACTOR_ESTACIONAL_MIN), FACTOR_ESTACIONAL_MAX)
     return factores
 
@@ -359,7 +361,7 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
             vendidas[item_id] = vendidas.get(item_id, _CERO) + unidades
             dias_con_venta.setdefault(item_id, set()).add(str(occurred_on)[:10])
 
-    factores: dict[int, Decimal] = {}
+    factores: dict[int, Fraction] = {}
     if estacionalidad:
         horizontes = {p["id"]: dias_cobertura + (int(p["lead_time_days"]) if p["lead_time_days"] is not None else plazo_entrega_dias) for p in productos}
         factores = _factores_estacionales(conn, ids, hoy, dias_rotacion, horizontes, sucursal_id)
@@ -399,8 +401,12 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
         horizonte = dias_cobertura + plazo
         maximo = _dec(p["max_stock"]) if p["max_stock"] is not None else None
         factor = factores.get(pid)
-        proyectado = unidades * horizonte / dias_de_muestra
-        por_rotacion = _techo(max((proyectado * factor if factor is not None else proyectado) - disponible, _CERO), escala)
+        if factor is None:
+            proyectado = unidades * horizonte / dias_de_muestra
+        else:
+            exacto = Fraction(unidades) * horizonte / dias_de_muestra * factor            # sin redondeos intermedios (ver `_factores_estacionales`)
+            proyectado = Decimal(exacto.numerator) / Decimal(exacto.denominator)
+        por_rotacion = _techo(max(proyectado - disponible, _CERO), escala)
         bajo_minimo = minimo > 0 and disponible < minimo
         sugerido = max(por_rotacion, _techo(minimo - disponible, escala)) if bajo_minimo else por_rotacion
         limitado = False
@@ -431,7 +437,7 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
             "stock_maximo": float(maximo) if maximo is not None else None,
             "limitado_por_maximo": limitado,
             "proveedor_id": p["proveedor_id"], "proveedor": p["proveedor"],
-            "factor_estacional": float(round(factor, 2)) if factor is not None else None,
+            "factor_estacional": round(float(factor), 2) if factor is not None else None,
         })
     # Menor cobertura primero (sin rotación al final), después lo que más hay que pedir, y el nombre para que dos
     # consultas seguidas den el mismo orden.
