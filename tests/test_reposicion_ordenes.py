@@ -299,3 +299,21 @@ def test_el_tope_se_redondea_hacia_abajo_a_la_unidad_del_producto(escenario):
     assert r["ordenes"] == [] and r["omitidos"] == [e["sal"]]
     assert _cantidad_de_ordenes(e["abrir"]) == 2                                          # la de Norte (5) y la de Sur de la primera tanda
 
+
+
+def test_un_reintento_exacto_devuelve_tambien_lo_que_no_se_pidio(escenario):
+    e = escenario
+    primera = _generar(e["abrir"], clave="mixta", producto_ids=[e["yerba"], e["azucar"], e["fideos"]])
+    assert [x["nombre"] for x in primera["sin_proveedor"]] == ["Azúcar"] and primera["omitidos"] == [e["fideos"]]
+    otra = _generar(e["abrir"], clave="mixta", producto_ids=[e["yerba"], e["azucar"], e["fideos"]])
+    assert otra["repetida"] is True
+    assert otra["sin_proveedor"] == primera["sin_proveedor"] and otra["omitidos"] == primera["omitidos"]
+
+
+def test_una_peticion_que_no_crea_nada_no_deja_registro_y_se_puede_repetir(escenario):
+    e = escenario
+    vacia = _generar(e["abrir"], clave="vacia", producto_ids=[e["azucar"]])               # sólo un producto sin proveedor
+    assert vacia["ordenes"] == [] and vacia["repetida"] is False
+    _con_proveedor(e["abrir"], e["azucar"], e["norte"])
+    despues = _generar(e["abrir"], clave="vacia", producto_ids=[e["azucar"]])             # ya tiene proveedor: ahora sí crea
+    assert [o["supplier_party_id"] for o in despues["ordenes"]] == [e["norte"]]

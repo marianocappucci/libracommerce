@@ -14,6 +14,9 @@ marca (`costo_cero`) para que la persona lo complete. Sin IVA (`tax_rate` 0): se
 
 **Sucursal.** Con `sucursal_id` las órdenes llevan esa sucursal (`purchase_orders.branch_id`) y la reposición se calculó para ella.
 
+**Sin órdenes no hay nada que recordar.** La clave se estampa en las órdenes creadas: si una petición no crea ninguna (nada que pedir, o todo sin proveedor), no deja registro y
+repetirla vuelve a calcular; es inofensivo porque no escribió nada. Cuando sí crea, el reintento exacto devuelve también lo que no se pidió (`sin_proveedor`, `omitidos`).
+
 **No se duplica.** Las órdenes en borrador cuentan como «en camino» en la reposición (ADR-017), así que generar dos veces seguidas la segunda no
 encuentra nada que pedir. Además `clave_operacion` (obligatoria) hace idempotente un reintento exacto: se estampa `[op:<clave>]` en las
 `notes` de cada orden creada, y una clave ya usada devuelve esas mismas órdenes (`repetida: true`) sin crear otras.
@@ -24,6 +27,7 @@ encuentra nada que pedir. Además `clave_operacion` (obligatoria) hace idempoten
 
 from __future__ import annotations
 
+import base64
 import datetime
 import hashlib
 import json
@@ -63,6 +67,24 @@ def _huella(datos: dict) -> str:
 
 def _marca_de_huella(huella: str) -> str:
     return f"[h:{huella}]"
+
+
+def _marca_de_resultado(sin_proveedor: list[dict], omitidos: list[int]) -> str:
+    """Lo que NO se pidió (productos sin proveedor y omitidos), codificado para las `notes` de la primera orden: un reintento exacto devuelve lo mismo que
+    la primera respuesta, y no «nada» porque lo ya pedido hoy cuenta como «en camino»."""
+    crudo = json.dumps({"s": sin_proveedor, "o": omitidos}, separators=(",", ":"), ensure_ascii=True).encode()
+    return f"[res:{base64.urlsafe_b64encode(crudo).decode().rstrip('=')}]"
+
+
+def _resultado_guardado(notas: str) -> tuple[list[dict], list[int]]:
+    m = re.search(r"\[res:([A-Za-z0-9_-]*)\]", notas or "")
+    if not m:
+        return [], []
+    try:
+        d = json.loads(base64.urlsafe_b64decode(m.group(1) + "=" * (-len(m.group(1)) % 4)))
+        return list(d.get("s", [])), [int(i) for i in d.get("o", [])]
+    except (ValueError, TypeError):
+        return [], []
 
 
 def _ordenes_de_la_clave(conn, clave: str) -> list[tuple[dict, str]]:
@@ -175,7 +197,13 @@ def generar_ordenes_borrador(conn, *, clave_operacion, producto_ids: list[int] |
     if previas:
         if any(_marca_de_huella(huella) not in notas for _, notas in previas):
             raise ClaveReusada("la clave_operacion ya se usó con otros datos: es otro pedido y necesita otra clave")
-        return {"ordenes": [_vista(conn, o) for o, _ in previas], "sin_proveedor": [], "omitidos": [], "repetida": True}
+        sin_prov, omit = [], []
+        for _, notas in previas:                                   # lo que no se pidió viaja en las notas de la primera orden
+            guardado = _resultado_guardado(notas)
+            if guardado != ([], []):
+                sin_prov, omit = guardado
+                break
+        return {"ordenes": [_vista(conn, o) for o, _ in previas], "sin_proveedor": sin_prov, "omitidos": omit, "repetida": True}
 
     filas = reposicion.sugerencia_reposicion(conn, solo_a_pedir=True, hoy=hoy, **parametros)
     omitidos: list[int] = []
@@ -215,4 +243,7 @@ def generar_ordenes_borrador(conn, *, clave_operacion, producto_ids: list[int] |
             branch_id=sucursal_id, created_by=usuario_id,
             notes=f"Generada desde la reposición sugerida el {fecha}. {_marca(clave)} {_marca_de_huella(huella)}")
         creadas.append(_vista(conn, compras.obtener_orden(conn, _insertar(conn, orden)), nombres))
-    return {"ordenes": creadas, "sin_proveedor": sin_proveedor, "omitidos": sorted(set(omitidos)), "repetida": False}
+    omitidos = sorted(set(omitidos))
+    if creadas and (sin_proveedor or omitidos):
+        conn.execute("UPDATE purchase_orders SET notes = notes || ? WHERE id = ?", (" " + _marca_de_resultado(sin_proveedor, omitidos), creadas[0]["id"]))
+    return {"ordenes": creadas, "sin_proveedor": sin_proveedor, "omitidos": omitidos, "repetida": False}
