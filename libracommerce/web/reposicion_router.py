@@ -180,8 +180,10 @@ def build_reposicion_parametros_router(
                     extra["proveedor_id"] = resolver_proveedor(conn, cuerpo.proveedor_id) if cuerpo.proveedor_id is not None else None
                 resultado = reposicion.fijar_parametros(conn, producto_id, plazo_entrega_dias=cuerpo.plazo_entrega_dias,
                                                         stock_maximo=cuerpo.stock_maximo, **extra)
+                # La respuesta se traduce ANTES de confirmar: si el gancho falla (un party sin proveedor), el PUT no queda escrito a medias.
+                respuesta = _en_ids_del_producto(conn, resultado)
                 conn.commit()
-                return _en_ids_del_producto(conn, resultado)
+                return respuesta
         return _atajar(_op)
 
     return router

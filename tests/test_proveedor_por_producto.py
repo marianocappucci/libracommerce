@@ -273,3 +273,26 @@ def test_el_router_traduce_los_ids_del_producto_con_los_ganchos_de_compras(abrir
     assert c.put(ruta, json={"plazo_entrega_dias": None, "stock_maximo": None, "proveedor_id": None}).json()["proveedor_id"] is None
     csv = c.get("/api/reportes/reposicion/export", params={"solo_a_pedir": "false"}).text.splitlines()
     assert csv[1].split(",")[-2] == ""                                              # sin proveedor, la columna va vacía
+
+
+def test_si_la_traduccion_de_la_respuesta_falla_el_put_no_queda_escrito(abrir_vto_ventas):
+    from fastapi import Depends, FastAPI
+    from fastapi.testclient import TestClient
+
+    from libracommerce.web.reposicion_router import build_reposicion_parametros_router
+
+    def de(_conn, _party_id):
+        raise RuntimeError("el party no tiene proveedor")
+
+    abrir = abrir_vto_ventas
+    yerba = _yerba_de_referencia(abrir)
+    party = _nuevo_tercero(abrir)
+    app = FastAPI()
+    app.include_router(build_reposicion_parametros_router(
+        conexion=abrir, dependencias_escribir=[Depends(lambda: None)], proveedor_de=de))
+    c = TestClient(app, raise_server_exceptions=False)
+    r = c.put(f"/api/productos/{yerba}/reposicion", json={"plazo_entrega_dias": 9, "stock_maximo": None, "proveedor_id": party})
+    assert r.status_code == 500
+    with abrir() as conn:
+        p = reposicion.parametros_de(conn, yerba)
+        assert p["plazo_entrega_dias"] is None and p["proveedor_id"] is None      # nada quedó escrito
