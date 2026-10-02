@@ -1021,7 +1021,7 @@ motor ni siquiera tiene una operación que pase una orden a `sent`. Un producto 
   `ClaveReusada` (409 en el router) y no devuelve lo anterior, para que quien reusó la clave no crea que se pidió lo nuevo. La clave admite letras, números y `. _ : -` (un
   UUID entra) y se busca por igualdad exacta (un `LIKE` trataría `%` y `_` como comodines). El tope se redondea hacia abajo a la unidad del producto; si no alcanza
   una unidad, la línea se omite. Hallazgos de Codex.
-- **Un reintento devuelve lo mismo que la primera respuesta, incluido lo que NO se pidió** (`sin_proveedor`, `omitidos`): viaja codificado en las `notes` de la primera orden. Una petición que
+- **Un reintento devuelve las mismas órdenes, tal como están AHORA** (no una foto congelada de la primera respuesta: si alguna se recibió o se editó, se ve), **e incluido lo que NO se pidió** (`sin_proveedor`, `omitidos`): viaja codificado en las `notes` de la primera orden. Una petición que
   no crea ninguna orden no deja registro (no escribió nada): repetirla vuelve a calcular.
 - **Concurrencia:** toda la generación va detrás de **un candado global de la transacción** (`pg_advisory_xact_lock` en PostgreSQL; en SQLite, que sólo se usa en pruebas, un `UPDATE` sin filas
   que toma el candado de escritura), tomado antes de mirar la clave y de calcular. La clave vive en las `notes` y no hay restricción única que impida dos pedidos a la vez; un candado por producto

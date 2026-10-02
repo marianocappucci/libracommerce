@@ -19,7 +19,8 @@ repetirla vuelve a calcular; es inofensivo porque no escribió nada. Cuando sí 
 
 **No se duplica.** Las órdenes en borrador cuentan como «en camino» en la reposición (ADR-017), así que generar dos veces seguidas la segunda no
 encuentra nada que pedir. Además `clave_operacion` (obligatoria) hace idempotente un reintento exacto: se estampa `[op:<clave>]` en las
-`notes` de cada orden creada, y una clave ya usada devuelve esas mismas órdenes (`repetida: true`) sin crear otras.
+`notes` de cada orden creada, y una clave ya usada devuelve esas mismas órdenes (`repetida: true`) sin crear otras. Las devuelve **tal como están ahora** (estado, líneas, total): si se
+recibió o se editó alguna entre el pedido y el reintento, el reintento lo refleja; lo que se promete es que no se crea nada nuevo, no una foto congelada.
 
 **Atómica.** Todas las órdenes se crean en la transacción de quien llama (no commitea): si algo falla, no queda ninguna. La numeración la da el
 `numerador` que se pase (el default del motor es `MAX(id)+1`, ver `erp.compras.numero_por_defecto`; un producto con concurrencia real pasa el suyo).
