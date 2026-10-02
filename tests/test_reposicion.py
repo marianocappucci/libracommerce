@@ -967,3 +967,11 @@ def test_el_router_de_parametros_no_se_monta_sin_autorizacion_para_escribir(abri
     for vacio in (None, [], ()):
         with pytest.raises(ValueError, match="dependencias_escribir"):
             build_reposicion_parametros_router(conexion=abrir_vto_ventas, dependencias_escribir=vacio)
+
+
+def test_el_techo_se_informa_tal_como_se_guardo_sin_redondearlo_a_la_escala_de_informe(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    yerba = _yerba_de_referencia(abrir)
+    _fijar(abrir, yerba, techo=14.9999)                       # entera: caben 4,9999 → 4; el techo se informa entero, no como 15.0
+    fila = _por_nombre(_reporte(abrir))["Yerba"]
+    assert fila["stock_maximo"] == 14.9999 and fila["sugerido"] == 4

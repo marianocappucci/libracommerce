@@ -347,7 +347,7 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
             "cobertura_dias": cobertura, "sugerido": _cantidad(sugerido, escala), "motivo": motivo,
             "sin_ventas": sin_ventas, "posible_quiebre": stock <= 0 or sin_stock > 0,
             "variantes": variantes.get(pid, 0), "plazo_entrega_dias": plazo, "plazo_propio": plazo_propio,
-            "stock_maximo": _cantidad(maximo, informe) if maximo is not None else None,
+            "stock_maximo": float(maximo) if maximo is not None else None,
             "limitado_por_maximo": limitado,
         })
     # Menor cobertura primero (sin rotación al final), después lo que más hay que pedir, y el nombre para que dos
