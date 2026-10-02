@@ -197,8 +197,18 @@ def generar_ordenes_borrador(conn, *, clave_operacion, producto_ids: list[int] |
     # leerían lo mismo y crearían las mismas órdenes: la clave vive en las `notes` y no hay una restricción única que lo impida. Se toman las filas de los
     # productos candidatos (un `UPDATE` de sí mismas las bloquea hasta el commit, en orden ascendente; es el mismo bloqueo de la venta con FEFO y de las bajas
     # de lote) y recién después se lee todo: el segundo pedido espera al primero y encuentra sus órdenes —por la clave, o ya contadas como «en camino».
-    candidatos = {f["producto_id"] for f in reposicion.sugerencia_reposicion(conn, solo_a_pedir=True, hoy=hoy, **parametros)}
-    lotes.tomar_productos(conn, candidatos | set(producto_ids or []))
+    # Hasta que el conjunto sea estable: una venta entre dos lecturas puede hacer elegible un producto que no estaba, y ése también hay que tomar antes de decidir.
+    bloqueados: set[int] = set(producto_ids or [])
+    lotes.tomar_productos(conn, bloqueados)
+    for _ in range(4):
+        filas = reposicion.sugerencia_reposicion(conn, solo_a_pedir=True, hoy=hoy, **parametros)
+        nuevos = {f["producto_id"] for f in filas} - bloqueados
+        if not nuevos:
+            break
+        lotes.tomar_productos(conn, nuevos)
+        bloqueados |= nuevos
+    else:                                                       # no se estabilizó: se pide al llamador que reintente en vez de escribir sobre arena
+        raise RuntimeError("la reposición cambia más rápido de lo que se puede tomar; reintentá")
 
     previas = _ordenes_de_la_clave(conn, clave)
     if previas:
@@ -212,7 +222,6 @@ def generar_ordenes_borrador(conn, *, clave_operacion, producto_ids: list[int] |
                 break
         return {"ordenes": [_vista(conn, o) for o, _ in previas], "sin_proveedor": sin_prov, "omitidos": omit, "repetida": True}
 
-    filas = reposicion.sugerencia_reposicion(conn, solo_a_pedir=True, hoy=hoy, **parametros)
     omitidos: list[int] = []
     if producto_ids is not None:
         pedidos = set(producto_ids)
