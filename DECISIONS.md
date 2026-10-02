@@ -996,3 +996,9 @@ que figure como proveedor en otra parte.
 
 **Consecuencias.** Falta cargarlo desde la pantalla del producto y elegirlo/filtrarlo en la reposición ([[libra-ui]]), montarlo en VentaLibra y la orden de compra
 en borrador por proveedor. Sigue diferido: estacionalidad, `min_stock` por sucursal y descontar lo que vence dentro del horizonte.
+
+> **Nota 2026-10-02 (VentaLibra, v0.33.1):** el `proveedor_id` que hablan los routers de reposición no tiene por qué ser el `party_id`. VentaLibra guarda sus proveedores en
+> otra tabla y traduce con un offset (`party_de_proveedor`/`proveedor_de_party`), igual que en Compras. `build_reposicion_router` y `build_reposicion_parametros_router`
+> aceptan ahora los mismos ganchos que `OpcionesCompras` (`resolver_proveedor(conn, proveedor_id) -> party_id` y `proveedor_de(conn, party_id) -> proveedor_id`): el filtro, el cuerpo
+> del `PUT` y cada respuesta hablan en los ids del producto, y el motor sigue guardando y comparando por `party_id`. Sin ganchos, identidad (el comportamiento de v0.33.0). Lo vio el
+> primer test de VentaLibra contra el router real (422 «el proveedor 2 no existe»): la prueba del motor sólo usaba `party_id`.

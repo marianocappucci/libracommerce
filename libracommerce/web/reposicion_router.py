@@ -21,12 +21,13 @@ Cuelga de `/api/reportes/reposicion`, que no choca con `libracore.reportes_route
 from __future__ import annotations
 
 import datetime
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from ..erp import reposicion
 from . import fastapi as _fastapi
 from .catalogo_router import Conexion, _deps
+from .compras_router import _sin_traduccion
 from .margen_router import _csv
 
 _fastapi()
@@ -54,12 +55,16 @@ def build_reposicion_router(
     *,
     conexion: Conexion | None = None,
     prefix: str = "/api/reportes/reposicion",
+    resolver_proveedor: Callable[[Any, int], int] = _sin_traduccion,
+    proveedor_de: Callable[[Any, int], int] = _sin_traduccion,
 ):
     """`GET ""` (los parámetros y la lista de productos a pedir) y `GET /export` (CSV). Sólo lee. Parámetros:
     `dias_rotacion` (30), `dias_cobertura` (15) y `plazo_entrega_dias` (3): enteros de 1 hasta su tope
     (`erp.reposicion.MAX_*`); `sucursal_id` (sin él, toda la instancia), `categoria`, `producto_id` y `solo_a_pedir`
     (`true` por default: sólo los de `sugerido > 0`) y `descontar_vencido` (`true` por default: lo que está en lotes
-    vencidos no cuenta como stock) y `proveedor_id` (sólo los productos de ese proveedor habitual, ADR-021). Un parámetro inválido, o una sucursal que no existe, es 422."""
+    vencidos no cuenta como stock) y `proveedor_id` (sólo los productos de ese proveedor habitual, ADR-021). `resolver_proveedor(conn, proveedor_id) -> party_id` y
+    `proveedor_de(conn, party_id) -> proveedor_id` son los mismos ganchos que `OpcionesCompras`, para un producto cuyos proveedores no son el `party_id`
+    del motor (VentaLibra): el `proveedor_id` del filtro y el de cada fila hablan en los ids del producto. Sin ellos, identidad. Un parámetro inválido, o una sucursal que no existe, es 422."""
     abrir, _ = _deps(None, conexion)
     router = APIRouter(prefix=prefix, tags=["reportes"])
 
@@ -68,12 +73,16 @@ def build_reposicion_router(
                  descontar_vencido: bool, proveedor_id: int | None) -> list[dict]:
         try:
             with abrir() as conn:
-                return reposicion.sugerencia_reposicion(
+                party_id = resolver_proveedor(conn, proveedor_id) if proveedor_id is not None else None
+                filas = reposicion.sugerencia_reposicion(
                     conn, dias_rotacion=dias_rotacion, dias_cobertura=dias_cobertura,
                     plazo_entrega_dias=plazo_entrega_dias, sucursal_id=sucursal_id, categoria=categoria or None,
                     producto_id=producto_id, solo_a_pedir=solo_a_pedir,
-                    descontar_vencido=descontar_vencido, proveedor_id=proveedor_id,
+                    descontar_vencido=descontar_vencido, proveedor_id=party_id,
                 )
+                # El `proveedor_id` de cada fila, en los ids del producto.
+                return [dict(f, proveedor_id=proveedor_de(conn, f["proveedor_id"]) if f["proveedor_id"] is not None else None)
+                        for f in filas]
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
 
@@ -122,13 +131,16 @@ def build_reposicion_parametros_router(
     prefix: str = "/api/productos",
     dependencias_leer: Sequence[Any] | None = None,
     dependencias_escribir: Sequence[Any] | None = None,
+    resolver_proveedor: Callable[[Any, int], int] = _sin_traduccion,
+    proveedor_de: Callable[[Any, int], int] = _sin_traduccion,
 ):
     """`GET /{producto_id}/reposicion` y `PUT /{producto_id}/reposicion` (ADR-020): el plazo de entrega y el techo de
     stock propios de un producto, que la reposición sugerida usa en lugar del plazo general y para no pasarse de
     ese techo. El `PUT` lleva siempre los dos valores (`{plazo_entrega_dias, stock_maximo}`, cualquiera puede ser
     `null` para volver al general / sin techo). 404 si el producto no existe, 422 si un valor no es válido, 503 sin
     la revisión `0003`. **Escribe el catálogo, así que la factory FALLA al construirse (`ValueError`) sin
-    `dependencias_escribir`** (una lista no vacía de `Depends(...)`); `dependencias_leer` es opcional."""
+    `dependencias_escribir`** (una lista no vacía de `Depends(...)`); `dependencias_leer` es opcional. `resolver_proveedor` y `proveedor_de`: los ganchos de `OpcionesCompras` (ids del producto <-> `party_id`);
+    sin ellos, identidad (ADR-021)."""
     if not isinstance(dependencias_escribir, (list, tuple)) or not dependencias_escribir:
         raise ValueError("build_reposicion_parametros_router necesita dependencias_escribir, una lista no vacía de "
                          "Depends(...): no se expone una escritura del catálogo sin autorización")
@@ -145,11 +157,17 @@ def build_reposicion_parametros_router(
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
 
+    def _en_ids_del_producto(conn, parametros: dict) -> dict:
+        """El `proveedor_id` de la respuesta, en los ids del producto (identidad sin `proveedor_de`)."""
+        if parametros.get("proveedor_id") is not None:
+            parametros = dict(parametros, proveedor_id=proveedor_de(conn, parametros["proveedor_id"]))
+        return parametros
+
     @router.get("/{producto_id}/reposicion", dependencies=list(dependencias_leer or []))
     def leer(producto_id: int):
         def _op():
             with abrir() as conn:
-                return reposicion.parametros_de(conn, producto_id)
+                return _en_ids_del_producto(conn, reposicion.parametros_de(conn, producto_id))
         return _atajar(_op)
 
     @router.put("/{producto_id}/reposicion", dependencies=list(dependencias_escribir))
@@ -157,11 +175,13 @@ def build_reposicion_parametros_router(
         def _op():
             with abrir() as conn:
                 # `proveedor_id` sólo se toca si la clave vino en el cuerpo (con `null` se borra).
-                extra = {"proveedor_id": cuerpo.proveedor_id} if "proveedor_id" in cuerpo.model_fields_set else {}
+                extra = {}
+                if "proveedor_id" in cuerpo.model_fields_set:
+                    extra["proveedor_id"] = resolver_proveedor(conn, cuerpo.proveedor_id) if cuerpo.proveedor_id is not None else None
                 resultado = reposicion.fijar_parametros(conn, producto_id, plazo_entrega_dias=cuerpo.plazo_entrega_dias,
                                                         stock_maximo=cuerpo.stock_maximo, **extra)
                 conn.commit()
-                return resultado
+                return _en_ids_del_producto(conn, resultado)
         return _atajar(_op)
 
     return router
