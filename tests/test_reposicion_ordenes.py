@@ -64,8 +64,8 @@ def test_una_orden_en_borrador_por_proveedor_con_el_sugerido_y_el_costo_vigente(
     assert norte["status"] == "draft" and sur["status"] == "draft"
     assert norte["proveedor"] == "Distribuidora Norte" and norte["number"] != sur["number"]
     (linea,) = norte["lineas"]
-    assert (linea["producto_id"], linea["nombre"], linea["cantidad"], linea["costo_unitario"], linea["costo_cero"]) == (
-        e["yerba"], "Yerba", "8", "60", False)
+    assert (linea["producto_id"], linea["nombre"], Decimal(linea["cantidad"]), Decimal(linea["costo_unitario"]), linea["costo_cero"]) == (
+        e["yerba"], "Yerba", Decimal("8"), Decimal("60"), False)
     assert Decimal(linea["subtotal"]) == Decimal("480") and Decimal(norte["total"]) == Decimal("480")
     assert Decimal(sur["total"]) == Decimal("204.0")                                  # 8 × 25,5
     # Azúcar no tiene proveedor: no entra en ninguna orden, y se informa con su sugerido.
@@ -237,8 +237,8 @@ def test_los_topes_limitan_lo_que_se_pide_a_lo_que_la_persona_confirmo(escenario
     """Entre la vista previa y el pedido el sugerido puede subir (bajó el stock): la orden no se pasa de lo que se vio. Si bajó, se pide menos."""
     e = escenario
     r = _generar(e["abrir"], topes={e["yerba"]: 5, e["sal"]: 100})                   # Yerba sugiere 8 (tope 5); Sal sugiere 8 (tope 100)
-    cantidades = {li["nombre"]: li["cantidad"] for o in r["ordenes"] for li in o["lineas"]}
-    assert cantidades == {"Yerba": "5", "Sal": "8"}
+    cantidades = {li["nombre"]: Decimal(li["cantidad"]) for o in r["ordenes"] for li in o["lineas"]}
+    assert cantidades == {"Yerba": Decimal("5"), "Sal": Decimal("8")}
     totales = {o["proveedor"]: Decimal(o["total"]) for o in r["ordenes"]}
     assert totales == {"Distribuidora Norte": Decimal("300"), "Mayorista Sur": Decimal("204.0")}
 
@@ -254,7 +254,7 @@ def test_el_router_acepta_topes_con_ids_como_texto_de_json(escenario):
     e = escenario
     c = _cliente(e["abrir"])
     r = c.post("/api/reportes/reposicion/ordenes", json={"clave_operacion": "t", "topes": {str(e["yerba"]): 3}}).json()
-    assert {li["nombre"]: li["cantidad"] for o in r["ordenes"] for li in o["lineas"]}["Yerba"] == "3"
+    assert Decimal({li["nombre"]: li["cantidad"] for o in r["ordenes"] for li in o["lineas"]}["Yerba"]) == Decimal("3")
     assert c.post("/api/reportes/reposicion/ordenes", json={"clave_operacion": "t2", "topes": {str(e["yerba"]): 0}}).status_code == 422
 
 
@@ -294,7 +294,7 @@ def test_el_tope_se_redondea_hacia_abajo_a_la_unidad_del_producto(escenario):
     """Yerba se pide entera: un tope de 5,5 pide 5; un tope de 0,5 no alcanza ni una unidad y la línea se omite (no se crea una orden de 0,5)."""
     e = escenario
     r = _generar(e["abrir"], clave="a", topes={e["yerba"]: 5.5})
-    assert {li["nombre"]: li["cantidad"] for o in r["ordenes"] for li in o["lineas"]}["Yerba"] == "5"
+    assert Decimal({li["nombre"]: li["cantidad"] for o in r["ordenes"] for li in o["lineas"]}["Yerba"]) == Decimal("5")
     r = _generar(e["abrir"], clave="b", producto_ids=[e["sal"]], topes={e["sal"]: 0.5})
     assert r["ordenes"] == [] and r["omitidos"] == [e["sal"]]
     assert _cantidad_de_ordenes(e["abrir"]) == 2                                          # la de Norte (5) y la de Sur de la primera tanda
@@ -317,3 +317,30 @@ def test_una_peticion_que_no_crea_nada_no_deja_registro_y_se_puede_repetir(escen
     _con_proveedor(e["abrir"], e["azucar"], e["norte"])
     despues = _generar(e["abrir"], clave="vacia", producto_ids=[e["azucar"]])             # ya tiene proveedor: ahora sí crea
     assert [o["supplier_party_id"] for o in despues["ordenes"]] == [e["norte"]]
+
+
+def test_dos_pedidos_a_la_vez_no_duplican_las_ordenes(escenario):
+    """Dos hilos piden lo mismo con claves distintas (o con la misma): el segundo espera al primero y encuentra sus órdenes ya contadas como «en camino».
+    Sin el bloqueo previo, los dos leen lo mismo y cada uno crea las suyas."""
+    import threading
+
+    e = escenario
+    resultados: list = []
+    errores: list = []
+    barrera = threading.Barrier(2)
+
+    def pedir(clave):
+        try:
+            barrera.wait(timeout=10)
+            resultados.append(_generar(e["abrir"], clave=clave))
+        except Exception as exc:  # noqa: BLE001 - se informa abajo
+            errores.append(exc)
+
+    hilos = [threading.Thread(target=pedir, args=(c,)) for c in ("hilo-a", "hilo-b")]
+    for h in hilos:
+        h.start()
+    for h in hilos:
+        h.join(timeout=60)
+    assert not errores, errores
+    assert _cantidad_de_ordenes(e["abrir"]) == 2                                           # una por proveedor, no cuatro
+    assert sum(len(r["ordenes"]) for r in resultados) == 2

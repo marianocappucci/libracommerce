@@ -1023,6 +1023,9 @@ motor ni siquiera tiene una operación que pase una orden a `sent`. Un producto 
   una unidad, la línea se omite. Hallazgos de Codex.
 - **Un reintento devuelve lo mismo que la primera respuesta, incluido lo que NO se pidió** (`sin_proveedor`, `omitidos`): viaja codificado en las `notes` de la primera orden. Una petición que
   no crea ninguna orden no deja registro (no escribió nada): repetirla vuelve a calcular.
+- **Concurrencia:** antes de mirar la clave y de calcular, se toman las filas de los productos candidatos (`lotes.tomar_productos`, el mismo bloqueo de la venta con FEFO) y recién
+  después se lee todo: dos pedidos a la vez se serializan y el segundo encuentra las órdenes del primero (por la clave, o ya contadas como «en camino»). La clave vive en las `notes` y
+  no hay restricción única que lo impida. Medido contra PostgreSQL real con dos hilos: sin el bloqueo se crean el doble; con él, una por proveedor.
 - **No duplica:** las órdenes en borrador ya cuentan como «en camino» (ADR-017), así que generar dos veces seguidas no encuentra nada que pedir la segunda. Además
   `clave_operacion` (obligatoria, un UUID por intento) hace idempotente un reintento exacto: se estampa `[op:<clave>]` en las `notes` y una clave usada devuelve las
   mismas órdenes (`repetida: true`).

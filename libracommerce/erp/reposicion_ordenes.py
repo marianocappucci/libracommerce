@@ -35,7 +35,7 @@ import re
 from decimal import Decimal
 
 from ..domain.purchasing import PurchaseOrder, PurchaseOrderItem, PurchaseOrderStatus
-from . import compras, reposicion
+from . import compras, lotes, reposicion
 
 MAX_LARGO_CLAVE = 64
 _CERO = Decimal("0")
@@ -193,6 +193,13 @@ def generar_ordenes_borrador(conn, *, clave_operacion, producto_ids: list[int] |
         "producto_ids": sorted(producto_ids) if producto_ids is not None else None,
         "topes": {str(k): str(limites[k]) for k in sorted(limites)},
     })
+    # 🔒 **Se serializa antes de mirar la clave y de calcular lo que hay que pedir.** Dos pedidos a la vez (dos pestañas, un doble clic que salió dos veces)
+    # leerían lo mismo y crearían las mismas órdenes: la clave vive en las `notes` y no hay una restricción única que lo impida. Se toman las filas de los
+    # productos candidatos (un `UPDATE` de sí mismas las bloquea hasta el commit, en orden ascendente; es el mismo bloqueo de la venta con FEFO y de las bajas
+    # de lote) y recién después se lee todo: el segundo pedido espera al primero y encuentra sus órdenes —por la clave, o ya contadas como «en camino».
+    candidatos = {f["producto_id"] for f in reposicion.sugerencia_reposicion(conn, solo_a_pedir=True, hoy=hoy, **parametros)}
+    lotes.tomar_productos(conn, candidatos | set(producto_ids or []))
+
     previas = _ordenes_de_la_clave(conn, clave)
     if previas:
         if any(_marca_de_huella(huella) not in notas for _, notas in previas):
