@@ -344,3 +344,41 @@ def test_dos_pedidos_a_la_vez_no_duplican_las_ordenes(escenario):
     assert not errores, errores
     assert _cantidad_de_ordenes(e["abrir"]) == 2                                           # una por proveedor, no cuatro
     assert sum(len(r["ordenes"]) for r in resultados) == 2
+
+
+def _en_paralelo(abrir, pedidos):
+    """Lanza cada pedido (`kwargs`) en su hilo, a la vez; devuelve `(resultados, errores)`."""
+    import threading
+
+    resultados, errores = [], []
+    barrera = threading.Barrier(len(pedidos))
+
+    def correr(kw):
+        try:
+            barrera.wait(timeout=10)
+            resultados.append(_generar(abrir, **kw))
+        except Exception as exc:  # noqa: BLE001 - se informa en el test
+            errores.append(exc)
+
+    hilos = [threading.Thread(target=correr, args=(kw,)) for kw in pedidos]
+    for h in hilos:
+        h.start()
+    for h in hilos:
+        h.join(timeout=60)
+    return resultados, errores
+
+
+def test_la_misma_clave_con_productos_distintos_a_la_vez_deja_un_solo_pedido(escenario):
+    """Con candados por producto los dos leerían lo suyo y crearían órdenes bajo UNA clave con huellas distintas; con el candado global, el segundo ve al primero y es un conflicto."""
+    e = escenario
+    resultados, errores = _en_paralelo(e["abrir"], [{"clave": "misma", "producto_ids": [e["yerba"]]}, {"clave": "misma", "producto_ids": [e["sal"]]}])
+    assert len(resultados) == 1 and len(errores) == 1 and isinstance(errores[0], reposicion_ordenes.ClaveReusada)
+    assert _cantidad_de_ordenes(e["abrir"]) == 1
+
+
+def test_pedidos_a_la_vez_de_productos_distintos_no_se_traban_entre_si(escenario):
+    e = escenario
+    resultados, errores = _en_paralelo(e["abrir"], [{"clave": "uno", "producto_ids": [e["yerba"]]}, {"clave": "dos", "producto_ids": [e["sal"]]},
+                                                    {"clave": "tres", "producto_ids": [e["yerba"], e["sal"]]}])
+    assert not errores, errores
+    assert _cantidad_de_ordenes(e["abrir"]) == 2                                          # una de Norte y una de Sur, sin duplicados

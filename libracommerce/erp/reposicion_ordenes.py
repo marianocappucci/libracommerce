@@ -32,10 +32,11 @@ import datetime
 import hashlib
 import json
 import re
+import sqlite3
 from decimal import Decimal
 
 from ..domain.purchasing import PurchaseOrder, PurchaseOrderItem, PurchaseOrderStatus
-from . import compras, lotes, reposicion
+from . import compras, reposicion
 
 MAX_LARGO_CLAVE = 64
 _CERO = Decimal("0")
@@ -154,6 +155,18 @@ def _insertar(conn, orden: PurchaseOrder) -> int:
     return orden_id
 
 
+_CANDADO = "libracommerce.reposicion_ordenes"
+
+
+def _serializar(conn) -> None:
+    """Toma el candado de la generación de órdenes hasta el fin de la transacción. PostgreSQL: un candado asesor (`pg_advisory_xact_lock`) sobre un entero estable.
+    SQLite (sólo pruebas): un `UPDATE` que no toca ninguna fila igual toma el candado de escritura de la base, que ya serializa a los escritores."""
+    if isinstance(conn, sqlite3.Connection):
+        conn.execute("UPDATE catalog_items SET tracks_expiry = tracks_expiry WHERE 0")
+    else:
+        conn.execute("SELECT pg_advisory_xact_lock(?)", (int.from_bytes(hashlib.sha256(_CANDADO.encode()).digest()[:7], "big"),))
+
+
 def generar_ordenes_borrador(conn, *, clave_operacion, producto_ids: list[int] | None = None, topes: dict[int, object] | None = None,
                              usuario_id: int | None = None,
                              numerador: compras.Numerador = compras.numero_por_defecto,
@@ -193,22 +206,11 @@ def generar_ordenes_borrador(conn, *, clave_operacion, producto_ids: list[int] |
         "producto_ids": sorted(producto_ids) if producto_ids is not None else None,
         "topes": {str(k): str(limites[k]) for k in sorted(limites)},
     })
-    # 🔒 **Se serializa antes de mirar la clave y de calcular lo que hay que pedir.** Dos pedidos a la vez (dos pestañas, un doble clic que salió dos veces)
-    # leerían lo mismo y crearían las mismas órdenes: la clave vive en las `notes` y no hay una restricción única que lo impida. Se toman las filas de los
-    # productos candidatos (un `UPDATE` de sí mismas las bloquea hasta el commit, en orden ascendente; es el mismo bloqueo de la venta con FEFO y de las bajas
-    # de lote) y recién después se lee todo: el segundo pedido espera al primero y encuentra sus órdenes —por la clave, o ya contadas como «en camino».
-    # Hasta que el conjunto sea estable: una venta entre dos lecturas puede hacer elegible un producto que no estaba, y ése también hay que tomar antes de decidir.
-    bloqueados: set[int] = set(producto_ids or [])
-    lotes.tomar_productos(conn, bloqueados)
-    for _ in range(4):
-        filas = reposicion.sugerencia_reposicion(conn, solo_a_pedir=True, hoy=hoy, **parametros)
-        nuevos = {f["producto_id"] for f in filas} - bloqueados
-        if not nuevos:
-            break
-        lotes.tomar_productos(conn, nuevos)
-        bloqueados |= nuevos
-    else:                                                       # no se estabilizó: se pide al llamador que reintente en vez de escribir sobre arena
-        raise RuntimeError("la reposición cambia más rápido de lo que se puede tomar; reintentá")
+    # 🔒 **Se serializa TODA la generación, antes de mirar la clave y de calcular.** Dos pedidos a la vez (dos pestañas, un doble clic que salió dos veces) leerían lo mismo y
+    # crearían las mismas órdenes, y dos con la misma clave y productos distintos las crearían bajo una sola clave: la clave vive en las `notes` y no hay una restricción única que lo
+    # impida. Un candado por producto no alcanza (los conjuntos pueden ser disjuntos, y tomarlos en tandas cruza el orden y abre un deadlock): es una operación rara y corta, así que
+    # va con UN candado global de la transacción, que se suelta con el commit o el rollback de quien llama.
+    _serializar(conn)
 
     previas = _ordenes_de_la_clave(conn, clave)
     if previas:
@@ -222,6 +224,7 @@ def generar_ordenes_borrador(conn, *, clave_operacion, producto_ids: list[int] |
                 break
         return {"ordenes": [_vista(conn, o) for o, _ in previas], "sin_proveedor": sin_prov, "omitidos": omit, "repetida": True}
 
+    filas = reposicion.sugerencia_reposicion(conn, solo_a_pedir=True, hoy=hoy, **parametros)
     omitidos: list[int] = []
     if producto_ids is not None:
         pedidos = set(producto_ids)
