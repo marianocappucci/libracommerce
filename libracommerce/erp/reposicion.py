@@ -67,6 +67,15 @@ producto; `limitado_por_maximo` marca la fila a la que el techo le recortó la s
 productos de ese proveedor: es lo que prepara la orden de compra en borrador. Una base sin la revisión `0004` no tiene
 proveedores y la consulta es la de siempre.
 
+**Estacionalidad (v2, ADR-023, opt-in con `estacionalidad=True`).** La rotación de los últimos `N` días supone que lo que viene se parece a lo reciente; en un producto
+estacional no es así (el helado en octubre, el pan dulce en diciembre). Con `estacionalidad` el motor mira **lo que pasó hace un año** (la misma fecha, un año atrás) y
+compara dos ventanas de ese año: la **de referencia** (los `N` días que terminaban entonces, equivalente a la ventana de ahora) y la **proyectada** (los `H` días
+que venían después, el mismo horizonte que se está cubriendo). El `factor_estacional` es la razón de las rotaciones diarias, proyectada / de referencia, acotado entre
+`0.25` y `4`, y multiplica la necesidad: `necesidad = unidades × H / dias_de_muestra × factor`. Un factor de 2 dice «hace un año, después de una ventana como la de ahora,
+se vendió el doble por día». **Sin factor (`None`, sin ajuste) si no hay con qué**: la ventana de referencia del año pasado tiene menos de 3 días con venta (una instancia
+con menos de un año de historia, o un producto que entonces no se vendía). Es un ajuste de la proyección, no de lo que hay ni del mínimo. Límites: confía en un solo año
+(un año atípico se hereda), no corrige quiebres de entonces, y no inventa temporada para un producto sin rotación reciente (necesidad cero sigue en cero).
+
 Agrupa por producto, no por variante (`variantes` dice cuántas activas tiene). Sólo productos activos, de tipo
 `product` y `purchasable`; se agrega en Python con `Decimal` y las consultas son las mismas en SQLite y PostgreSQL.
 """
@@ -88,6 +97,12 @@ PLAZO_ENTREGA_DIAS = 3
 MAX_DIAS_ROTACION = 365
 MAX_DIAS_COBERTURA = 365
 MAX_PLAZO_ENTREGA_DIAS = 180
+
+#: Estacionalidad (ADR-023): el factor se acota entre estos dos valores (un producto no se pide a menos de un cuarto ni a más de cuatro veces de lo que
+#: dice la rotación reciente por lo que pasó hace un año) y exige este mínimo de días con venta en la ventana de referencia del año pasado.
+FACTOR_ESTACIONAL_MIN = Decimal("0.25")
+FACTOR_ESTACIONAL_MAX = Decimal("4")
+_MIN_DIAS_CON_VENTA_ESTACIONAL = 3
 
 MOTIVOS = ("bajo_minimo", "por_rotacion", "ambos")
 
@@ -256,19 +271,56 @@ def _dias_sin_stock(saldo_final: Decimal, movimientos: list[tuple[str, Decimal]]
     return sin_stock
 
 
+def _un_anio_atras(dia: datetime.date) -> datetime.date:
+    """La misma fecha un año atrás (el 29 de febrero cae en el 28)."""
+    try:
+        return dia.replace(year=dia.year - 1)
+    except ValueError:
+        return dia.replace(year=dia.year - 1, day=28)
+
+
+def _factores_estacionales(conn, ids: set[int], hoy: datetime.date, dias_rotacion: int, horizontes: dict[int, int],
+                           sucursal_id: int | None) -> dict[int, Decimal]:
+    """`{producto_id: factor}` sólo de los productos con historia suficiente de hace un año (ver "Estacionalidad" en el docstring del módulo).
+
+    Una sola consulta de ventas cubre las dos ventanas del año pasado; la proyectada de cada producto es `horizontes[id]` días (el suyo: puede tener plazo propio),
+    cortada en `hoy` si el horizonte se pasa de un año."""
+    ref_fin = _un_anio_atras(hoy)
+    ref_ini = ref_fin - datetime.timedelta(days=dias_rotacion - 1)
+    hasta = min(ref_fin + datetime.timedelta(days=max(horizontes.values(), default=0)), hoy)
+    por_producto: dict[int, list[tuple[datetime.date, Decimal]]] = {}
+    for occurred_on, item_id, unidades in margen.unidades_netas(conn, ref_ini.isoformat(), hasta.isoformat(), sucursal_id):
+        if item_id in ids and unidades > 0:
+            por_producto.setdefault(item_id, []).append((datetime.date.fromisoformat(str(occurred_on)[:10]), unidades))
+    factores: dict[int, Decimal] = {}
+    for item_id, ventas in por_producto.items():
+        referencia = [(d, u) for d, u in ventas if ref_ini <= d <= ref_fin]
+        if len({d for d, _ in referencia}) < _MIN_DIAS_CON_VENTA_ESTACIONAL:
+            continue
+        fin = min(ref_fin + datetime.timedelta(days=horizontes[item_id]), hoy)
+        dias_proyectados = (fin - ref_fin).days
+        if dias_proyectados < 1:
+            continue
+        proyectadas = sum((u for d, u in ventas if ref_fin < d <= fin), _CERO)
+        diaria_referencia = sum((u for _, u in referencia), _CERO) / dias_rotacion
+        factor = (proyectadas / dias_proyectados) / diaria_referencia
+        factores[item_id] = min(max(factor, FACTOR_ESTACIONAL_MIN), FACTOR_ESTACIONAL_MAX)
+    return factores
+
+
 def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobertura: int = DIAS_COBERTURA,
                           plazo_entrega_dias: int = PLAZO_ENTREGA_DIAS, sucursal_id: int | None = None,
                           categoria: str | None = None, producto_id: int | None = None,
                           solo_a_pedir: bool = True, descontar_vencido: bool = True, proveedor_id: int | None = None,
-                          hoy: datetime.date | None = None) -> list[dict]:
+                          estacionalidad: bool = False, hoy: datetime.date | None = None) -> list[dict]:
     """Qué pedir, por producto, del más urgente al menos (menor cobertura primero, luego mayor `sugerido`; los
     que no tienen rotación, al final). Cada fila: `producto_id`, `codigo`, `nombre`, `unidad`, `categoria`, `stock`,
     `vencido`, `proveedor_id`, `proveedor`, `en_camino`, `en_camino_sin_sucursal`, `stock_minimo`, `unidades_vendidas`, `dias_con_stock`, `rotacion_diaria`,
     `cobertura_dias` (`None` sin rotación), `sugerido`, `motivo` (`bajo_minimo`, `por_rotacion`, `ambos`, o `None`
-    si no hay nada que pedir), `sin_ventas`, `posible_quiebre` y `variantes`. Ver el docstring del módulo.
+    si no hay nada que pedir), `sin_ventas`, `posible_quiebre`, `variantes` y `factor_estacional` (`None` si `estacionalidad` está apagada o no hay historia). Ver el docstring del módulo.
 
     `solo_a_pedir` (el default) deja sólo los de `sugerido > 0`. `descontar_vencido` (el default) resta del stock lo
-    que está en lotes vencidos. `hoy` es para las pruebas: el default es la fecha
+    que está en lotes vencidos. `estacionalidad` (apagada por default) ajusta la proyección por lo que pasó hace un año. `hoy` es para las pruebas: el default es la fecha
     del servidor. Levanta `ValueError` con un parámetro fuera de rango o una `sucursal_id` que no existe.
     No commitea (no escribe)."""
     _entero_en_rango("dias_rotacion", dias_rotacion, MAX_DIAS_ROTACION)
@@ -307,6 +359,11 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
             vendidas[item_id] = vendidas.get(item_id, _CERO) + unidades
             dias_con_venta.setdefault(item_id, set()).add(str(occurred_on)[:10])
 
+    factores: dict[int, Decimal] = {}
+    if estacionalidad:
+        horizontes = {p["id"]: dias_cobertura + (int(p["lead_time_days"]) if p["lead_time_days"] is not None else plazo_entrega_dias) for p in productos}
+        factores = _factores_estacionales(conn, ids, hoy, dias_rotacion, horizontes, sucursal_id)
+
     vencidos = _vencido(conn, ids, depositos, hoy) if descontar_vencido else {}
     en_camino, en_camino_sin_sucursal = _en_camino(conn, sucursal_id)
     variantes = {
@@ -341,7 +398,9 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
         plazo = int(p["lead_time_days"]) if plazo_propio else plazo_entrega_dias
         horizonte = dias_cobertura + plazo
         maximo = _dec(p["max_stock"]) if p["max_stock"] is not None else None
-        por_rotacion = _techo(max(unidades * horizonte / dias_de_muestra - disponible, _CERO), escala)
+        factor = factores.get(pid)
+        proyectado = unidades * horizonte / dias_de_muestra
+        por_rotacion = _techo(max((proyectado * factor if factor is not None else proyectado) - disponible, _CERO), escala)
         bajo_minimo = minimo > 0 and disponible < minimo
         sugerido = max(por_rotacion, _techo(minimo - disponible, escala)) if bajo_minimo else por_rotacion
         limitado = False
@@ -372,6 +431,7 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
             "stock_maximo": float(maximo) if maximo is not None else None,
             "limitado_por_maximo": limitado,
             "proveedor_id": p["proveedor_id"], "proveedor": p["proveedor"],
+            "factor_estacional": float(round(factor, 2)) if factor is not None else None,
         })
     # Menor cobertura primero (sin rotación al final), después lo que más hay que pedir, y el nombre para que dos
     # consultas seguidas den el mismo orden.
