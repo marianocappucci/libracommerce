@@ -24,14 +24,14 @@ import datetime
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from ..erp import reposicion
+from ..erp import compras, reposicion, reposicion_ordenes
 from . import fastapi as _fastapi
 from .catalogo_router import Conexion, _deps
 from .compras_router import _sin_traduccion
 from .margen_router import _csv
 
 _fastapi()
-from fastapi import APIRouter, HTTPException, Query  # noqa: E402
+from fastapi import APIRouter, Depends, HTTPException, Query  # noqa: E402
 from pydantic import BaseModel, ConfigDict  # noqa: E402
 
 _CAMPOS = [
@@ -185,5 +185,76 @@ def build_reposicion_parametros_router(
                 conn.commit()
                 return respuesta
         return _atajar(_op)
+
+    return router
+
+
+class GenerarOrdenes(BaseModel):
+    """El cuerpo del `POST` que genera las órdenes en borrador: los parámetros de la reposición (los que no vienen, los defaults), la clave
+    de la operación y, opcionalmente, los productos a pedir. Sin campos de más."""
+    model_config = ConfigDict(extra="forbid")
+    clave_operacion: str
+    dias_rotacion: int = reposicion.DIAS_ROTACION
+    dias_cobertura: int = reposicion.DIAS_COBERTURA
+    plazo_entrega_dias: int = reposicion.PLAZO_ENTREGA_DIAS
+    sucursal_id: int | None = None
+    categoria: str | None = None
+    proveedor_id: int | None = None
+    producto_ids: list[int] | None = None
+    #: `{producto_id: cantidad}`: lo que la persona vio y confirmó; la orden no se pasa de eso (ver `generar_ordenes_borrador`).
+    topes: dict[int, float] | None = None
+    descontar_vencido: bool = True
+
+
+def build_reposicion_ordenes_router(
+    *,
+    conexion: Conexion | None = None,
+    usuario_actual: Callable[..., Any] | None = None,
+    prefix: str = "/api/reportes/reposicion/ordenes",
+    dependencias_escribir: Sequence[Any] | None = None,
+    numerador: compras.Numerador = compras.numero_por_defecto,
+    resolver_proveedor: Callable[[Any, int], int] = _sin_traduccion,
+    proveedor_de: Callable[[Any, int], int] = _sin_traduccion,
+):
+    """`POST ""` (ADR-022): genera **una orden de compra en borrador por proveedor habitual** con lo que la reposición sugiere pedir, con los
+    parámetros del cuerpo (los de `GET /api/reportes/reposicion`). Nunca envía ni confirma: son borradores para revisar. Devuelve
+    `{ordenes, sin_proveedor, omitidos, repetida}`: las órdenes creadas (`proveedor_id` en los ids del producto), los productos a pedir sin proveedor
+    habitual, los `producto_ids` sin nada que pedir, y si es el reintento de una `clave_operacion` ya usada (devuelve las mismas órdenes sin crear
+    otras). Todo o nada: si algo falla no queda ninguna. 422 con un parámetro inválido, 503 sin la revisión `0004`. `numerador`, `resolver_proveedor` y
+    `proveedor_de` son los ganchos de `OpcionesCompras`.
+
+    **Escribe órdenes de compra, así que la factory FALLA al construirse (`ValueError`) sin `dependencias_escribir`** (una lista no vacía de
+    `Depends(...)`: el producto pone acá la misma capacidad que protege la escritura de Compras) ni sin `usuario_actual` (la orden queda a nombre de quien
+    la generó)."""
+    if usuario_actual is None:
+        raise ValueError("build_reposicion_ordenes_router necesita usuario_actual: las órdenes quedan a nombre de quien las generó")
+    if not isinstance(dependencias_escribir, (list, tuple)) or not dependencias_escribir:
+        raise ValueError("build_reposicion_ordenes_router necesita dependencias_escribir, una lista no vacía de Depends(...): "
+                         "no se exponen escrituras de órdenes de compra sin autorización")
+    abrir, _ = _deps(None, conexion)
+    router = APIRouter(prefix=prefix, tags=["reposicion"])
+
+    @router.post("", dependencies=list(dependencias_escribir))
+    def generar(cuerpo: GenerarOrdenes, user: dict = Depends(usuario_actual)):
+        try:
+            with abrir() as conn:
+                party = resolver_proveedor(conn, cuerpo.proveedor_id) if cuerpo.proveedor_id is not None else None
+                resultado = reposicion_ordenes.generar_ordenes_borrador(
+                    conn, clave_operacion=cuerpo.clave_operacion, producto_ids=cuerpo.producto_ids, topes=cuerpo.topes, usuario_id=user.get("id"),
+                    numerador=numerador, dias_rotacion=cuerpo.dias_rotacion, dias_cobertura=cuerpo.dias_cobertura,
+                    plazo_entrega_dias=cuerpo.plazo_entrega_dias, sucursal_id=cuerpo.sucursal_id, categoria=cuerpo.categoria or None,
+                    proveedor_id=party, descontar_vencido=cuerpo.descontar_vencido,
+                )
+                # Los proveedores de las órdenes, en los ids del producto, ANTES de confirmar (si el gancho falla no queda nada escrito).
+                resultado["ordenes"] = [
+                    {**{k: v for k, v in o.items() if k != "supplier_party_id"}, "proveedor_id": proveedor_de(conn, o["supplier_party_id"])}
+                    for o in resultado["ordenes"]
+                ]
+                conn.commit()
+                return resultado
+        except reposicion.SinRevision as e:
+            raise HTTPException(503, str(e)) from e
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
 
     return router

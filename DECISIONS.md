@@ -1002,3 +1002,29 @@ en borrador por proveedor. Sigue diferido: estacionalidad, `min_stock` por sucur
 > aceptan ahora los mismos ganchos que `OpcionesCompras` (`resolver_proveedor(conn, proveedor_id) -> party_id` y `proveedor_de(conn, party_id) -> proveedor_id`): el filtro, el cuerpo
 > del `PUT` y cada respuesta hablan en los ids del producto, y el motor sigue guardando y comparando por `party_id`. Sin ganchos, identidad (el comportamiento de v0.33.0). Lo vio el
 > primer test de VentaLibra contra el router real (422 «el proveedor 2 no existe»): la prueba del motor sólo usaba `party_id`.
+
+## ADR-022 — Reposición v2: órdenes de compra en borrador, una por proveedor habitual (2026-10-02)
+
+**Contexto.** La reposición sugiere qué pedir (ADR-017) y ahora a quién (el proveedor habitual del producto, ADR-021), pero el circuito terminaba ahí: había que
+transcribir la lista a mano en Compras. El paso que sigue es convertir lo sugerido en órdenes de compra.
+
+**Decisión.** `erp.reposicion_ordenes.generar_ordenes_borrador` y `POST /api/reportes/reposicion/ordenes` (`build_reposicion_ordenes_router`) crean **una orden en
+`draft` por proveedor habitual**, con una línea por producto: la cantidad es el `sugerido` de la reposición con los mismos parámetros, el costo es el
+`catalog_items.default_cost` vigente (la línea trae `costo_cero` si nunca se cargó) y sin IVA. **Nunca envía ni confirma**: es un borrador que una persona revisa; el
+motor ni siquiera tiene una operación que pase una orden a `sent`. Un producto sin proveedor habitual no entra en ninguna orden y se informa en `sin_proveedor`; un
+`producto_ids` pedido sin nada que pedir se informa en `omitidos`. Sin migración (usa la `0004`; `SinRevision`/503 sin ella).
+
+- **Lo confirmado es un tope:** el cuerpo puede llevar `topes` (`{producto_id: cantidad}`, lo que la persona vio en la vista previa); la cantidad de cada línea es el
+  **menor** entre el sugerido de ahora y su tope, así que si entre la vista previa y el pedido el stock bajó y el sugerido subió, la orden no se pasa de lo confirmado (si
+  bajó, se pide menos). Un producto sin tope se pide por el sugerido. Hallazgo de Codex sobre el kit.
+- **No duplica:** las órdenes en borrador ya cuentan como «en camino» (ADR-017), así que generar dos veces seguidas no encuentra nada que pedir la segunda. Además
+  `clave_operacion` (obligatoria, un UUID por intento) hace idempotente un reintento exacto: se estampa `[op:<clave>]` en las `notes` y una clave usada devuelve las
+  mismas órdenes (`repetida: true`).
+- **Todo o nada:** las órdenes se insertan **sin commitear** (`repositorio_de(conn).save_purchase_order` confirma cada vez, y con eso las ya creadas quedarían
+  confirmadas si una de las siguientes falla); el router traduce los ids de proveedor y recién después confirma. La numeración sale del `numerador` que pase el producto
+  (`OpcionesCompras.numerador`).
+- **Escribe órdenes de compra, así que la factory no se construye** sin `dependencias_escribir` (la capacidad que ya protege Compras) ni sin `usuario_actual`.
+- **Ids de proveedor:** los mismos ganchos que Compras (`resolver_proveedor`, `proveedor_de`).
+
+**Consecuencias.** Falta el botón en la reposición ([[libra-ui]]) y el montaje en VentaLibra. Sigue diferido: estacionalidad, `min_stock` por sucursal y descontar lo que vence
+dentro del horizonte. Una orden generada con el costo en 0 hay que completarla antes de enviarla.
