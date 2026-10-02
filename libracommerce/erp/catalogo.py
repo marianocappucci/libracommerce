@@ -913,16 +913,18 @@ def get_producto_by_codigo(conn, codigo: str) -> dict | None:
 def _exigir_minimo_bajo_el_techo(conn, pid: int, stock_minimo) -> None:
     """ADR-020: si el producto tiene un techo de reposición (`max_stock`), el stock mínimo no puede pasarlo. `fijar_parametros` ya lo
     exige al cargar el techo; acá se exige al subir el mínimo, para que editar el producto no deje la invariante rota. `ValueError`
-    (el router lo contesta 422). Una base sin la revisión `0003` no tiene techos: no hace nada."""
+    (el router lo contesta 422), pero sólo si el mínimo SUBE: dejar el que ya tenía no se rechaza. Una base sin la revisión `0003` no tiene techos: no hace nada."""
     from .reposicion import tiene_parametros
 
     if not tiene_parametros(conn):
         return
-    fila = conn.execute("SELECT max_stock FROM catalog_items WHERE id = ?", (pid,)).fetchall()
+    fila = conn.execute("SELECT max_stock, min_stock FROM catalog_items WHERE id = ?", (pid,)).fetchall()
     if not fila or fila[0]["max_stock"] is None:
         return
     techo, minimo = Decimal(str(fila[0]["max_stock"])), Decimal(str(stock_minimo))
-    if minimo > techo:
+    # Sólo se rechaza SUBIR el mínimo por encima del techo: un producto que ya los tenía cruzados (de antes de esta guarda) puede seguir
+    # editándose —precio, nombre, la actualización masiva de precios que reenvía el mínimo tal cual— y bajar su mínimo hacia el techo.
+    if minimo > techo and minimo > Decimal(str(fila[0]["min_stock"] or 0)):
         raise ValueError(f"el stock mínimo ({minimo}) no puede ser mayor que el stock máximo de reposición del producto ({techo}); "
                          "bajá o quitá el máximo primero")
 

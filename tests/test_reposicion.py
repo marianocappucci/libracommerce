@@ -1003,3 +1003,23 @@ def test_editar_un_producto_sin_techo_ni_revision_no_cambia(abrir_ventas):
         sal = _producto(conn, "Sal", minimo=5.0)
         catalogo.update_producto(conn, sal, "Sal", "", "", 100.0, 60.0, "u", "", 1, stock_minimo=99.0)
         conn.commit()
+
+
+def test_un_producto_con_el_minimo_ya_por_encima_del_techo_puede_seguir_editandose(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    with abrir() as conn:
+        sal = _producto(conn, "Sal", minimo=5.0)
+    _fijar(abrir, sal, techo=10)
+    with abrir() as conn:                                      # el dato de antes de la guarda: mínimo 50, techo 10
+        conn.execute("UPDATE catalog_items SET min_stock = 50 WHERE id = ?", (sal,))
+        conn.commit()
+
+    def editar(minimo, precio=100.0):
+        with abrir() as conn:
+            catalogo.update_producto(conn, sal, "Sal", "", "", precio, 60.0, "u", "", 1, stock_minimo=minimo)
+            conn.commit()
+
+    editar(50.0, precio=120.0)                                 # un cambio ajeno al mínimo (o el reenvío de la actualización masiva)
+    editar(30.0)                                               # bajarlo hacia el techo
+    with pytest.raises(ValueError, match="no puede ser mayor"):
+        editar(40.0)                                           # subirlo, no
