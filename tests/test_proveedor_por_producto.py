@@ -230,7 +230,7 @@ def test_el_router_lee_y_escribe_el_proveedor_y_la_clave_ausente_no_lo_toca(abri
     assert c.get("/api/reportes/reposicion", params={"proveedor_id": prov, "solo_a_pedir": "false"}).json()["proveedor_id"] == prov
     assert c.get("/api/reportes/reposicion", params={"proveedor_id": 99999}).status_code == 422
     csv = c.get("/api/reportes/reposicion/export", params={"solo_a_pedir": "false"}).text.splitlines()
-    assert csv[0].endswith(",proveedor_id,proveedor") and csv[1].endswith(f",{prov},Distribuidora Norte")
+    assert csv[0].endswith(",proveedor_id,proveedor,factor_estacional") and csv[1].endswith(f",{prov},Distribuidora Norte,")
 
 
 def test_el_router_traduce_los_ids_del_producto_con_los_ganchos_de_compras(abrir_vto_ventas):
@@ -272,7 +272,7 @@ def test_el_router_traduce_los_ids_del_producto_con_los_ganchos_de_compras(abrir
     # `null` borra y no pasa por los ganchos.
     assert c.put(ruta, json={"plazo_entrega_dias": None, "stock_maximo": None, "proveedor_id": None}).json()["proveedor_id"] is None
     csv = c.get("/api/reportes/reposicion/export", params={"solo_a_pedir": "false"}).text.splitlines()
-    assert csv[1].split(",")[-2] == ""                                              # sin proveedor, la columna va vacía
+    assert csv[1].split(",")[-3] == ""                                              # sin proveedor, la columna va vacía
 
 
 def test_si_la_traduccion_de_la_respuesta_falla_el_put_no_queda_escrito(abrir_vto_ventas):
