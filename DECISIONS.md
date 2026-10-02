@@ -1017,6 +1017,10 @@ motor ni siquiera tiene una operación que pase una orden a `sent`. Un producto 
 - **Lo confirmado es un tope:** el cuerpo puede llevar `topes` (`{producto_id: cantidad}`, lo que la persona vio en la vista previa); la cantidad de cada línea es el
   **menor** entre el sugerido de ahora y su tope, así que si entre la vista previa y el pedido el stock bajó y el sugerido subió, la orden no se pasa de lo confirmado (si
   bajó, se pide menos). Un producto sin tope se pide por el sugerido. Hallazgo de Codex sobre el kit.
+- **La clave identifica UN pedido:** el marcador en las `notes` lleva también una huella de lo pedido (parámetros, `producto_ids`, `topes`); la misma clave con otros datos es
+  `ClaveReusada` (409 en el router) y no devuelve lo anterior, para que quien reusó la clave no crea que se pidió lo nuevo. La clave admite letras, números y `. _ : -` (un
+  UUID entra) y se busca por igualdad exacta (un `LIKE` trataría `%` y `_` como comodines). El tope se redondea hacia abajo a la unidad del producto; si no alcanza
+  una unidad, la línea se omite. Hallazgos de Codex.
 - **No duplica:** las órdenes en borrador ya cuentan como «en camino» (ADR-017), así que generar dos veces seguidas no encuentra nada que pedir la segunda. Además
   `clave_operacion` (obligatoria, un UUID por intento) hace idempotente un reintento exacto: se estampa `[op:<clave>]` en las `notes` y una clave usada devuelve las
   mismas órdenes (`repetida: true`).

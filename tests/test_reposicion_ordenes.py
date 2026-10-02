@@ -140,7 +140,7 @@ def test_si_algo_falla_no_queda_ninguna_orden(escenario):
     assert _cantidad_de_ordenes(e["abrir"]) == 0
 
 
-@pytest.mark.parametrize("clave", [None, "", "  ", "x" * 65, 5])
+@pytest.mark.parametrize("clave", [None, "", "  ", "x" * 65, 5, "a]", "[op:a", "con espacio", "a/b"])
 def test_la_clave_es_obligatoria_y_acotada(escenario, clave):
     with escenario["abrir"]() as conn, pytest.raises(ValueError, match="clave_operacion"):
         reposicion_ordenes.generar_ordenes_borrador(conn, clave_operacion=clave, hoy=HOY)
@@ -256,3 +256,46 @@ def test_el_router_acepta_topes_con_ids_como_texto_de_json(escenario):
     r = c.post("/api/reportes/reposicion/ordenes", json={"clave_operacion": "t", "topes": {str(e["yerba"]): 3}}).json()
     assert {li["nombre"]: li["cantidad"] for o in r["ordenes"] for li in o["lineas"]}["Yerba"] == "3"
     assert c.post("/api/reportes/reposicion/ordenes", json={"clave_operacion": "t2", "topes": {str(e["yerba"]): 0}}).status_code == 422
+
+
+def test_las_claves_con_comodines_de_like_no_se_confunden(escenario):
+    """`%` y `_` no son comodines y las mayúsculas cuentan: una clave no trae las órdenes de otra."""
+    e = escenario
+    _generar(e["abrir"], clave="Aa_b", producto_ids=[e["yerba"]])
+    for otra in ("aa_b", "AaXb", "A"):
+        r = _generar(e["abrir"], clave=otra, producto_ids=[e["sal"]])
+        assert r["repetida"] is False and [li["nombre"] for o in r["ordenes"] for li in o["lineas"]] == ["Sal"]
+        with e["abrir"]() as conn:                                                # deshacemos para la próxima vuelta de la prueba
+            conn.execute("DELETE FROM purchase_order_items WHERE purchase_order_id = ?", (r["ordenes"][0]["id"],))
+            conn.execute("DELETE FROM purchase_orders WHERE id = ?", (r["ordenes"][0]["id"],))
+            conn.commit()
+    assert _generar(e["abrir"], clave="Aa_b", producto_ids=[e["yerba"]])["repetida"] is True
+
+
+def test_la_misma_clave_con_otros_datos_es_un_conflicto_y_no_devuelve_lo_anterior(escenario):
+    e = escenario
+    _generar(e["abrir"], clave="k", producto_ids=[e["yerba"]])
+    for cambio in ({"producto_ids": [e["sal"]]}, {"producto_ids": [e["yerba"]], "dias_cobertura": 20},
+                   {"producto_ids": [e["yerba"]], "topes": {e["yerba"]: 2}}, {"producto_ids": None}):
+        with pytest.raises(reposicion_ordenes.ClaveReusada), e["abrir"]() as conn:
+            reposicion_ordenes.generar_ordenes_borrador(conn, clave_operacion="k", hoy=HOY, **cambio)
+    assert _generar(e["abrir"], clave="k", producto_ids=[e["yerba"]])["repetida"] is True      # los mismos datos siguen siendo el reintento
+    assert _cantidad_de_ordenes(e["abrir"]) == 1
+
+
+def test_el_router_contesta_409_a_una_clave_reusada_con_otros_datos(escenario):
+    e = escenario
+    c = _cliente(e["abrir"])
+    assert c.post("/api/reportes/reposicion/ordenes", json={"clave_operacion": "k", "producto_ids": [e["yerba"]]}).status_code == 200
+    assert c.post("/api/reportes/reposicion/ordenes", json={"clave_operacion": "k", "producto_ids": [e["sal"]]}).status_code == 409
+
+
+def test_el_tope_se_redondea_hacia_abajo_a_la_unidad_del_producto(escenario):
+    """Yerba se pide entera: un tope de 5,5 pide 5; un tope de 0,5 no alcanza ni una unidad y la línea se omite (no se crea una orden de 0,5)."""
+    e = escenario
+    r = _generar(e["abrir"], clave="a", topes={e["yerba"]: 5.5})
+    assert {li["nombre"]: li["cantidad"] for o in r["ordenes"] for li in o["lineas"]}["Yerba"] == "5"
+    r = _generar(e["abrir"], clave="b", producto_ids=[e["sal"]], topes={e["sal"]: 0.5})
+    assert r["ordenes"] == [] and r["omitidos"] == [e["sal"]]
+    assert _cantidad_de_ordenes(e["abrir"]) == 2                                          # la de Norte (5) y la de Sur de la primera tanda
+

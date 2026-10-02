@@ -254,6 +254,8 @@ def build_reposicion_ordenes_router(
                 return resultado
         except reposicion.SinRevision as e:
             raise HTTPException(503, str(e)) from e
+        except reposicion_ordenes.ClaveReusada as e:
+            raise HTTPException(409, str(e)) from e
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
 

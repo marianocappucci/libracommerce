@@ -25,6 +25,9 @@ encuentra nada que pedir. Además `clave_operacion` (obligatoria) hace idempoten
 from __future__ import annotations
 
 import datetime
+import hashlib
+import json
+import re
 from decimal import Decimal
 
 from ..domain.purchasing import PurchaseOrder, PurchaseOrderItem, PurchaseOrderStatus
@@ -34,9 +37,18 @@ MAX_LARGO_CLAVE = 64
 _CERO = Decimal("0")
 
 
+class ClaveReusada(ValueError):
+    """La `clave_operacion` ya generó órdenes con OTROS datos: es un pedido distinto y la clave identifica uno solo. El router la contesta 409."""
+
+
+_CLAVE_VALIDA = re.compile(rf"[A-Za-z0-9._:-]{{1,{MAX_LARGO_CLAVE}}}")
+
+
 def _clave(clave) -> str:
-    if not isinstance(clave, str) or not clave.strip() or len(clave.strip()) > MAX_LARGO_CLAVE:
-        raise ValueError(f"clave_operacion tiene que ser un texto de 1 a {MAX_LARGO_CLAVE} caracteres (un UUID por intento): {clave!r}")
+    """La clave: letras, números y `. _ : -` (un UUID entra), de 1 a 64. Sin corchetes ni espacios: el marcador `[op:<clave>]` de las `notes` tiene que
+    poder encontrarse sin que una clave sea un pedazo de otra."""
+    if not isinstance(clave, str) or not _CLAVE_VALIDA.fullmatch(clave.strip()):
+        raise ValueError(f"clave_operacion tiene que ser un texto de 1 a {MAX_LARGO_CLAVE} caracteres (letras, números y . _ : -; un UUID por intento): {clave!r}")
     return clave.strip()
 
 
@@ -44,10 +56,23 @@ def _marca(clave: str) -> str:
     return f"[op:{clave}]"
 
 
-def _ordenes_de_la_clave(conn, clave: str) -> list[dict]:
-    ids = [f[0] for f in conn.execute(
-        "SELECT id FROM purchase_orders WHERE notes LIKE ? ORDER BY id", (f"%{_marca(clave)}%",)).fetchall()]
-    return [compras.obtener_orden(conn, i) for i in ids]
+def _huella(datos: dict) -> str:
+    """Una firma corta y estable de lo que se pidió, estampada en las `notes`: la misma clave con otros datos no es el mismo pedido."""
+    return hashlib.sha256(json.dumps(datos, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+
+def _marca_de_huella(huella: str) -> str:
+    return f"[h:{huella}]"
+
+
+def _ordenes_de_la_clave(conn, clave: str) -> list[tuple[dict, str]]:
+    """Las órdenes que ya estamparon esta clave, con las `notes` de cada una. El marcador se compara **literal** y sensible a mayúsculas: un `LIKE`
+    trata `%` y `_` como comodines (y SQLite ignora mayúsculas), y una clave distinta podría confundirse con otra; el `LIKE` sólo acota y la
+    igualdad exacta la decide acá."""
+    marca = _marca(clave)
+    escapada = marca.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    filas = conn.execute("SELECT id, notes FROM purchase_orders WHERE notes LIKE ? ESCAPE '\\' ORDER BY id", (f"%{escapada}%",)).fetchall()
+    return [(compras.obtener_orden(conn, f["id"]), f["notes"]) for f in filas if marca in (f["notes"] or "")]
 
 
 def _nombres_y_costos(conn, ids: list[int]) -> dict[int, tuple[str, Decimal]]:
@@ -56,6 +81,17 @@ def _nombres_y_costos(conn, ids: list[int]) -> dict[int, tuple[str, Decimal]]:
     filas = conn.execute(
         f"SELECT id, name, default_cost FROM catalog_items WHERE id IN ({','.join('?' for _ in ids)})", ids).fetchall()
     return {f["id"]: (f["name"], Decimal(str(f["default_cost"] if f["default_cost"] is not None else 0))) for f in filas}
+
+
+def _escalas(conn, ids: list[int]) -> dict[int, int]:
+    """Los decimales con que se pide cada producto: 0 si su unidad no admite fracciones, y la `decimal_scale` de la unidad (3 si no la trae) si sí.
+    Es la misma regla con que la reposición redondea el `sugerido`."""
+    if not ids:
+        return {}
+    filas = conn.execute(
+        f"SELECT ci.id, u.allows_fraction, u.decimal_scale FROM catalog_items ci LEFT JOIN units u ON u.code = ci.unit_code "
+        f"WHERE ci.id IN ({','.join('?' for _ in ids)})", ids).fetchall()
+    return {f["id"]: ((int(f["decimal_scale"] or 0) or reposicion._ESCALA_FRACCION) if f["allows_fraction"] else 0) for f in filas}
 
 
 def _vista(conn, orden: dict, nombres: dict[int, tuple[str, Decimal]] | None = None) -> dict:
@@ -107,7 +143,7 @@ def generar_ordenes_borrador(conn, *, clave_operacion, producto_ids: list[int] |
     sugerido de ahora y su tope, así que si entre la vista previa y el pedido el stock bajó y el sugerido subió, la orden no se pasa de lo confirmado
     (si bajó, se pide menos); un producto sin tope se pide por el sugerido. `parametros` son los de `sugerencia_reposicion` (`dias_rotacion`, `dias_cobertura`, `plazo_entrega_dias`, `sucursal_id`,
     `categoria`, `proveedor_id` —un `party_id`—, `descontar_vencido`); `solo_a_pedir` no se acepta. `ValueError` con un parámetro inválido o
-    una `clave_operacion` mal formada; `reposicion.SinRevision` sin la `0004`. No commitea."""
+    una `clave_operacion` mal formada (`ClaveReusada`, que es un `ValueError`, si la clave ya se usó con otros datos); `reposicion.SinRevision` sin la `0004`. No commitea."""
     clave = _clave(clave_operacion)
     if "solo_a_pedir" in parametros:
         raise ValueError("solo_a_pedir no se acepta: las órdenes salen siempre de lo que hay que pedir")
@@ -130,9 +166,16 @@ def generar_ordenes_borrador(conn, *, clave_operacion, producto_ids: list[int] |
             raise ValueError(f"el tope del producto {k} tiene que ser mayor que 0: {v!r}")
         limites[k] = tope
 
+    huella = _huella({
+        "parametros": {k: parametros[k] for k in sorted(parametros)},
+        "producto_ids": sorted(producto_ids) if producto_ids is not None else None,
+        "topes": {str(k): str(limites[k]) for k in sorted(limites)},
+    })
     previas = _ordenes_de_la_clave(conn, clave)
     if previas:
-        return {"ordenes": [_vista(conn, o) for o in previas], "sin_proveedor": [], "omitidos": [], "repetida": True}
+        if any(_marca_de_huella(huella) not in notas for _, notas in previas):
+            raise ClaveReusada("la clave_operacion ya se usó con otros datos: es otro pedido y necesita otra clave")
+        return {"ordenes": [_vista(conn, o) for o, _ in previas], "sin_proveedor": [], "omitidos": [], "repetida": True}
 
     filas = reposicion.sugerencia_reposicion(conn, solo_a_pedir=True, hoy=hoy, **parametros)
     omitidos: list[int] = []
@@ -149,18 +192,27 @@ def generar_ordenes_borrador(conn, *, clave_operacion, producto_ids: list[int] |
         else:
             por_proveedor.setdefault(f["proveedor_id"], []).append(f)
 
-    nombres = _nombres_y_costos(conn, [f["producto_id"] for lista in por_proveedor.values() for f in lista])
+    ids_a_pedir = [f["producto_id"] for lista in por_proveedor.values() for f in lista]
+    nombres = _nombres_y_costos(conn, ids_a_pedir)
+    escalas = _escalas(conn, ids_a_pedir)
     sucursal_id = parametros.get("sucursal_id")
     creadas: list[dict] = []
     fecha = (hoy or datetime.date.today()).isoformat()
     for party_id, lista in por_proveedor.items():
-        items = tuple(
-            PurchaseOrderItem(item_id=f["producto_id"], quantity_ordered=min(Decimal(str(f["sugerido"])), limites.get(f["producto_id"], Decimal(str(f["sugerido"])))),
-                              unit_cost=nombres[f["producto_id"]][1])
-            for f in lista
-        )
+        items = []
+        for f in lista:
+            sugerido = Decimal(str(f["sugerido"]))
+            # El tope de lo confirmado, redondeado HACIA ABAJO a la unidad del producto: una cantidad de 0,5 de algo que se pide entero no existe.
+            cantidad = reposicion._piso(min(sugerido, limites.get(f["producto_id"], sugerido)), escalas.get(f["producto_id"], 0))
+            if cantidad <= 0:
+                omitidos.append(f["producto_id"])
+                continue
+            items.append(PurchaseOrderItem(item_id=f["producto_id"], quantity_ordered=cantidad, unit_cost=nombres[f["producto_id"]][1]))
+        if not items:
+            continue
         orden = PurchaseOrder(
-            id=None, number=numerador(conn), supplier_party_id=party_id, items=items, status=PurchaseOrderStatus.DRAFT,
-            branch_id=sucursal_id, notes=f"Generada desde la reposición sugerida el {fecha}. {_marca(clave)}", created_by=usuario_id)
+            id=None, number=numerador(conn), supplier_party_id=party_id, items=tuple(items), status=PurchaseOrderStatus.DRAFT,
+            branch_id=sucursal_id, created_by=usuario_id,
+            notes=f"Generada desde la reposición sugerida el {fecha}. {_marca(clave)} {_marca_de_huella(huella)}")
         creadas.append(_vista(conn, compras.obtener_orden(conn, _insertar(conn, orden)), nombres))
-    return {"ordenes": creadas, "sin_proveedor": sin_proveedor, "omitidos": omitidos, "repetida": False}
+    return {"ordenes": creadas, "sin_proveedor": sin_proveedor, "omitidos": sorted(set(omitidos)), "repetida": False}
