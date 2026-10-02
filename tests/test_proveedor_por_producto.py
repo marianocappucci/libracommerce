@@ -231,3 +231,68 @@ def test_el_router_lee_y_escribe_el_proveedor_y_la_clave_ausente_no_lo_toca(abri
     assert c.get("/api/reportes/reposicion", params={"proveedor_id": 99999}).status_code == 422
     csv = c.get("/api/reportes/reposicion/export", params={"solo_a_pedir": "false"}).text.splitlines()
     assert csv[0].endswith(",proveedor_id,proveedor") and csv[1].endswith(f",{prov},Distribuidora Norte")
+
+
+def test_el_router_traduce_los_ids_del_producto_con_los_ganchos_de_compras(abrir_vto_ventas):
+    """Un producto cuyos proveedores no son el `party_id` (VentaLibra: offset +100.000) pasa los mismos ganchos que a `OpcionesCompras`: el
+    `proveedor_id` del cuerpo, del filtro y de cada respuesta habla en SUS ids; el motor guarda y compara por `party_id`."""
+    from fastapi import Depends, FastAPI, HTTPException
+    from fastapi.testclient import TestClient
+
+    from libracommerce.web.reposicion_router import build_reposicion_parametros_router, build_reposicion_router
+
+    OFFSET = 100_000
+
+    def resolver(_conn, proveedor_id):
+        if proveedor_id < OFFSET:
+            raise HTTPException(404, "proveedor inexistente")
+        return proveedor_id - OFFSET
+
+    def de(_conn, party_id):
+        return party_id + OFFSET
+
+    abrir = abrir_vto_ventas
+    yerba = _yerba_de_referencia(abrir)
+    party = _nuevo_tercero(abrir, "Distribuidora Norte")
+    app = FastAPI()
+    app.include_router(build_reposicion_parametros_router(
+        conexion=abrir, dependencias_escribir=[Depends(lambda: None)], resolver_proveedor=resolver, proveedor_de=de))
+    app.include_router(build_reposicion_router(conexion=abrir, resolver_proveedor=resolver, proveedor_de=de))
+    c = TestClient(app)
+    ruta = f"/api/productos/{yerba}/reposicion"
+    r = c.put(ruta, json={"plazo_entrega_dias": None, "stock_maximo": None, "proveedor_id": party + OFFSET})
+    assert r.status_code == 200 and r.json()["proveedor_id"] == party + OFFSET and r.json()["proveedor"] == "Distribuidora Norte"
+    with abrir() as conn:                                                           # el motor guarda el party_id
+        assert reposicion.parametros_de(conn, yerba)["proveedor_id"] == party
+    assert c.get(ruta).json()["proveedor_id"] == party + OFFSET
+    assert c.put(ruta, json={"plazo_entrega_dias": None, "stock_maximo": None, "proveedor_id": 5}).status_code == 404      # lo dice el gancho
+    fila = c.get("/api/reportes/reposicion", params={"proveedor_id": party + OFFSET}).json()["productos"][0]
+    assert fila["proveedor_id"] == party + OFFSET and fila["proveedor"] == "Distribuidora Norte"
+    assert c.get("/api/reportes/reposicion", params={"proveedor_id": 12}).status_code == 404
+    # `null` borra y no pasa por los ganchos.
+    assert c.put(ruta, json={"plazo_entrega_dias": None, "stock_maximo": None, "proveedor_id": None}).json()["proveedor_id"] is None
+    csv = c.get("/api/reportes/reposicion/export", params={"solo_a_pedir": "false"}).text.splitlines()
+    assert csv[1].split(",")[-2] == ""                                              # sin proveedor, la columna va vacía
+
+
+def test_si_la_traduccion_de_la_respuesta_falla_el_put_no_queda_escrito(abrir_vto_ventas):
+    from fastapi import Depends, FastAPI
+    from fastapi.testclient import TestClient
+
+    from libracommerce.web.reposicion_router import build_reposicion_parametros_router
+
+    def de(_conn, _party_id):
+        raise RuntimeError("el party no tiene proveedor")
+
+    abrir = abrir_vto_ventas
+    yerba = _yerba_de_referencia(abrir)
+    party = _nuevo_tercero(abrir)
+    app = FastAPI()
+    app.include_router(build_reposicion_parametros_router(
+        conexion=abrir, dependencias_escribir=[Depends(lambda: None)], proveedor_de=de))
+    c = TestClient(app, raise_server_exceptions=False)
+    r = c.put(f"/api/productos/{yerba}/reposicion", json={"plazo_entrega_dias": 9, "stock_maximo": None, "proveedor_id": party})
+    assert r.status_code == 500
+    with abrir() as conn:
+        p = reposicion.parametros_de(conn, yerba)
+        assert p["plazo_entrega_dias"] is None and p["proveedor_id"] is None      # nada quedó escrito
