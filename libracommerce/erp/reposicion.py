@@ -62,6 +62,11 @@ guardar, pero si ya existe gana el techo). Los dos son opcionales: sin valor, la
 la revisión `0003` también. `plazo_entrega_dias` en cada fila es el que se usó y `plazo_propio` dice si era el del
 producto; `limitado_por_maximo` marca la fila a la que el techo le recortó la sugerencia.
 
+**Proveedor habitual (v2, ADR-021).** `catalog_items.supplier_party_id` es el proveedor al que se le suele pedir el producto
+(opcional). Cada fila trae `proveedor_id` y `proveedor` (el nombre; `None` sin proveedor) y `proveedor_id` filtra la lista a los
+productos de ese proveedor: es lo que prepara la orden de compra en borrador. Una base sin la revisión `0004` no tiene
+proveedores y la consulta es la de siempre.
+
 Agrupa por producto, no por variante (`variantes` dice cuántas activas tiene). Sólo productos activos, de tipo
 `product` y `purchasable`; se agrega en Python con `Decimal` y las consultas son las mismas en SQLite y PostgreSQL.
 """
@@ -128,6 +133,11 @@ def tiene_parametros(conn) -> bool:
     return {"lead_time_days", "max_stock"} <= {f[1] for f in conn.execute("PRAGMA table_info(catalog_items)").fetchall()}
 
 
+def tiene_proveedor(conn) -> bool:
+    """Si la base tiene la revisión `0004_proveedor_por_producto` (la columna `supplier_party_id`)."""
+    return "supplier_party_id" in {f[1] for f in conn.execute("PRAGMA table_info(catalog_items)").fetchall()}
+
+
 def _cantidad(valor: Decimal, escala: int):
     """Un `int` para lo que se pide de una unidad entera (`escala` 0), un `float` redondeado para el resto."""
     return int(valor) if escala == 0 else float(round(valor, escala))
@@ -139,13 +149,22 @@ def _entero_en_rango(nombre: str, valor, maximo: int) -> int:
     return valor
 
 
-def _productos(conn, categoria: str | None, producto_id: int | None) -> list:
+def _productos(conn, categoria: str | None, producto_id: int | None, proveedor_id: int | None = None) -> list:
     donde = ["ci.active = 1", "ci.item_type = 'product'", "ci.purchasable = 1"]
     params: list = []
     if producto_id is not None:
         donde.append("ci.id = ?")
         params.append(producto_id)
     propios = "ci.lead_time_days, ci.max_stock," if tiene_parametros(conn) else "NULL AS lead_time_days, NULL AS max_stock,"
+    if tiene_proveedor(conn):
+        propios += " ci.supplier_party_id AS proveedor_id, sp.display_name AS proveedor,"
+        union = "LEFT JOIN parties sp ON sp.id = ci.supplier_party_id"
+        if proveedor_id is not None:
+            donde.append("ci.supplier_party_id = ?")
+            params.append(proveedor_id)
+    else:
+        propios += " NULL AS proveedor_id, NULL AS proveedor,"
+        union = ""
     filas = conn.execute(
         f"""SELECT ci.id, ci.name, ci.unit_code, ci.min_stock, {propios} COALESCE(cat.name, '') AS categoria,
                    ic.code AS codigo, u.allows_fraction, u.decimal_scale
@@ -153,6 +172,7 @@ def _productos(conn, categoria: str | None, producto_id: int | None) -> list:
             LEFT JOIN categories cat ON cat.id = ci.category_id
             LEFT JOIN item_codes ic ON ic.item_id = ci.id AND ic.is_primary = 1
             LEFT JOIN units u ON u.code = ci.unit_code
+            {union}
             WHERE {' AND '.join(donde)}
             ORDER BY ci.name, ci.id""",
         params,
@@ -239,11 +259,11 @@ def _dias_sin_stock(saldo_final: Decimal, movimientos: list[tuple[str, Decimal]]
 def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobertura: int = DIAS_COBERTURA,
                           plazo_entrega_dias: int = PLAZO_ENTREGA_DIAS, sucursal_id: int | None = None,
                           categoria: str | None = None, producto_id: int | None = None,
-                          solo_a_pedir: bool = True, descontar_vencido: bool = True,
+                          solo_a_pedir: bool = True, descontar_vencido: bool = True, proveedor_id: int | None = None,
                           hoy: datetime.date | None = None) -> list[dict]:
     """Qué pedir, por producto, del más urgente al menos (menor cobertura primero, luego mayor `sugerido`; los
     que no tienen rotación, al final). Cada fila: `producto_id`, `codigo`, `nombre`, `unidad`, `categoria`, `stock`,
-    `vencido`, `en_camino`, `en_camino_sin_sucursal`, `stock_minimo`, `unidades_vendidas`, `dias_con_stock`, `rotacion_diaria`,
+    `vencido`, `proveedor_id`, `proveedor`, `en_camino`, `en_camino_sin_sucursal`, `stock_minimo`, `unidades_vendidas`, `dias_con_stock`, `rotacion_diaria`,
     `cobertura_dias` (`None` sin rotación), `sugerido`, `motivo` (`bajo_minimo`, `por_rotacion`, `ambos`, o `None`
     si no hay nada que pedir), `sin_ventas`, `posible_quiebre` y `variantes`. Ver el docstring del módulo.
 
@@ -256,12 +276,14 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
     _entero_en_rango("plazo_entrega_dias", plazo_entrega_dias, MAX_PLAZO_ENTREGA_DIAS)
     if sucursal_id is not None and not conn.execute("SELECT 1 FROM branches WHERE id = ?", (sucursal_id,)).fetchall():
         raise ValueError(f"la sucursal {sucursal_id} no existe")
+    if proveedor_id is not None and not conn.execute("SELECT 1 FROM parties WHERE id = ?", (proveedor_id,)).fetchall():
+        raise ValueError(f"el proveedor {proveedor_id} no existe")
 
     hoy = hoy or datetime.date.today()
     desde = hoy - datetime.timedelta(days=dias_rotacion - 1)
     muestra_minima = min(dias_rotacion, _MIN_DIAS_DE_MUESTRA)
 
-    productos = _productos(conn, categoria, producto_id)
+    productos = _productos(conn, categoria, producto_id, proveedor_id)
     ids = {p["id"] for p in productos}
     depositos = _depositos(conn, sucursal_id)
 
@@ -349,6 +371,7 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
             "variantes": variantes.get(pid, 0), "plazo_entrega_dias": plazo, "plazo_propio": plazo_propio,
             "stock_maximo": float(maximo) if maximo is not None else None,
             "limitado_por_maximo": limitado,
+            "proveedor_id": p["proveedor_id"], "proveedor": p["proveedor"],
         })
     # Menor cobertura primero (sin rotación al final), después lo que más hay que pedir, y el nombre para que dos
     # consultas seguidas den el mismo orden.
@@ -368,8 +391,12 @@ class SinRevision(Exception):
 
 
 def _fila_del_producto(conn, item_id: int):
-    filas = conn.execute("SELECT id, name, min_stock, lead_time_days, max_stock FROM catalog_items WHERE id = ?",
-                         (item_id,)).fetchall()
+    proveedor = ("ci.supplier_party_id AS proveedor_id, sp.display_name AS proveedor"
+                 if tiene_proveedor(conn) else "NULL AS proveedor_id, NULL AS proveedor")
+    union = "LEFT JOIN parties sp ON sp.id = ci.supplier_party_id" if tiene_proveedor(conn) else ""
+    filas = conn.execute(
+        f"SELECT ci.id, ci.name, ci.min_stock, ci.lead_time_days, ci.max_stock, {proveedor} FROM catalog_items ci {union} "
+        "WHERE ci.id = ?", (item_id,)).fetchall()
     if not filas:
         raise ProductoNoEncontrado(f"el producto {item_id} no existe")
     return filas[0]
@@ -382,20 +409,27 @@ def _exigir_parametros(conn) -> None:
 
 
 def parametros_de(conn, item_id: int) -> dict:
-    """`{producto_id, nombre, plazo_entrega_dias, stock_maximo, stock_minimo}` de un producto: `None` en lo que no se
-    definió (usa el plazo general / no tiene techo). `ProductoNoEncontrado` si no existe; `SinRevision` sin la
+    """`{producto_id, nombre, plazo_entrega_dias, stock_maximo, stock_minimo, proveedor_id, proveedor}` de un producto: `None`
+    en lo que no se definió (usa el plazo general / no tiene techo / sin proveedor habitual). `ProductoNoEncontrado` si no existe; `SinRevision` sin la
     revisión `0003`. No escribe."""
     _exigir_parametros(conn)
     p = _fila_del_producto(conn, item_id)
     return {"producto_id": p["id"], "nombre": p["name"],
             "plazo_entrega_dias": int(p["lead_time_days"]) if p["lead_time_days"] is not None else None,
             "stock_maximo": float(_dec(p["max_stock"])) if p["max_stock"] is not None else None,
-            "stock_minimo": float(_dec(p["min_stock"]))}
+            "stock_minimo": float(_dec(p["min_stock"])), "proveedor_id": p["proveedor_id"], "proveedor": p["proveedor"]}
 
 
-def fijar_parametros(conn, item_id: int, *, plazo_entrega_dias, stock_maximo) -> dict:
+#: «No tocar el proveedor»: `fijar_parametros` sin el argumento deja el proveedor como estaba (los clientes anteriores a v0.33.0 no lo
+#: mandan). `None` lo borra.
+SIN_CAMBIO = object()
+
+
+def fijar_parametros(conn, item_id: int, *, plazo_entrega_dias, stock_maximo, proveedor_id=SIN_CAMBIO) -> dict:
     """Guarda el plazo de entrega y el techo de un producto; `None` en cualquiera de los dos lo borra (vuelve al plazo
-    general / sin techo). Los dos son siempre los valores completos: no hay «no tocar». Valida antes de escribir:
+    general / sin techo). Los dos son siempre los valores completos: no hay «no tocar». `proveedor_id` (ADR-021) sí puede
+    omitirse (`SIN_CAMBIO`: queda como estaba); un id lo fija, `None` lo borra; tiene que ser un tercero que exista y esté
+    activo, y pide la revisión `0004` (`SinRevision` si falta). Valida antes de escribir:
     el plazo, un entero de 1 a `MAX_PLAZO_ENTREGA_DIAS`; el techo, un número mayor que 0 y, si el producto tiene
     mínimo, no menor que él. `ValueError` con el motivo si no; `ProductoNoEncontrado`, `SinRevision`. No commitea."""
     _exigir_parametros(conn)
@@ -415,6 +449,20 @@ def fijar_parametros(conn, item_id: int, *, plazo_entrega_dias, stock_maximo) ->
         minimo = _dec(p["min_stock"])
         if minimo > 0 and techo < minimo:
             raise ValueError(f"stock_maximo ({techo}) no puede ser menor que el stock mínimo del producto ({minimo})")
+    if proveedor_id is not SIN_CAMBIO:
+        if not tiene_proveedor(conn):
+            raise SinRevision("Falta la revisión 0004_proveedor_por_producto del motor: corré `libracommerce-migrar upgrade` "
+                              "(--prefijo del producto) antes de cargar proveedores por producto.")
+        if proveedor_id is not None:
+            if isinstance(proveedor_id, bool) or not isinstance(proveedor_id, int):
+                raise ValueError(f"proveedor_id tiene que ser un entero: {proveedor_id!r}")
+            tercero = conn.execute("SELECT active FROM parties WHERE id = ?", (proveedor_id,)).fetchall()
+            if not tercero:
+                raise ValueError(f"el proveedor {proveedor_id} no existe")
+            if not tercero[0]["active"]:
+                raise ValueError(f"el proveedor {proveedor_id} está dado de baja")
     conn.execute("UPDATE catalog_items SET lead_time_days = ?, max_stock = ? WHERE id = ?",
                  (plazo_entrega_dias, str(techo) if techo is not None else None, item_id))
+    if proveedor_id is not SIN_CAMBIO:
+        conn.execute("UPDATE catalog_items SET supplier_party_id = ? WHERE id = ?", (proveedor_id, item_id))
     return parametros_de(conn, item_id)

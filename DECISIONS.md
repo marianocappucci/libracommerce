@@ -974,3 +974,25 @@ del horizonte. Un `max_stock` por sucursal tampoco existe: el techo es del produ
 > **Nota 2026-10-02 (hallazgo de Codex sobre el montaje en VentaLibra, v0.32.1):** `update_producto` ahora rechaza (`ValueError`, el router lo contesta 422) subir el
 > `stock_minimo` por encima del `max_stock` del producto. Antes sólo lo exigía `fijar_parametros` y una edición del producto (que puede hacer un rol que no ve los
 > parámetros) dejaba la invariante rota. El techo manda igual si ya había un mínimo mayor (datos anteriores). Una base sin la revisión `0003` no cambia.
+
+## ADR-021 — Reposición v2: un proveedor habitual por producto (2026-10-02)
+
+**Contexto.** ADR-017 y ADR-020 dejaron diferido el «proveedor por producto». Hoy una orden de compra lleva un proveedor, pero el producto no sabe
+a quién se le suele pedir: la reposición sugiere qué pedir y no a quién, y la orden de compra en borrador (el paso que sigue) no tiene de dónde sacarlo.
+
+**Decisión.** Revisión Alembic **`0004_proveedor_por_producto`**: `catalog_items.supplier_party_id INTEGER REFERENCES parties(id)`, **NULL** (sin proveedor
+definido). Aditiva e idempotente; los productos que existen quedan en NULL. **Un** proveedor habitual por producto (no una lista de proveedores con precios
+ni plazos: eso es otro diseño). El proveedor es un tercero (`parties`) que exista y esté activo; el motor no tiene roles de tercero, así que no se exige
+que figure como proveedor en otra parte.
+
+- **Escritura:** `fijar_parametros(..., proveedor_id=)` y el `PUT /api/productos/{id}/reposicion` aceptan `proveedor_id`. **Si no se manda, el proveedor queda
+  como estaba** (`SIN_CAMBIO` / clave ausente del cuerpo): los clientes de v0.32.x (el kit 0.100.0, que sólo manda plazo y techo) no lo borran sin querer. `null`
+  lo borra. Un id inexistente o de un tercero dado de baja es 422/`ValueError` y **no escribe nada** (tampoco el plazo ni el techo del mismo pedido).
+  Sin la revisión `0004` pedir un proveedor responde `SinRevision`/503; sin pedirlo, la `0003` alcanza como siempre.
+- **Lectura:** `GET .../reposicion` devuelve `proveedor_id` y `proveedor` (el nombre). La reposición trae los dos en cada fila y en el CSV, y acepta
+  `proveedor_id` para listar sólo los productos de ese proveedor (422 si no existe). Una base sin la `0004` devuelve `None` y no filtra nada.
+- **No cambia** el cálculo del sugerido ni lo que cuenta como «en camino» (una orden a otro proveedor sigue contando: el habitual es una preferencia, no una
+  restricción).
+
+**Consecuencias.** Falta cargarlo desde la pantalla del producto y elegirlo/filtrarlo en la reposición ([[libra-ui]]), montarlo en VentaLibra y la orden de compra
+en borrador por proveedor. Sigue diferido: estacionalidad, `min_stock` por sucursal y descontar lo que vence dentro del horizonte.
