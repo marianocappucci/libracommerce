@@ -21,6 +21,8 @@ Cuelga de `/api/reportes/reposicion`, que no choca con `libracore.reportes_route
 from __future__ import annotations
 
 import datetime
+from collections.abc import Sequence
+from typing import Any
 
 from ..erp import reposicion
 from . import fastapi as _fastapi
@@ -29,12 +31,21 @@ from .margen_router import _csv
 
 _fastapi()
 from fastapi import APIRouter, HTTPException, Query  # noqa: E402
+from pydantic import BaseModel, ConfigDict  # noqa: E402
 
 _CAMPOS = [
     "producto_id", "codigo", "nombre", "categoria", "unidad", "stock", "vencido", "en_camino", "en_camino_sin_sucursal",
     "stock_minimo", "unidades_vendidas", "dias_con_stock", "rotacion_diaria", "cobertura_dias", "sugerido",
-    "motivo", "sin_ventas", "posible_quiebre", "variantes",
+    "motivo", "sin_ventas", "posible_quiebre", "variantes", "plazo_entrega_dias", "plazo_propio", "stock_maximo",
+    "limitado_por_maximo",
 ]
+
+
+class ParametrosDeReposicion(BaseModel):
+    """El cuerpo del `PUT`: los dos valores completos, `null` para borrar. Sin campos de más."""
+    model_config = ConfigDict(extra="forbid")
+    plazo_entrega_dias: int | None
+    stock_maximo: float | None
 
 
 def build_reposicion_router(
@@ -96,5 +107,54 @@ def build_reposicion_router(
         productos = _reporte(dias_rotacion, dias_cobertura, plazo_entrega_dias, sucursal_id, categoria, producto_id,
                              solo_a_pedir, descontar_vencido)
         return _csv(productos, _CAMPOS, f"reposicion_{datetime.date.today().isoformat()}.csv")
+
+    return router
+
+
+def build_reposicion_parametros_router(
+    *,
+    conexion: Conexion | None = None,
+    prefix: str = "/api/productos",
+    dependencias_leer: Sequence[Any] | None = None,
+    dependencias_escribir: Sequence[Any] | None = None,
+):
+    """`GET /{producto_id}/reposicion` y `PUT /{producto_id}/reposicion` (ADR-020): el plazo de entrega y el techo de
+    stock propios de un producto, que la reposición sugerida usa en lugar del plazo general y para no pasarse de
+    ese techo. El `PUT` lleva siempre los dos valores (`{plazo_entrega_dias, stock_maximo}`, cualquiera puede ser
+    `null` para volver al general / sin techo). 404 si el producto no existe, 422 si un valor no es válido, 503 sin
+    la revisión `0003`. **Escribe el catálogo, así que la factory FALLA al construirse (`ValueError`) sin
+    `dependencias_escribir`** (una lista no vacía de `Depends(...)`); `dependencias_leer` es opcional."""
+    if not isinstance(dependencias_escribir, (list, tuple)) or not dependencias_escribir:
+        raise ValueError("build_reposicion_parametros_router necesita dependencias_escribir, una lista no vacía de "
+                         "Depends(...): no se expone una escritura del catálogo sin autorización")
+    abrir, _ = _deps(None, conexion)
+    router = APIRouter(prefix=prefix, tags=["reposicion"])
+
+    def _atajar(operacion):
+        try:
+            return operacion()
+        except reposicion.ProductoNoEncontrado as e:
+            raise HTTPException(404, str(e)) from e
+        except reposicion.SinRevision as e:
+            raise HTTPException(503, str(e)) from e
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+
+    @router.get("/{producto_id}/reposicion", dependencies=list(dependencias_leer or []))
+    def leer(producto_id: int):
+        def _op():
+            with abrir() as conn:
+                return reposicion.parametros_de(conn, producto_id)
+        return _atajar(_op)
+
+    @router.put("/{producto_id}/reposicion", dependencies=list(dependencias_escribir))
+    def fijar(producto_id: int, cuerpo: ParametrosDeReposicion):
+        def _op():
+            with abrir() as conn:
+                resultado = reposicion.fijar_parametros(conn, producto_id, plazo_entrega_dias=cuerpo.plazo_entrega_dias,
+                                                        stock_maximo=cuerpo.stock_maximo)
+                conn.commit()
+                return resultado
+        return _atajar(_op)
 
     return router

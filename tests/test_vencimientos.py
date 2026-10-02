@@ -208,6 +208,9 @@ def _nombres(reporte) -> list[str]:
 
 # ═════════════════════════════════════════════════════════ La revisión 0002
 
+#: La cabeza de la cadena: sube con cada revisión nueva (la 0002 queda verificada igual: la columna y el índice).
+_CABEZA = "0003_parametros_reposicion"
+
 
 def test_la_revision_0002_corre_sobre_datos_previos_sin_tocar_una_fila(destino):
     """Una base «de hoy» —con productos, stock y una venta— sube a `head` sin perder ni cambiar nada, en los dos
@@ -239,11 +242,11 @@ def test_la_revision_0002_corre_sobre_datos_previos_sin_tocar_una_fila(destino):
         assert stock.get_stock_por_deposito(conn) == stock_antes
         return [f[0] for f in conn.execute("SELECT version_num FROM alembic_version_libracommerce").fetchall()]
 
-    assert _con_conexion(destino, verificar) == ["0002_vencimientos_lotes"]
+    assert _con_conexion(destino, verificar) == [_CABEZA]
 
     # Idempotente: una segunda corrida no cambia nada ni falla.
     migrar.upgrade(destino)
-    assert _con_conexion(destino, verificar) == ["0002_vencimientos_lotes"]
+    assert _con_conexion(destino, verificar) == [_CABEZA]
 
 
 def test_la_revision_0002_baja_sin_tocar_el_ledger(destino):
@@ -282,7 +285,7 @@ def test_init_schema_sigue_congelado_y_la_columna_es_solo_de_la_revision(destino
     migrar.upgrade(destino)
     con = _con_conexion(destino, antes)
     assert "tracks_expiry" not in sin
-    assert con - sin == {"tracks_expiry"}
+    assert con - sin == {"tracks_expiry", "lead_time_days", "max_stock"}   # las de la 0002 y las de la 0003
 
 
 def test_sin_la_revision_el_reporte_falla_diciendo_que_hace_falta_y_el_ledger_sigue_andando(destino):

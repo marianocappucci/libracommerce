@@ -54,6 +54,14 @@ stock disponible para la cuenta, así que el producto se pide aunque la góndola
 depósitos que se miran; el saldo «sin lote» (sin fecha) no se descuenta. `descontar_vencido=False` vuelve a la cuenta
 de la v1. Un producto sin marcar, o una base sin la revisión `0002`, no cambia en nada.
 
+**Plazo y techo propios del producto (v2, ADR-020).** `catalog_items.lead_time_days` es el plazo de entrega de ese
+producto y reemplaza al `plazo_entrega_dias` general en SU horizonte (`dias_cobertura + plazo`); `catalog_items.max_stock`
+es su techo: lo sugerido nunca hace pasar `disponible + sugerido` de ese valor (se redondea hacia abajo a la unidad). El
+techo manda sobre el piso del mínimo (un mínimo mayor que el techo es una configuración que `fijar_parametros` no deja
+guardar, pero si ya existe gana el techo). Los dos son opcionales: sin valor, la cuenta es la de siempre; una base sin
+la revisión `0003` también. `plazo_entrega_dias` en cada fila es el que se usó y `plazo_propio` dice si era el del
+producto; `limitado_por_maximo` marca la fila a la que el techo le recortó la sugerencia.
+
 Agrupa por producto, no por variante (`variantes` dice cuántas activas tiene). Sólo productos activos, de tipo
 `product` y `purchasable`; se agrega en Python con `Decimal` y las consultas son las mismas en SQLite y PostgreSQL.
 """
@@ -61,7 +69,7 @@ Agrupa por producto, no por variante (`variantes` dice cuántas activas tiene). 
 from __future__ import annotations
 
 import datetime
-from decimal import ROUND_CEILING, Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 
 from . import margen
 from .lotes import saldos_por_bucket
@@ -108,6 +116,18 @@ def _techo(valor: Decimal, escala: int) -> Decimal:
     return (valor * paso).to_integral_value(rounding=ROUND_CEILING) / paso
 
 
+def _piso(valor: Decimal, escala: int) -> Decimal:
+    """`valor` redondeado hacia abajo a `escala` decimales."""
+    paso = Decimal(10) ** escala
+    return (valor * paso).to_integral_value(rounding=ROUND_FLOOR) / paso
+
+
+def tiene_parametros(conn) -> bool:
+    """Si la base tiene la revisión `0003_parametros_reposicion` (las columnas `lead_time_days` y `max_stock`). Se sondea
+    por metadatos y no con un `SELECT` de la columna: en PostgreSQL un `SELECT` fallido aborta la transacción."""
+    return {"lead_time_days", "max_stock"} <= {f[1] for f in conn.execute("PRAGMA table_info(catalog_items)").fetchall()}
+
+
 def _cantidad(valor: Decimal, escala: int):
     """Un `int` para lo que se pide de una unidad entera (`escala` 0), un `float` redondeado para el resto."""
     return int(valor) if escala == 0 else float(round(valor, escala))
@@ -125,8 +145,9 @@ def _productos(conn, categoria: str | None, producto_id: int | None) -> list:
     if producto_id is not None:
         donde.append("ci.id = ?")
         params.append(producto_id)
+    propios = "ci.lead_time_days, ci.max_stock," if tiene_parametros(conn) else "NULL AS lead_time_days, NULL AS max_stock,"
     filas = conn.execute(
-        f"""SELECT ci.id, ci.name, ci.unit_code, ci.min_stock, COALESCE(cat.name, '') AS categoria,
+        f"""SELECT ci.id, ci.name, ci.unit_code, ci.min_stock, {propios} COALESCE(cat.name, '') AS categoria,
                    ic.code AS codigo, u.allows_fraction, u.decimal_scale
             FROM catalog_items ci
             LEFT JOIN categories cat ON cat.id = ci.category_id
@@ -238,7 +259,6 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
 
     hoy = hoy or datetime.date.today()
     desde = hoy - datetime.timedelta(days=dias_rotacion - 1)
-    horizonte = dias_cobertura + plazo_entrega_dias
     muestra_minima = min(dias_rotacion, _MIN_DIAS_DE_MUESTRA)
 
     productos = _productos(conn, categoria, producto_id)
@@ -295,9 +315,20 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
         vencido = vencidos.get(pid, _CERO)
         utilizable = max(stock - vencido, _CERO)
         disponible = utilizable + pedido
+        plazo_propio = p["lead_time_days"] is not None
+        plazo = int(p["lead_time_days"]) if plazo_propio else plazo_entrega_dias
+        horizonte = dias_cobertura + plazo
+        maximo = _dec(p["max_stock"]) if p["max_stock"] is not None else None
         por_rotacion = _techo(max(unidades * horizonte / dias_de_muestra - disponible, _CERO), escala)
         bajo_minimo = minimo > 0 and disponible < minimo
         sugerido = max(por_rotacion, _techo(minimo - disponible, escala)) if bajo_minimo else por_rotacion
+        limitado = False
+        if maximo is not None:
+            tope = _piso(max(maximo - disponible, _CERO), escala)
+            limitado = sugerido > tope
+            sugerido = min(sugerido, tope)
+            por_rotacion = min(por_rotacion, tope)
+            bajo_minimo = bajo_minimo and sugerido > 0
         if bajo_minimo and por_rotacion > 0:
             motivo = "ambos"
         else:
@@ -315,9 +346,75 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
             "dias_con_stock": dias_con_stock, "rotacion_diaria": _cantidad(unidades / dias_de_muestra, informe),
             "cobertura_dias": cobertura, "sugerido": _cantidad(sugerido, escala), "motivo": motivo,
             "sin_ventas": sin_ventas, "posible_quiebre": stock <= 0 or sin_stock > 0,
-            "variantes": variantes.get(pid, 0),
+            "variantes": variantes.get(pid, 0), "plazo_entrega_dias": plazo, "plazo_propio": plazo_propio,
+            "stock_maximo": _cantidad(maximo, informe) if maximo is not None else None,
+            "limitado_por_maximo": limitado,
         })
     # Menor cobertura primero (sin rotación al final), después lo que más hay que pedir, y el nombre para que dos
     # consultas seguidas den el mismo orden.
     return sorted(filas, key=lambda r: (r["cobertura_dias"] is None, r["cobertura_dias"] or 0, -r["sugerido"],
                                         r["nombre"].casefold(), r["producto_id"]))
+
+
+# ── Parámetros propios del producto (ADR-020) ────────────────────────────
+
+
+class ProductoNoEncontrado(LookupError):
+    pass
+
+
+class SinRevision(Exception):
+    """La base no tiene la revisión `0003_parametros_reposicion`."""
+
+
+def _fila_del_producto(conn, item_id: int):
+    filas = conn.execute("SELECT id, name, min_stock, lead_time_days, max_stock FROM catalog_items WHERE id = ?",
+                         (item_id,)).fetchall()
+    if not filas:
+        raise ProductoNoEncontrado(f"el producto {item_id} no existe")
+    return filas[0]
+
+
+def _exigir_parametros(conn) -> None:
+    if not tiene_parametros(conn):
+        raise SinRevision("Falta la revisión 0003_parametros_reposicion del motor: corré `libracommerce-migrar upgrade` "
+                          "(--prefijo del producto) antes de cargar plazos y techos de reposición.")
+
+
+def parametros_de(conn, item_id: int) -> dict:
+    """`{producto_id, nombre, plazo_entrega_dias, stock_maximo, stock_minimo}` de un producto: `None` en lo que no se
+    definió (usa el plazo general / no tiene techo). `ProductoNoEncontrado` si no existe; `SinRevision` sin la
+    revisión `0003`. No escribe."""
+    _exigir_parametros(conn)
+    p = _fila_del_producto(conn, item_id)
+    return {"producto_id": p["id"], "nombre": p["name"],
+            "plazo_entrega_dias": int(p["lead_time_days"]) if p["lead_time_days"] is not None else None,
+            "stock_maximo": float(_dec(p["max_stock"])) if p["max_stock"] is not None else None,
+            "stock_minimo": float(_dec(p["min_stock"]))}
+
+
+def fijar_parametros(conn, item_id: int, *, plazo_entrega_dias, stock_maximo) -> dict:
+    """Guarda el plazo de entrega y el techo de un producto; `None` en cualquiera de los dos lo borra (vuelve al plazo
+    general / sin techo). Los dos son siempre los valores completos: no hay «no tocar». Valida antes de escribir:
+    el plazo, un entero de 1 a `MAX_PLAZO_ENTREGA_DIAS`; el techo, un número mayor que 0 y, si el producto tiene
+    mínimo, no menor que él. `ValueError` con el motivo si no; `ProductoNoEncontrado`, `SinRevision`. No commitea."""
+    _exigir_parametros(conn)
+    p = _fila_del_producto(conn, item_id)
+    if plazo_entrega_dias is not None:
+        _entero_en_rango("plazo_entrega_dias", plazo_entrega_dias, MAX_PLAZO_ENTREGA_DIAS)
+    techo = None
+    if stock_maximo is not None:
+        if isinstance(stock_maximo, bool) or not isinstance(stock_maximo, (int, float, Decimal, str)):
+            raise ValueError(f"stock_maximo tiene que ser un número: {stock_maximo!r}")
+        try:
+            techo = Decimal(str(stock_maximo))
+        except ArithmeticError as e:
+            raise ValueError(f"stock_maximo tiene que ser un número: {stock_maximo!r}") from e
+        if not techo.is_finite() or techo <= 0:
+            raise ValueError(f"stock_maximo tiene que ser mayor que 0 (o vacío, sin techo): {stock_maximo!r}")
+        minimo = _dec(p["min_stock"])
+        if minimo > 0 and techo < minimo:
+            raise ValueError(f"stock_maximo ({techo}) no puede ser menor que el stock mínimo del producto ({minimo})")
+    conn.execute("UPDATE catalog_items SET lead_time_days = ?, max_stock = ? WHERE id = ?",
+                 (plazo_entrega_dias, str(techo) if techo is not None else None, item_id))
+    return parametros_de(conn, item_id)
