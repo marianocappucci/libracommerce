@@ -946,3 +946,27 @@ que un producto sin marcar, o una base sin la revisión `0002`, devuelve lo mism
 entera. «Hoy» sigue siendo la fecha del servidor (límite de ADR-017). Sigue diferido: `lead_time_days` y
 `max_stock` por producto, proveedor por producto, orden de compra en borrador, estacionalidad, `min_stock` por
 sucursal y descontar lo que vence *dentro* del horizonte de cobertura (hoy sólo lo ya vencido).
+
+## ADR-020 — Reposición v2: plazo de entrega y techo de stock propios del producto (2026-10-02)
+
+**Contexto.** ADR-017 dejó diferidos `lead_time_days` y `max_stock` por producto. El plazo general (3 días) sirve de default pero un
+proveedor de importación no entrega en lo mismo que uno local, y un producto de poco movimiento o de mucho volumen no se debe pedir
+más allá de lo que entra en el depósito.
+
+**Decisión.** Revisión Alembic **`0003_parametros_reposicion`**: `catalog_items.lead_time_days INTEGER` y `catalog_items.max_stock NUMERIC`,
+las dos **NULL** (sin valor por defecto: «no definido» no es 0). Aditiva e idempotente; los productos que existen quedan en NULL y la
+reposición les da lo mismo que antes. Una base sin la revisión sigue funcionando (la consulta no lee las columnas) y las operaciones nuevas
+responden `SinRevision`/503.
+
+- **Plazo propio:** reemplaza al `plazo_entrega_dias` general en el horizonte de ESE producto (`dias_cobertura + plazo`). Entero de 1 a 180.
+- **Techo:** `disponible + sugerido` no pasa de `max_stock` (disponible = stock utilizable + en camino; el techo cuenta lo ya pedido). La
+  sugerencia se recorta redondeando **hacia abajo** a la unidad; la fila lleva `limitado_por_maximo`. **El techo manda sobre el piso del
+  mínimo**; guardar un techo menor que el mínimo se rechaza (`fijar_parametros`), pero si ya existe gana el techo.
+- **Salida:** cada fila trae `plazo_entrega_dias` (el usado), `plazo_propio`, `stock_maximo` y `limitado_por_maximo`; el CSV también.
+- **Escritura:** `erp.reposicion.fijar_parametros` (los dos valores completos; `None` borra) y `build_reposicion_parametros_router`
+  (`GET`/`PUT /api/productos/{id}/reposicion`), que **no se construye sin `dependencias_escribir`**. Va aparte del payload del producto a
+  propósito: no cambia ni el contrato ni el router de productos que ya usan los tres productos.
+
+**Consecuencias.** Pendiente fuera de este ADR: cargarlos desde la pantalla del producto (kit) y montar el router en VentaLibra con su
+capacidad; proveedor por producto, orden de compra en borrador, estacionalidad, `min_stock` por sucursal y descontar lo que vence dentro
+del horizonte. Un `max_stock` por sucursal tampoco existe: el techo es del producto en la instancia o la sucursal que se mira.
