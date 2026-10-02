@@ -670,11 +670,11 @@ def test_export_csv(abrir_ventas):
     lineas = r.text.splitlines()
     assert lineas[0] == ("producto_id,codigo,nombre,categoria,unidad,stock,vencido,en_camino,en_camino_sin_sucursal,"
                          "stock_minimo,unidades_vendidas,dias_con_stock,rotacion_diaria,cobertura_dias,sugerido,"
-                         "motivo,sin_ventas,posible_quiebre,variantes")
+                         "motivo,sin_ventas,posible_quiebre,variantes,plazo_entrega_dias,plazo_propio,stock_maximo,limitado_por_maximo")
     # Yerba: hay 10, rota 1 por día y vienen 5 (sin sucursal): 18 − 10 − 5 = 3. Quieto: sin rotación, va al final y sólo lo
     # empuja el mínimo (8 − 5 = 3). Los booleanos, legibles, y el `None` de la cobertura, vacío.
-    assert lineas[1] == f"{_id_de(abrir, 'Yerba')},,Yerba,,u,10.0,0.0,5.0,5.0,0.0,30.0,30,1.0,10.0,3,por_rotacion,no,no,0"
-    assert lineas[2] == f"{quieto},,Quieto,,u,5.0,0.0,0.0,0.0,8.0,0.0,30,0.0,,3,bajo_minimo,si,no,0"
+    assert lineas[1] == f"{_id_de(abrir, 'Yerba')},,Yerba,,u,10.0,0.0,5.0,5.0,0.0,30.0,30,1.0,10.0,3,por_rotacion,no,no,0,3,no,,no"
+    assert lineas[2] == f"{quieto},,Quieto,,u,5.0,0.0,0.0,0.0,8.0,0.0,30,0.0,,3,bajo_minimo,si,no,0,3,no,,no"
     assert len(lineas) == 3
 
 
@@ -813,3 +813,165 @@ def test_lo_vencido_se_consulta_solo_de_los_productos_marcados_y_los_depositos_q
     [(donde, params)] = pedidos
     assert "sm.item_id IN" in donde and "sm.location_id IN" in donde
     assert params == [yerba, dep_a]
+
+
+# ── Reposición v2: plazo y techo propios del producto (ADR-020) ───────────
+
+
+def _fijar(abrir, pid, plazo=None, techo=None):
+    with abrir() as conn:
+        r = reposicion.fijar_parametros(conn, pid, plazo_entrega_dias=plazo, stock_maximo=techo)
+        conn.commit()
+    return r
+
+
+def test_el_plazo_propio_reemplaza_al_general_solo_en_ese_producto(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    yerba = _yerba_de_referencia(abrir)                       # rota 1 por día, stock 10; plazo general 3: 18 − 10 = 8
+    with abrir() as conn:
+        otra = _producto(conn, "Otra", inicial=40.0)
+    _venta(abrir, [(otra, "Otra", 30, 100.0)], "2026-09-10")  # rota 1 por día, le quedan 10: también 8 con el general
+    _fijar(abrir, yerba, plazo=13)                            # 15 + 13 = 28 − 10 = 18
+    filas = _por_nombre(_reporte(abrir))
+    assert filas["Yerba"]["sugerido"] == 18 and filas["Yerba"]["plazo_entrega_dias"] == 13 and filas["Yerba"]["plazo_propio"]
+    assert filas["Otra"]["sugerido"] == 8 and filas["Otra"]["plazo_entrega_dias"] == 3 and not filas["Otra"]["plazo_propio"]
+
+
+def test_el_techo_recorta_la_sugerencia_y_lo_dice(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    yerba = _yerba_de_referencia(abrir)                       # sugeriría 8 con stock 10
+    _fijar(abrir, yerba, techo=14)                            # cabe 14 − 10 = 4
+    fila = _por_nombre(_reporte(abrir))["Yerba"]
+    assert fila["sugerido"] == 4 and fila["limitado_por_maximo"] and fila["stock_maximo"] == 14
+    _fijar(abrir, yerba, techo=100)                           # el techo no molesta: 8
+    fila = _por_nombre(_reporte(abrir))["Yerba"]
+    assert fila["sugerido"] == 8 and not fila["limitado_por_maximo"]
+
+
+def test_el_techo_cuenta_lo_que_ya_viene_en_camino(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    yerba = _yerba_de_referencia(abrir)
+    _orden(abrir, _proveedor(abrir), [(yerba, 3)])            # 10 + 3 en camino: sugeriría 5
+    _fijar(abrir, yerba, techo=15)                            # 15 − 13 = 2
+    assert _por_nombre(_reporte(abrir))["Yerba"]["sugerido"] == 2
+
+
+def test_con_el_stock_en_el_techo_no_se_sugiere_nada(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    yerba = _yerba_de_referencia(abrir)
+    _fijar(abrir, yerba, techo=10)                            # ya está en el techo
+    assert "Yerba" not in _por_nombre(_reporte(abrir))
+    fila = _por_nombre(_reporte(abrir, solo_a_pedir=False))["Yerba"]
+    assert fila["sugerido"] == 0 and fila["motivo"] is None and fila["limitado_por_maximo"]
+
+
+def test_el_techo_se_redondea_hacia_abajo_a_la_unidad(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    yerba = _yerba_de_referencia(abrir)
+    _fijar(abrir, yerba, techo=14.9)                          # entera: caben 4,9 → 4
+    assert _por_nombre(_reporte(abrir))["Yerba"]["sugerido"] == 4
+
+
+def test_el_techo_manda_sobre_el_piso_del_minimo(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    with abrir() as conn:
+        sal = _producto(conn, "Sal", inicial=2.0, minimo=10.0)    # piso: pide 8
+    _fijar(abrir, sal, techo=10)
+    assert _por_nombre(_reporte(abrir))["Sal"]["sugerido"] == 8   # 10 − 2: justo el techo
+    with abrir() as conn:                                          # un mínimo mayor que el techo ya cargado: gana el techo
+        conn.execute("UPDATE catalog_items SET min_stock = 50 WHERE id = ?", (sal,))
+        conn.commit()
+    assert _por_nombre(_reporte(abrir))["Sal"]["sugerido"] == 8
+
+
+def test_borrar_los_parametros_vuelve_a_la_cuenta_general(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    yerba = _yerba_de_referencia(abrir)
+    _fijar(abrir, yerba, plazo=13, techo=14)
+    r = _fijar(abrir, yerba)
+    assert r["plazo_entrega_dias"] is None and r["stock_maximo"] is None
+    assert _por_nombre(_reporte(abrir))["Yerba"]["sugerido"] == 8
+
+
+@pytest.mark.parametrize("plazo, techo", [(0, None), (181, None), (True, None), (3.5, None), (None, 0), (None, -1),
+                                          (None, "x"), (None, float("nan")), (None, True)])
+def test_los_valores_invalidos_se_rechazan_antes_de_escribir(abrir_vto_ventas, plazo, techo):
+    abrir = abrir_vto_ventas
+    yerba = _yerba_de_referencia(abrir)
+    with abrir() as conn, pytest.raises(ValueError):
+        reposicion.fijar_parametros(conn, yerba, plazo_entrega_dias=plazo, stock_maximo=techo)
+    with abrir() as conn:
+        assert reposicion.parametros_de(conn, yerba)["plazo_entrega_dias"] is None
+
+
+def test_el_techo_no_puede_ser_menor_que_el_minimo(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    with abrir() as conn:
+        sal = _producto(conn, "Sal", minimo=10.0)
+    with abrir() as conn, pytest.raises(ValueError, match="menor que el stock mínimo"):
+        reposicion.fijar_parametros(conn, sal, plazo_entrega_dias=None, stock_maximo=5)
+    _fijar(abrir, sal, techo=10)                              # igual al mínimo: válido
+
+
+def test_un_producto_que_no_existe_es_un_error(abrir_vto_ventas):
+    with abrir_vto_ventas() as conn, pytest.raises(reposicion.ProductoNoEncontrado):
+        reposicion.parametros_de(conn, 9999)
+
+
+def test_una_base_sin_la_revision_no_puede_leer_ni_escribir_parametros(abrir_ventas):
+    with abrir_ventas() as conn:
+        assert not reposicion.tiene_parametros(conn)
+        with pytest.raises(reposicion.SinRevision):
+            reposicion.parametros_de(conn, 1)
+        with pytest.raises(reposicion.SinRevision):
+            reposicion.fijar_parametros(conn, 1, plazo_entrega_dias=3, stock_maximo=None)
+
+
+def _cliente_parametros(abrir, *, leer=None) -> TestClient:
+    from fastapi import Depends
+
+    from libracommerce.web.reposicion_router import build_reposicion_parametros_router
+
+    def _permitir():
+        return None
+
+    app = FastAPI()
+    app.include_router(build_reposicion_parametros_router(
+        conexion=abrir, dependencias_escribir=[Depends(_permitir)], dependencias_leer=leer))
+    return TestClient(app)
+
+
+def test_el_router_de_parametros_lee_y_escribe(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    yerba = _yerba_de_referencia(abrir)
+    c = _cliente_parametros(abrir)
+    assert c.get(f"/api/productos/{yerba}/reposicion").json()["stock_maximo"] is None
+    r = c.put(f"/api/productos/{yerba}/reposicion", json={"plazo_entrega_dias": 7, "stock_maximo": 40})
+    assert r.status_code == 200 and r.json()["plazo_entrega_dias"] == 7 and r.json()["stock_maximo"] == 40
+    assert c.get(f"/api/productos/{yerba}/reposicion").json()["plazo_entrega_dias"] == 7
+    assert c.put(f"/api/productos/{yerba}/reposicion", json={"plazo_entrega_dias": 0, "stock_maximo": None}).status_code == 422
+    assert c.put(f"/api/productos/{yerba}/reposicion", json={"plazo_entrega_dias": 7}).status_code == 422   # falta uno
+    assert c.put(f"/api/productos/{yerba}/reposicion", json={"plazo_entrega_dias": 7, "stock_maximo": 1, "x": 1}).status_code == 422
+    assert c.put("/api/productos/9999/reposicion", json={"plazo_entrega_dias": None, "stock_maximo": None}).status_code == 404
+    assert c.get(f"/api/productos/{yerba}/reposicion").json()["plazo_entrega_dias"] == 7   # lo inválido no escribió nada
+
+
+def test_el_router_de_parametros_sin_la_revision_responde_503(abrir_ventas):
+    c = _cliente_parametros(abrir_ventas)
+    assert c.get("/api/productos/1/reposicion").status_code == 503
+
+
+def test_el_router_de_parametros_no_se_monta_sin_autorizacion_para_escribir(abrir_vto_ventas):
+    from libracommerce.web.reposicion_router import build_reposicion_parametros_router
+
+    for vacio in (None, [], ()):
+        with pytest.raises(ValueError, match="dependencias_escribir"):
+            build_reposicion_parametros_router(conexion=abrir_vto_ventas, dependencias_escribir=vacio)
+
+
+def test_el_techo_se_informa_tal_como_se_guardo_sin_redondearlo_a_la_escala_de_informe(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    yerba = _yerba_de_referencia(abrir)
+    _fijar(abrir, yerba, techo=14.9999)                       # entera: caben 4,9999 → 4; el techo se informa entero, no como 15.0
+    fila = _por_nombre(_reporte(abrir))["Yerba"]
+    assert fila["stock_maximo"] == 14.9999 and fila["sugerido"] == 4
