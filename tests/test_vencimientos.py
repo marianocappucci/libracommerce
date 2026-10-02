@@ -209,7 +209,7 @@ def _nombres(reporte) -> list[str]:
 # ═════════════════════════════════════════════════════════ La revisión 0002
 
 #: La cabeza de la cadena: sube con cada revisión nueva (la 0002 queda verificada igual: la columna y el índice).
-_CABEZA = "0003_parametros_reposicion"
+_CABEZA = "0004_proveedor_por_producto"
 
 
 def test_la_revision_0002_corre_sobre_datos_previos_sin_tocar_una_fila(destino):
@@ -285,7 +285,7 @@ def test_init_schema_sigue_congelado_y_la_columna_es_solo_de_la_revision(destino
     migrar.upgrade(destino)
     con = _con_conexion(destino, antes)
     assert "tracks_expiry" not in sin
-    assert con - sin == {"tracks_expiry", "lead_time_days", "max_stock"}   # las de la 0002 y las de la 0003
+    assert con - sin == {"tracks_expiry", "lead_time_days", "max_stock", "supplier_party_id"}   # las de la 0002, la 0003 y la 0004
 
 
 def test_sin_la_revision_el_reporte_falla_diciendo_que_hace_falta_y_el_ledger_sigue_andando(destino):
