@@ -75,7 +75,7 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
   neutraliza las celdas de texto que una planilla leería como fórmula, `web/csv_seguro.py`; `build_reposicion_minimos_router`: el stock
   mínimo de un producto por sucursal, `GET`/`PUT /{producto_id}/reposicion/minimos`, revisión `0005`; ADR-024; los parámetros opt-in `estacionalidad`, ADR-023, y
   `descontar_por_vencer`, ADR-025, viajan por `GET`, el export y la generación de órdenes en borrador; los cuerpos de `PUT`/`POST` rechazan `true`/`false` en los campos numéricos, ADR-026; el candado
-  del producto de `erp.reposicion` también lo toma `catalogo.update_producto`, ADR-026) y
+  del producto de `erp.reposicion` también lo toma `catalogo.update_producto`, ADR-026, y `actualizacion_masiva.aplicar`, que relee el producto después de tomarlo, ADR-027) y
   `vencimientos_router` (`build_vencimientos_router`, de lectura, y `build_vencimientos_escritura_router`, con
   gates por operación: próximos a vencer, lotes de un producto, marcar «vence», asignar vencimiento a saldo sin
   lote, cargar una entrada de stock nuevo con lote (`POST /entrada`) y dar de baja un lote, sobre `erp.vencimientos`;
@@ -164,6 +164,10 @@ duplicada. `usecases/` sigue puro; lo que cruza a LibraCore va en `erp/` (extra
 - La variación entre productos entra por `erp.hooks.Hooks` (`resolver_receta`,
   `al_confirmar_venta`, `al_anular_venta`, `lista_de_precio_para`, `canales`),
   con defaults que son el comportamiento de Contalibra. **Sin `if producto`.**
+- **Un cuerpo con campos `int`/`float` rechaza `true`/`false`** donde un `1` o un `0` cambian algo del negocio (ids,
+  cantidades, precios, porcentajes): pydantic los convertiría en `1`/`0` antes de que el motor los vea. Se declara con
+  `web/_validacion.sin_booleanos(*campos)` dentro del modelo (todos los routers, ADR-026 y ADR-027; los `Decimal`, los
+  `bool` y los `Literal` no lo necesitan).
 - Lo financiero (caja, cuenta corriente, tesorería, clientes, logs) sigue en
   LibraCore; este motor lo llama, no lo reemplaza. Donde LibraCore necesita saber
   de dónde salen las ventas lo pide como puerto y este motor lo implementa:

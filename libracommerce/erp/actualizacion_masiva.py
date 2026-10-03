@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import catalogo
+from .reposicion import _bloquear_producto
 
 
 @dataclass(frozen=True)
@@ -93,9 +94,17 @@ def aplicar(conn, actualizaciones: list[LineaActualizada]) -> int:
     """Escribe cada línea con `catalogo.update_producto` -- lo mismo que
     editar el producto a mano, una vez por línea. Devuelve cuántas se
     aplicaron (un producto borrado entre el cálculo y acá se salta, no
-    revienta el resto de la tanda)."""
+    revienta el resto de la tanda).
+
+    **Relee el producto DENTRO del candado** (ADR-027): `update_producto` reescribe todos los campos del producto (también el mínimo global) con lo que se le
+    pasa, y acá eso sale de una relectura. Si la relectura fuera antes del candado, una edición que otro confirma entre ella y la escritura se pisaría con el valor
+    de antes (lost update). Por eso se toma `_bloquear_producto` ANTES de leer; `update_producto` lo vuelve a tomar (la misma transacción, no espera) y el
+    repositorio confirma al guardar, que es lo que lo suelta: releer y escribir quedan en una sola sección crítica, línea por línea. Siempre producto primero, el
+    orden de `delete_producto`, `fijar_parametros`, `fijar_minimo_sucursal` y `update_producto`; la tanda no retiene el candado de una línea al pasar a la
+    siguiente (cada línea confirma al guardar)."""
     aplicadas = 0
     for linea in actualizaciones:
+        _bloquear_producto(conn, linea.item_id)   # ANTES de leer lo que se va a volver a escribir
         producto = catalogo.get_producto(conn, linea.item_id)
         if not producto:
             continue

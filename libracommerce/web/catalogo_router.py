@@ -82,6 +82,7 @@ from typing import Any, Literal
 
 from ..erp import catalogo, lotes, stock, vencimientos
 from . import fastapi as _fastapi
+from ._validacion import sin_booleanos
 
 # La guarda traduce la ausencia del extra `[web]` a un error que lo nombra;
 # despues de eso los nombres se importan normal, para que ruff y FastAPI los
@@ -224,6 +225,9 @@ class ProductoPayload(BaseModel):
     #: `catalogo._resolver_permite_fraccion`.
     permite_fraccion: bool | None = None
 
+    #: `true`/`false` no son un número (ADR-027): pydantic los convertiría en 1.0/0.0 y quedarían como precio o mínimo.
+    _no_son_booleanos = sin_booleanos("precio_venta", "precio_costo", "stock_minimo")
+
 
 class ProductoConVencePayload(ProductoPayload):
     """`ProductoPayload` más la marca `vence`, sólo con `OpcionesCatalogo.con_vencimientos` (apagada, el payload es el
@@ -245,6 +249,8 @@ class DepositoCreatePayload(BaseModel):
     #: la mayoría de las instancias de un solo local).
     branch_id: int | None = None
 
+    _no_son_booleanos = sin_booleanos("branch_id")
+
 
 class DepositoUpdatePayload(BaseModel):
     nombre: str
@@ -265,6 +271,8 @@ class SucursalCreatePayload(BaseModel):
 class DepositoPredeterminadoPayload(BaseModel):
     deposito_id: int
 
+    _no_son_booleanos = sin_booleanos("deposito_id")
+
 
 class SucursalUpdatePayload(BaseModel):
     nombre: str
@@ -281,6 +289,8 @@ class TransferenciaPayload(BaseModel):
     fecha: str = ""
     observaciones: str = ""
     variant_id: int | None = None
+
+    _no_son_booleanos = sin_booleanos("producto_id", "origen_id", "destino_id", "cantidad", "variant_id")
 
 
 class CodigoPayload(BaseModel):
@@ -316,6 +326,8 @@ class AjustePayload(BaseModel):
     # Con `OpcionesStock.por_deposito`: en qué depósito (y de qué variante) va el ajuste. `None` = el de siempre.
     deposito_id: int | None = None
     variant_id: int | None = None
+
+    _no_son_booleanos = sin_booleanos("cantidad", "factor", "deposito_id", "variant_id")
 
 
 class AjusteConLotePayload(AjustePayload):

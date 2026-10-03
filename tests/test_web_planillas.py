@@ -9,6 +9,7 @@ mismo.
 
 from __future__ import annotations
 
+import sqlite3
 from io import BytesIO
 
 import pytest
@@ -116,3 +117,32 @@ def test_encabezados_alternativos_matchean(client, producto):
                     files=_archivo(_planilla([("7791234567890", 1100)], encabezados=("EAN", "Precio"))))
     assert r.status_code == 200, r.text
     assert r.json()["actualizaciones"][0]["costo_nuevo"] == 1100.0
+
+
+def _instantanea(abrir) -> dict:
+    """El contenido de TODAS las tablas, para afirmar que un 422 no escribió nada en ninguna (el mismo criterio de `test_web_booleanos.py`)."""
+    with abrir() as conn:
+        if isinstance(conn, sqlite3.Connection):
+            tablas = [f[0] for f in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()]
+        else:
+            tablas = [f[0] for f in conn.execute("SELECT table_name FROM information_schema.tables "
+                                                 "WHERE table_schema='public' AND table_type='BASE TABLE'").fetchall()]
+        return {t: sorted(repr(tuple(f)) for f in conn.execute(f"SELECT * FROM {t}").fetchall()) for t in sorted(tablas)}
+
+
+def test_una_celda_verdadero_o_falso_no_es_un_costo(client, abrir, producto):
+    """`float(True)` es `1.0`: una celda VERDADERO en la columna de costo se convertía en un costo de 1 (ADR-027); FALSO ya caía en «mayor que cero» pero con otro motivo."""
+    antes = _instantanea(abrir)
+    for celda in (True, False):
+        for ruta in ("preview", "aplicar"):
+            r = client.post(f"/api/actualizacion-masiva/precios/{ruta}", files=_archivo(_planilla([("7791234567890", celda)])))
+            assert r.status_code == 422, (celda, ruta, r.text)
+            assert "Fila 2" in r.json()["detail"] and "no es un número" in r.json()["detail"]
+    with abrir() as conn:
+        assert erp_catalogo.get_producto(conn, producto)["precio_costo"] == 1000.0
+    assert _instantanea(abrir) == antes                                                # y no se escribió nada, en ninguna tabla
+    # Un número, o un texto numérico, sigue valiendo.
+    for celda in (1200, "1200"):
+        r = client.post("/api/actualizacion-masiva/precios/preview", files=_archivo(_planilla([("7791234567890", celda)])))
+        assert r.status_code == 200, r.text
+        assert r.json()["actualizaciones"][0]["costo_nuevo"] == 1200.0

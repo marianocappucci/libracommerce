@@ -42,6 +42,7 @@ from typing import Any, Literal
 
 from ..erp import listas_precio as lp
 from . import fastapi as _fastapi
+from ._validacion import sin_booleanos
 from .catalogo_router import Conexion, _deps
 
 _fastapi()
@@ -64,21 +65,30 @@ class ListaPrecioUpdatePayload(BaseModel):
 class ItemsPayload(BaseModel):
     precios: dict[int, float]
 
+    #: `true`/`false` no son un precio (ADR-027): pydantic los convertiría en 1.0/0.0. (Una clave de un JSON siempre es texto: no hay clave booleana.)
+    _no_son_booleanos = sin_booleanos("precios")
+
 
 class AjustePorcentualPayload(BaseModel):
     porcentaje: float
     base: str = "lista"
     categoria: str = ""
 
+    _no_son_booleanos = sin_booleanos("porcentaje")
+
 
 class ImportarPayload(BaseModel):
     fuente: str
     fuente_lista_id: int | None = None
 
+    _no_son_booleanos = sin_booleanos("fuente_lista_id")
+
 
 class QuiebrePayload(BaseModel):
     min_quantity: float
     amount: float
+
+    _no_son_booleanos = sin_booleanos("min_quantity", "amount")
 
 
 class QuiebresPayload(BaseModel):
@@ -92,10 +102,14 @@ class PrecioVigentePayload(BaseModel):
     sucursal_id: int | None = None
     cantidad_minima: float | None = None
 
+    _no_son_booleanos = sin_booleanos("monto", "sucursal_id", "cantidad_minima")
+
 
 class ListaDeClientePayload(BaseModel):
     #: `None` limpia la asignación (el cliente vuelve a cotizar con el precio base).
     lista_id: int | None
+
+    _no_son_booleanos = sin_booleanos("lista_id")
 
 
 def build_listas_precio_router(
