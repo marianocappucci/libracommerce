@@ -956,6 +956,10 @@ def update_producto(conn, pid: int, nombre: str, codigo: str, descripcion: str,
 
 
 def delete_producto(conn, pid: int):
+    from .reposicion import tiene_minimos_sucursal
+
+    if tiene_minimos_sucursal(conn):   # ADR-024: los mínimos por sucursal cuelgan del producto (FK) y se van con él
+        conn.execute("DELETE FROM item_branch_min_stock WHERE item_id=?", (pid,))
     conn.execute("DELETE FROM item_codes WHERE item_id=?", (pid,))
     conn.execute("DELETE FROM catalog_items WHERE id=?", (pid,))
 
