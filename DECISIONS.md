@@ -1089,3 +1089,36 @@ al fijarlo o al fijar el techo; una base con datos cruzados de antes de esta gua
 
 **Consecuencias.** Falta la pantalla (libra-ui) y exponer el router en los productos. El router de `GET /api/reportes/reposicion` no cambia de contrato salvo el campo nuevo por fila.
 
+
+## ADR-025 — Reposición v2: descontar lo que vence dentro del horizonte (2026-10-03)
+
+**Contexto.** ADR-019 descuenta del stock lo que ya está vencido, pero un lote que vence dentro de poco y no se va a vender a tiempo sigue contando como stock: el producto figura cubierto y a los pocos
+días se tira. Diferido desde ADR-019, ADR-022 y ADR-023.
+
+**Decisión.** Parámetro **opt-in** `descontar_por_vencer` (**apagado por default**: cambia números que hoy se ven; sin él, el resultado es el de v0.36.0) en `sugerencia_reposicion`, en
+`GET /api/reportes/reposicion` (query param, eco en la respuesta y su export CSV) y en el cuerpo de la generación de órdenes en borrador (las órdenes se calculan con el mismo ajuste que se ve, como
+`estacionalidad`; la `clave_operacion` ya usada con el otro valor es un pedido distinto, 409). Cada fila trae **`por_vencer`** (cantidad, con la escala de informe; la columna del CSV va **al final**, después
+de `stock_minimo_propio`; `0` sin la opción). Sólo cuenta para productos con `tracks_expiry = 1`, saldos positivos con fecha de los depósitos que se miran (la misma consulta de lotes que usa `vencido`,
+`erp.lotes.saldos_por_bucket`: una sola, no dos); el saldo «sin lote» no cuenta y un lote con `vence < hoy` ya va en `vencido` y no entra acá (tampoco con `descontar_vencido=false`).
+
+**La cuenta.** Con `H = dias_cobertura + plazo` del producto (el `horizonte` de la fila) y `r = proyectado / H` (la rotación diaria **proyectada**, que ya incluye el factor estacional si está prendido),
+los lotes se venden por orden de vencimiento (FEFO). Para cada lote `j` con `d_j <= H`, donde `d_j = (vence_j − hoy).días + 1` (hoy cuenta y el día del vencimiento todavía se vende) y `C_j` es el saldo acumulado
+de los lotes no vencidos hasta `j` inclusive, al vencer `j` se vendieron a lo sumo `r × d_j` unidades y sobran `C_j − r × d_j`.
+
+    por_vencer = max(0, máx_j (C_j − r × d_j))          utilizable = max(stock − vencido − por_vencer, 0)
+
+Es el **máximo** del acumulado y no la suma: lo que sobra de un lote ya está contado en el acumulado del siguiente. Nunca pasa de la suma de saldos de los lotes dentro del horizonte (`r × d_j >= 0`).
+`stock` sigue siendo el real y `vencido` lo ya vencido; `cobertura_dias` usa el nuevo utilizable y `posible_quiebre` no cambia.
+
+- **Aritmética exacta.** `proyectado`, `r`, la pérdida, el disponible, el mínimo y el techo son `Fraction` y se redondean con `_techo`/`_piso` (que ahora aceptan un `Fraction` y redondean con enteros):
+  un resto decimal no pide una unidad de más ni de menos. Se midió al diseñarlo que con cocientes de `Decimal` (`1/30 × 5` y la resta que sigue) el caso «1 vendida en 30 días, horizonte 5, un lote de 1 que vence en 5 días»
+  pedía 1 unidad cuando la cuenta exacta da 0. Las filas sin la opción dan lo mismo que antes (las suites previas, sin cambios salvo el encabezado del CSV, lo confirman). `por_vencer` se **informa**
+  redondeado hacia arriba a la escala del informe, pero `sugerido` usa la pérdida exacta, no la redondeada.
+- **Sin migración.** Una base sin la revisión `0002`, o sin productos marcados, devuelve `por_vencer = 0` sin error.
+
+**Bordes dichos en voz alta.** (1) **Sin ventas (`r = 0`) todo lo que vence dentro del horizonte se pierde:** un producto sin rotación con un lote por vencer y mínimo > 0 se sugiere reponer (lo que va a vencer sin
+venderse no sirve de colchón: es lo que dice la cuenta); sin mínimo no se sugiere nada. (2) Supone que la rotación de la ventana se mantiene todo el horizonte y que todo lo vendido sale de los lotes por FEFO: lo «sin lote» no compite con ellos, así que si en la práctica parte de lo vendido sale de lo
+«sin lote», la pérdida real es mayor que la calculada (se subestima, no se sobreestima). (3) El acumulado junta los lotes de todos los depósitos que se miran, como un solo FEFO y una sola rotación (en la realidad cada depósito vende de lo suyo). (4) `por_vencer` no mira lo que viene en camino ni su vencimiento. (5) Dos lotes del mismo día valen como uno (el máximo cae en el último del día). (6) La `clave_operacion` de una
+generación de órdenes hecha antes de este cambio, reintentada después, tiene otra huella (el parámetro entra en ella) y responde 409, como pasó con `estacionalidad`.
+
+**Consecuencias.** Falta el interruptor y la columna en la reposición (libra-ui) y activarlo en VentaLibra. Con esto queda cerrado lo que ADR-019 había diferido («lo que vence dentro del horizonte»).
