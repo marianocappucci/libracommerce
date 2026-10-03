@@ -15,81 +15,30 @@ import sqlite3
 
 import pytest
 
-from libracommerce.db.repository import SqliteCommerceRepository
-from libracommerce.db.schema import init_schema
-
 # ── Una base de PostgreSQL por worker, restaurada desde una plantilla ───────
 #
 # Cada test contra PostgreSQL arranca de una base **nueva**, y rearmarla con
 # `DROP SCHEMA public CASCADE` + `init_schema()` costaba ~1,5 s por test (medido;
 # la suite tiene ~1.000). Ahora la base sale de `CREATE DATABASE ... TEMPLATE`
 # (~0,1 s) desde una plantilla armada la primera vez que se pide, una por tipo de
-# fixture (`repo`, `abrir`, `abrir_ventas`), porque cada una deja un estado distinto.
+# fixture (`repo`, `abrir`, `ventas`), porque cada una deja un estado distinto.
+# El mecanismo (una base por worker de xdist, plantillas, `FORCE`) vive en
+# `libracore.testing.pg_por_worker`; aca queda lo propio de este repo: que hay en
+# cada plantilla.
 #
-# Y una base **por worker** (`<base>_gw0`, ... y `<base>_main` sin xdist): la
-# restauracion borra la base con `FORCE`, y con dos procesos sobre la misma se
-# pisarian en pleno test. Se la pasa al resto de la suite pisando
-# `LIBRACORE_POSTGRES_URL`, que es de donde la leen todos (`url_postgres()`,
-# `test_schema_congelado`, `test_migraciones_alembic`). Esos dos ultimos hacen su
-# propio `DROP SCHEMA` sobre esa URL y no usan plantillas.
-#
-# La URL original queda en `_LIBRACOMMERCE_PG_ORIGINAL`: el proceso que lanza a los
-# workers tambien importa este modulo, y ellos heredan su entorno; sin guardarla
-# derivarian el nombre de la base del controlador y no de la original.
-#
-# Sin la variable (fuera de CI se saltean los tests de PostgreSQL) no hace nada.
-# Pide un rol con CREATEDB; el del servicio de CI es el superusuario del contenedor.
-_PG_ORIGINAL = os.environ.setdefault("_LIBRACOMMERCE_PG_ORIGINAL", os.environ.get("LIBRACORE_POSTGRES_URL", ""))
-_PG_WORKER = os.environ.get("PYTEST_XDIST_WORKER", "main")
-_PG_BASE = ""
-_PLANTILLAS = ("repo", "abrir", "ventas")
+# La URL del worker se pasa al resto de la suite pisando `LIBRACORE_POSTGRES_URL`,
+# que es de donde la leen todos (`url_postgres()`, `test_schema_congelado`,
+# `test_migraciones_alembic`). Esos dos ultimos hacen su propio `DROP SCHEMA` sobre
+# esa URL y no usan plantillas. Sin la variable (fuera de CI se saltean los tests
+# de PostgreSQL) no hace nada.
+from libracore.testing.pg_por_worker import base_por_worker  # noqa: E402
 
+from libracommerce.db.repository import SqliteCommerceRepository
+from libracommerce.db.schema import init_schema
 
-def _sql_admin(*sentencias: str) -> None:
-    import psycopg
-
-    admin = _PG_ORIGINAL.replace("postgresql+psycopg://", "postgresql://", 1)
-    with psycopg.connect(admin, autocommit=True) as conexion:
-        for sentencia in sentencias:
-            conexion.execute(sentencia)
-
-
-def _existe_base(nombre: str) -> bool:
-    import psycopg
-
-    admin = _PG_ORIGINAL.replace("postgresql+psycopg://", "postgresql://", 1)
-    with psycopg.connect(admin, autocommit=True) as conexion:
-        return conexion.execute("SELECT 1 FROM pg_database WHERE datname = %s", (nombre,)).fetchone() is not None
-
-
-def _base_del_worker() -> None:
-    import atexit
-    from urllib.parse import urlsplit, urlunsplit
-
-    global _PG_BASE
-    if not _PG_ORIGINAL:
-        return
-    partes = urlsplit(_PG_ORIGINAL)
-    _PG_BASE = f"{partes.path.lstrip('/')}_{_PG_WORKER}"
-
-    def _soltar() -> None:
-        # `FORCE` por si un test dejo una conexion viva y el DROP se colgaria.
-        _sql_admin(*(f'DROP DATABASE IF EXISTS "{n}" WITH (FORCE)'
-                     for n in (_PG_BASE, *(f"{_PG_BASE}_t_{t}" for t in _PLANTILLAS))))
-
-    _soltar()  # restos de una corrida interrumpida
-    _sql_admin(f'CREATE DATABASE "{_PG_BASE}"')
-    atexit.register(_soltar)
-    os.environ["LIBRACORE_POSTGRES_URL"] = urlunsplit(partes._replace(path=f"/{_PG_BASE}"))
-
-
-_base_del_worker()
-
-
-def _url_de(nombre: str) -> str:
-    from urllib.parse import urlsplit, urlunsplit
-
-    return urlunsplit(urlsplit(_PG_ORIGINAL)._replace(path=f"/{nombre}"))
+_PG = base_por_worker("libracommerce", os.environ.get("LIBRACORE_POSTGRES_URL", ""))
+if _PG:
+    os.environ["LIBRACORE_POSTGRES_URL"] = _PG.url
 
 
 def _en_base(url: str, construir) -> None:
@@ -108,28 +57,8 @@ def _en_base(url: str, construir) -> None:
 
 
 def _restaurar(plantilla: str, construir) -> None:
-    """Deja la base del worker como una nueva armada con `construir(conn)`, copiandola de la plantilla `plantilla`.
-
-    La plantilla se arma la primera vez. `CREATE DATABASE ... TEMPLATE` falla si
-    queda **alguien** conectado a ella, y se las termina por las dudas. Si armarla
-    falla a medias se borra, para que la proxima vez no se tome una incompleta por buena.
-    """
-    nombre = f"{_PG_BASE}_t_{plantilla}"
-    if not _existe_base(nombre):
-        _sql_admin(f'CREATE DATABASE "{nombre}"')
-        try:
-            _en_base(_url_de(nombre), construir)
-            _sql_admin(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                f"WHERE datname = '{nombre}' AND pid <> pg_backend_pid()"
-            )
-        except BaseException:
-            _sql_admin(f'DROP DATABASE IF EXISTS "{nombre}" WITH (FORCE)')
-            raise
-    _sql_admin(
-        f'DROP DATABASE IF EXISTS "{_PG_BASE}" WITH (FORCE)',
-        f'CREATE DATABASE "{_PG_BASE}" TEMPLATE "{nombre}"',
-    )
+    """Deja la base del worker como una nueva armada con `construir(conn)`, copiada de la plantilla `plantilla`."""
+    _PG.restaurar(plantilla, lambda url: _en_base(url, construir))
 
 
 def url_postgres() -> str:
