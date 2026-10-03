@@ -139,8 +139,11 @@ jobs:
       # `--cov` sin argumento toma el paquete de [tool.coverage.run] del
       # pyproject. El piso (fail_under) tambien esta ahi: es un trinquete
       # fijado 2 puntos debajo de lo medido el 2026-07-31, no una meta.
+      # xdist (reglas/ci.md del wiki): 4 workers, las vCPU del runner. Cada uno
+      # trabaja en SU base de PostgreSQL y restaura cada test desde una plantilla
+      # (tests/conftest.py). pytest-cov junta la cobertura de los workers: el piso aplica igual.
       - name: Run tests
-        run: pytest -v --cov --cov-report=term-missing
+        run: pytest -n 4 -v --cov --cov-report=term-missing
 
   # F2 (2026-09-05): que el CI ponga rojo un commit con un secreto. Barre los
   # commits del PR (no toda la historia) con la configuracion de
