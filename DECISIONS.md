@@ -1084,7 +1084,7 @@ vuelve al global). Como las revisiones 0002 a 0004, **no está en `init_schema()
 
 **Bordes dichos en voz alta.** (1) La vista de toda la instancia no refleja los mínimos por sucursal: un producto puede no figurar «a pedir» en el total y sí en una sucursal. (2) `delete_producto`
 borra sus mínimos por sucursal antes (la FK lo exigiría); las sucursales no se borran nunca (baja lógica, ver `erp.catalogo`). (3) Si el global **baja**, los propios no se tocan; si el global
-**sube** por encima del techo se rechaza como siempre, pero los propios no se validan contra el global (pueden ser mayores o menores). (4) `catalogo.update_producto` (subir el mínimo global contra el techo) no toma ese candado: su carrera con el techo viene de antes y no se cambió acá. (5) Un propio no se valida contra el techo de otra forma que
+**sube** por encima del techo se rechaza como siempre, pero los propios no se validan contra el global (pueden ser mayores o menores). (4) `catalogo.update_producto` (subir el mínimo global contra el techo) no toma ese candado: su carrera con el techo viene de antes y no se cambió acá (la cerró ADR-026). (5) Un propio no se valida contra el techo de otra forma que
 al fijarlo o al fijar el techo; una base con datos cruzados de antes de esta guarda sigue siendo regida por «el techo manda sobre el piso» (ADR-020).
 
 **Consecuencias.** Falta la pantalla (libra-ui) y exponer el router en los productos. El router de `GET /api/reportes/reposicion` no cambia de contrato salvo el campo nuevo por fila.
@@ -1122,3 +1122,25 @@ venderse no sirve de colchón: es lo que dice la cuenta); sin mínimo no se sugi
 generación de órdenes hecha antes de este cambio, reintentada después, tiene otra huella (el parámetro entra en ella) y responde 409, como pasó con `estacionalidad`.
 
 **Consecuencias.** Falta el interruptor y la columna en la reposición (libra-ui) y activarlo en VentaLibra. Con esto queda cerrado lo que ADR-019 había diferido («lo que vence dentro del horizonte»).
+
+## ADR-026 — Reposición v2: el candado del producto en la edición y booleanos fuera de los campos numéricos (2026-10-03)
+
+**Contexto.** Dos defectos de antes, medidos al revisar ADR-020 a ADR-025; ninguno cambia un contrato que alguien use bien.
+
+**1. `catalogo.update_producto` y el techo.** Valida que el mínimo global no pase el techo (`max_stock`, ADR-020) leyendo el techo **sin candado**, y ADR-024 lo había dejado dicho como borde (4).
+Con un techo de 100 y un hilo que lo baja a 50 sin haber confirmado, otro que sube el mínimo a 80 leía el 100, validaba y escribía apenas el primero confirmaba: mínimo 80, techo 50. **Decisión:**
+`update_producto` toma `_bloquear_producto` (el candado de `fijar_parametros` y `fijar_minimo_sucursal`) **antes de leer** el techo, dentro de `_exigir_minimo_bajo_el_techo`. El orden de candados sigue siendo
+producto primero (como `delete_producto`: producto y después mínimos por sucursal), así que no hay un orden nuevo que pueda cruzarse. Una base sin la revisión `0003` no tiene techos y no toma el candado.
+El repositorio confirma dentro de `save_catalog_item` (salvo dentro de `transaction()`), así que el candado se suelta apenas se guarda el producto: validar y escribir quedan juntos.
+
+**2. Booleanos como números en el cuerpo de `PUT /{producto_id}/reposicion` y de la generación de órdenes.** Los campos `int`/`float` de pydantic convierten `true` en `1` y `false` en `0` antes del
+rechazo `isinstance(bool)` del motor: `plazo_entrega_dias: true` quedaba como 1 día, `stock_maximo: true` como un techo de 1.0 y `proveedor_id: true` como el proveedor 1. **Decisión:** el validador
+`mode="before"` que ya tenía `MinimoDeSucursal` (ADR-024) pasa a ser uno compartido, `_sin_booleanos(*campos)`, que responde 422 con `true`/`false` y se aplica a `ParametrosDeReposicion`
+(`plazo_entrega_dias`, `stock_maximo`, `proveedor_id`) y a `GenerarOrdenes` (`dias_rotacion`, `dias_cobertura`, `plazo_entrega_dias`, `sucursal_id`, `proveedor_id`, y los `producto_ids` y los valores de
+`topes`, donde mira también adentro de la lista y del diccionario). Todo lo demás se convierte como antes: números, enteros, textos numéricos y el `0` numérico (que el motor sigue juzgando él).
+
+**Bordes dichos en voz alta.** (1) Los parámetros de `GET` (`dias_rotacion=true` en la query) no tenían el defecto: son texto y pydantic no convierte `"true"` en entero. (2) Los campos `bool` de verdad
+(`descontar_vencido`, `estacionalidad`, `descontar_por_vencer`) siguen aceptando lo que pydantic acepta como booleano (`1`, `"yes"`, …), como antes. (3) El candado nuevo toma la fila del producto en cada
+edición, incluida la actualización masiva de precios (una por línea, confirmando cada una): en PostgreSQL una escritura que referencia al producto (una línea de venta, por la clave foránea) puede esperar lo que dure esa edición (el `FOR UPDATE` choca con el `FOR KEY SHARE` de la FK; no se midió
+con carga); `fijar_parametros` y `fijar_minimo_sucursal` ya lo hacían. (4) `actualizacion_masiva.aplicar` relee el mínimo global antes de llamar a `update_producto`, fuera del candado: puede pisar con el valor de antes un mínimo que otro editó en el medio, pero
+nunca lo sube por encima del techo.

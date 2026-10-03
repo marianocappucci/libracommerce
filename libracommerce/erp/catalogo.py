@@ -913,11 +913,16 @@ def get_producto_by_codigo(conn, codigo: str) -> dict | None:
 def _exigir_minimo_bajo_el_techo(conn, pid: int, stock_minimo) -> None:
     """ADR-020: si el producto tiene un techo de reposición (`max_stock`), el stock mínimo no puede pasarlo. `fijar_parametros` ya lo
     exige al cargar el techo; acá se exige al subir el mínimo, para que editar el producto no deje la invariante rota. `ValueError`
-    (el router lo contesta 422), pero sólo si el mínimo SUBE: dejar el que ya tenía no se rechaza. Una base sin la revisión `0003` no tiene techos: no hace nada."""
-    from .reposicion import tiene_parametros
+    (el router lo contesta 422), pero sólo si el mínimo SUBE: dejar el que ya tenía no se rechaza. Toma el candado del producto (`_bloquear_producto`) antes de leer el
+    techo: queda tomado hasta que `update_producto` guarda (el repositorio confirma ahí) o la transacción termina. Una base sin la revisión `0003` no tiene techos: no hace
+    nada ni bloquea."""
+    from .reposicion import _bloquear_producto, tiene_parametros
 
     if not tiene_parametros(conn):
         return
+    # El candado del producto ANTES de leer el techo (ADR-026), el mismo que toman `fijar_parametros` y `fijar_minimo_sucursal`: sin él, esta lectura ve el techo
+    # de antes del que otro pedido todavía no confirmó, y el mínimo nuevo y el techo nuevo se cruzan. Siempre producto primero (el orden de `delete_producto`).
+    _bloquear_producto(conn, pid)
     fila = conn.execute("SELECT max_stock, min_stock FROM catalog_items WHERE id = ?", (pid,)).fetchall()
     if not fila or fila[0]["max_stock"] is None:
         return
