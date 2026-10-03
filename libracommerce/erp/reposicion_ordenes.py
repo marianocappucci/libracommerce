@@ -178,7 +178,7 @@ def generar_ordenes_borrador(conn, *, clave_operacion, producto_ids: list[int] |
     clave ya usada. `topes` (`{producto_id: cantidad}`) es lo que la persona vio y confirmó: la cantidad de cada línea es el **menor** entre el
     sugerido de ahora y su tope, así que si entre la vista previa y el pedido el stock bajó y el sugerido subió, la orden no se pasa de lo confirmado
     (si bajó, se pide menos); un producto sin tope se pide por el sugerido. `parametros` son los de `sugerencia_reposicion` (`dias_rotacion`, `dias_cobertura`, `plazo_entrega_dias`, `sucursal_id`,
-    `categoria`, `proveedor_id` —un `party_id`—, `descontar_vencido`); `solo_a_pedir` no se acepta. `ValueError` con un parámetro inválido o
+    `categoria`, `proveedor_id` —un `party_id`—, `descontar_vencido`, `estacionalidad`, `descontar_por_vencer`: la orden sale con el mismo ajuste que se ve); `solo_a_pedir` no se acepta. `ValueError` con un parámetro inválido o
     una `clave_operacion` mal formada (`ClaveReusada`, que es un `ValueError`, si la clave ya se usó con otros datos); `reposicion.SinRevision` sin la `0004`. No commitea."""
     clave = _clave(clave_operacion)
     if "solo_a_pedir" in parametros:

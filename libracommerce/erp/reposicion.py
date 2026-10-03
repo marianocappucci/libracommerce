@@ -82,6 +82,19 @@ instancia) el piso es siempre el global**: los mínimos por sucursal no se suman
 (también como mínimo propio: una sucursal puede apagar el aviso de un producto que el global sí vigila). Cada fila trae `stock_minimo` ya resuelto y `stock_minimo_propio` (`True` si viene de
 la sucursal). Una base sin la revisión `0005` no tiene mínimos por sucursal y la consulta es la de siempre.
 
+**Lo que vence dentro del horizonte (v2, ADR-025, opt-in con `descontar_por_vencer=True`).** Descontar sólo lo YA vencido deja pasar el lote que está por vencer y que no se va a vender
+a tiempo: el producto figura cubierto y a los pocos días se tira. Con `descontar_por_vencer`, para un producto marcado (`tracks_expiry = 1`) se estima cuánto de lo que **todavía no venció**
+pero vence dentro del horizonte `H = dias_cobertura + plazo` no llega a venderse antes de vencer, y eso (`por_vencer`, aparte de `stock` y de `vencido`) también se resta del stock utilizable:
+`utilizable = max(stock − vencido − por_vencer, 0)`. La cuenta: la rotación diaria proyectada es `r = proyectado / H` (la proyección ya lleva el factor estacional si está prendido) y los
+lotes se venden por orden de vencimiento (FEFO). Para cada lote `j` que vence dentro del horizonte, `d_j = (vence_j − hoy).días + 1` (el día del vencimiento todavía se vende y hoy cuenta) y `C_j` es el
+saldo acumulado de los lotes no vencidos hasta `j` inclusive (orden por vencimiento); al vencer `j` ya se vendieron, a lo sumo, `r × d_j` unidades, así que sobran `C_j − r × d_j`. La pérdida es
+`max(0, máx_j (C_j − r × d_j))` sobre los `j` con `d_j <= H`: el **máximo** del acumulado y no la suma (lo que se pierde de un lote se vendería, si no, del siguiente), y por construcción nunca pasa de la suma de los
+saldos de esos lotes. Sólo cuentan los saldos positivos de los depósitos que se miran; el saldo «sin lote» (sin fecha) no cuenta, y un lote con `vence < hoy` ya va en `vencido` y no se duplica acá (con
+`descontar_vencido=False` tampoco entra en `por_vencer`). La aritmética es de racionales exactos (`Fraction`): un resto decimal no pide una unidad de más ni de menos, y `sugerido`, el mínimo y el techo se calculan con
+la pérdida exacta; `por_vencer` se informa redondeado hacia arriba a la escala del informe. **Borde:** un producto **sin ventas** (`r = 0`) pierde completo lo que vence dentro del horizonte; si además tiene un mínimo > 0,
+se sugiere reponerlo (es lo que dice la cuenta: lo que va a vencer sin venderse no sirve de colchón). Límites: supone que la rotación de la ventana se mantiene todo el horizonte, que el stock se vende por FEFO y
+que lo «sin lote» no compite con los lotes. Apagado por default porque cambia números que hoy se ven; sin la opción, `por_vencer` es 0 y la cuenta es la de siempre. Un producto sin marcar, o una base sin la revisión `0002`, no cambia en nada.
+
 Agrupa por producto, no por variante (`variantes` dice cuántas activas tiene). Sólo productos activos, de tipo
 `product` y `purchasable`; se agrega en Python con `Decimal` y las consultas son las mismas en SQLite y PostgreSQL.
 """
@@ -141,16 +154,25 @@ def _stock(valor) -> Decimal:
     return round(_dec(valor), _ESCALA_RUIDO)
 
 
-def _techo(valor: Decimal, escala: int) -> Decimal:
-    """`valor` redondeado hacia arriba a `escala` decimales."""
+def _techo(valor: Decimal | Fraction, escala: int) -> Decimal:
+    """`valor` redondeado hacia arriba a `escala` decimales. Un `Fraction` se redondea con enteros, sin pasar por un cociente de `Decimal`."""
     paso = Decimal(10) ** escala
+    if isinstance(valor, Fraction):
+        return Decimal(-((-valor.numerator * 10 ** escala) // valor.denominator)) / paso
     return (valor * paso).to_integral_value(rounding=ROUND_CEILING) / paso
 
 
-def _piso(valor: Decimal, escala: int) -> Decimal:
-    """`valor` redondeado hacia abajo a `escala` decimales."""
+def _piso(valor: Decimal | Fraction, escala: int) -> Decimal:
+    """`valor` redondeado hacia abajo a `escala` decimales (un `Fraction`, como en `_techo`)."""
     paso = Decimal(10) ** escala
+    if isinstance(valor, Fraction):
+        return Decimal((valor.numerator * 10 ** escala) // valor.denominator) / paso
     return (valor * paso).to_integral_value(rounding=ROUND_FLOOR) / paso
+
+
+def _decimal(valor: Fraction) -> Decimal:
+    """Un `Fraction` como `Decimal` (un cociente: sólo para mostrar, no para redondear una cantidad a pedir)."""
+    return Decimal(valor.numerator) / Decimal(valor.denominator)
 
 
 def tiene_parametros(conn) -> bool:
@@ -252,25 +274,48 @@ def _en_camino(conn, sucursal_id: int | None) -> tuple[dict[int, Decimal], dict[
     return total, sin_sucursal
 
 
-def _vencido(conn, ids: set[int], depositos: set[int], hoy: datetime.date) -> dict[int, Decimal]:
-    """Por producto marcado, la suma de los saldos positivos de los lotes ya vencidos (`vence < hoy`) en `depositos`.
-    Vacío si la base no tiene la revisión `0002` o nadie está marcado. Ver "Lo vencido no se cuenta" en el módulo."""
+def _lotes_con_fecha(conn, ids: set[int], depositos: set[int]) -> dict[int, list[tuple[datetime.date, Decimal]]]:
+    """Por producto marcado, `[(vence, saldo)]` de los lotes con fecha y saldo positivo en `depositos`, ordenados por vencimiento (el orden de FEFO). Vacío si la base no tiene la
+    revisión `0002` o nadie está marcado. Una sola consulta sirve a `_vencido` y a `_por_vencer` (ver "Lo vencido no se cuenta" y "Lo que vence dentro del horizonte" en el módulo)."""
     if not ids or not tiene_revision(conn):
         return {}
     marcados = {f["id"] for f in conn.execute("SELECT id FROM catalog_items WHERE tracks_expiry = 1").fetchall()}
     marcados &= ids
     if not marcados or not depositos:
         return {}
-    vencido: dict[int, Decimal] = {}
+    lotes: dict[int, list[tuple[datetime.date, Decimal]]] = {}
     # Sólo los productos marcados y los depósitos que se miran, ya en el SQL: un reporte de un producto no agrupa el
     # historial de toda la instancia.
     donde = (f"sm.expires_at IS NOT NULL AND sm.item_id IN ({','.join('?' for _ in marcados)}) "
              f"AND sm.location_id IN ({','.join('?' for _ in depositos)})")
     saldos = saldos_por_bucket(conn, donde, [*sorted(marcados), *sorted(depositos)], depositos)
     for (item, _dep, _variante, _lote, vence), saldo in saldos.items():
-        if item in marcados and vence is not None and saldo > 0 and datetime.date.fromisoformat(vence) < hoy:
-            vencido[item] = vencido.get(item, _CERO) + saldo
-    return vencido
+        if item in marcados and vence is not None and saldo > 0:
+            lotes.setdefault(item, []).append((datetime.date.fromisoformat(vence), saldo))
+    return {item: sorted(lista) for item, lista in lotes.items()}
+
+
+def _vencido(lotes: dict[int, list[tuple[datetime.date, Decimal]]], hoy: datetime.date) -> dict[int, Decimal]:
+    """Por producto marcado, la suma de los saldos positivos de los lotes ya vencidos (`vence < hoy`). Ver "Lo vencido no se cuenta" en el módulo."""
+    vencido = {item: sum((saldo for vence, saldo in lista if vence < hoy), _CERO) for item, lista in lotes.items()}
+    return {item: v for item, v in vencido.items() if v}
+
+
+def _por_vencer(lista: list[tuple[datetime.date, Decimal]], hoy: datetime.date, horizonte: int, rotacion: Fraction) -> Fraction:
+    """Lo que, de los lotes `lista` (`[(vence, saldo)]` ordenados por vencimiento), vence dentro del horizonte sin llegar a venderse antes: `max(0, máx_j (C_j − rotacion × d_j))` con
+    `d_j = (vence_j − hoy).días + 1` y `C_j` el acumulado hasta `j`, sobre los lotes con `d_j <= horizonte`. Ignora los ya vencidos (`vence < hoy`: van en `_vencido`). Exacto (`Fraction`).
+    Ver "Lo que vence dentro del horizonte" en el módulo."""
+    perdida = Fraction(0)
+    acumulado = Fraction(0)
+    for vence, saldo in lista:
+        if vence < hoy:
+            continue
+        dias = (vence - hoy).days + 1
+        if dias > horizonte:
+            break
+        acumulado += Fraction(saldo)
+        perdida = max(perdida, acumulado - rotacion * dias)
+    return perdida
 
 
 def _dias_sin_stock(saldo_final: Decimal, movimientos: list[tuple[str, Decimal]], desde: datetime.date,
@@ -337,16 +382,19 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
                           plazo_entrega_dias: int = PLAZO_ENTREGA_DIAS, sucursal_id: int | None = None,
                           categoria: str | None = None, producto_id: int | None = None,
                           solo_a_pedir: bool = True, descontar_vencido: bool = True, proveedor_id: int | None = None,
-                          estacionalidad: bool = False, hoy: datetime.date | None = None) -> list[dict]:
+                          estacionalidad: bool = False, descontar_por_vencer: bool = False,
+                          hoy: datetime.date | None = None) -> list[dict]:
     """Qué pedir, por producto, del más urgente al menos (menor cobertura primero, luego mayor `sugerido`; los
     que no tienen rotación, al final). Cada fila: `producto_id`, `codigo`, `nombre`, `unidad`, `categoria`, `stock`,
-    `vencido`, `proveedor_id`, `proveedor`, `en_camino`, `en_camino_sin_sucursal`, `stock_minimo`, `stock_minimo_propio`, `unidades_vendidas`, `dias_con_stock`, `rotacion_diaria`,
+    `vencido`, `por_vencer`, `proveedor_id`, `proveedor`, `en_camino`, `en_camino_sin_sucursal`, `stock_minimo`, `stock_minimo_propio`, `unidades_vendidas`, `dias_con_stock`, `rotacion_diaria`,
     `cobertura_dias` (`None` sin rotación), `sugerido`, `motivo` (`bajo_minimo`, `por_rotacion`, `ambos`, o `None`
     si no hay nada que pedir), `sin_ventas`, `posible_quiebre`, `variantes` y `factor_estacional` (`None` si `estacionalidad` está apagada o no hay historia). Ver el docstring del módulo.
 
     `solo_a_pedir` (el default) deja sólo los de `sugerido > 0`. `descontar_vencido` (el default) resta del stock lo
     que está en lotes vencidos. `stock_minimo` es el piso ya resuelto: con `sucursal_id`, el mínimo propio de esa sucursal si lo tiene (`stock_minimo_propio=True`) y si no el global; sin
-    `sucursal_id`, siempre el global (ADR-024). `estacionalidad` (apagada por default) ajusta la proyección por lo que pasó hace un año. `hoy` es para las pruebas: el default es la fecha
+    `sucursal_id`, siempre el global (ADR-024). `estacionalidad` (apagada por default) ajusta la proyección por lo que pasó hace un año. `descontar_por_vencer` (apagado por default, ADR-025) resta además del stock utilizable lo que, de los
+    lotes que vencen dentro del horizonte, no llega a venderse antes (`por_vencer`; 0 sin la opción; un producto sin ventas pierde completo lo que vence dentro del horizonte, y con un mínimo > 0 se
+    sugiere reponerlo). `hoy` es para las pruebas: el default es la fecha
     del servidor. Levanta `ValueError` con un parámetro fuera de rango o una `sucursal_id` que no existe.
     No commitea (no escribe)."""
     _entero_en_rango("dias_rotacion", dias_rotacion, MAX_DIAS_ROTACION)
@@ -391,7 +439,8 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
         horizontes = {p["id"]: dias_cobertura + (int(p["lead_time_days"]) if p["lead_time_days"] is not None else plazo_entrega_dias) for p in productos}
         factores = _factores_estacionales(conn, ids, hoy, dias_rotacion, horizontes, sucursal_id)
 
-    vencidos = _vencido(conn, ids, depositos, hoy) if descontar_vencido else {}
+    lotes = _lotes_con_fecha(conn, ids, depositos) if descontar_vencido or descontar_por_vencer else {}
+    vencidos = _vencido(lotes, hoy) if descontar_vencido else {}
     en_camino, en_camino_sin_sucursal = _en_camino(conn, sucursal_id)
     variantes = {
         f["item_id"]: f["n"]
@@ -420,24 +469,22 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
         sin_ventas = unidades <= 0
 
         vencido = vencidos.get(pid, _CERO)
-        utilizable = max(stock - vencido, _CERO)
-        disponible = utilizable + pedido
         plazo_propio = p["lead_time_days"] is not None
         plazo = int(p["lead_time_days"]) if plazo_propio else plazo_entrega_dias
         horizonte = dias_cobertura + plazo
         maximo = _dec(p["max_stock"]) if p["max_stock"] is not None else None
         factor = factores.get(pid)
-        if factor is None:
-            proyectado = unidades * horizonte / dias_de_muestra
-        else:
-            exacto = Fraction(unidades) * horizonte / dias_de_muestra * factor            # sin redondeos intermedios (ver `_factores_estacionales`)
-            proyectado = Decimal(exacto.numerator) / Decimal(exacto.denominator)
-        por_rotacion = _techo(max(proyectado - disponible, _CERO), escala)
-        bajo_minimo = minimo > 0 and disponible < minimo
-        sugerido = max(por_rotacion, _techo(minimo - disponible, escala)) if bajo_minimo else por_rotacion
+        # Racionales exactos, sin redondeos intermedios (ver `_factores_estacionales`): `proyectado` y la pérdida por vencer son fracciones y su suma no debe pedir una unidad de más ni de menos.
+        proyectado = Fraction(unidades) * horizonte / dias_de_muestra * (factor if factor is not None else 1)
+        por_vencer = _por_vencer(lotes.get(pid, []), hoy, horizonte, proyectado / horizonte) if descontar_por_vencer else Fraction(0)
+        utilizable = max(Fraction(stock - vencido) - por_vencer, Fraction(0))
+        disponible = utilizable + Fraction(pedido)
+        por_rotacion = _techo(max(proyectado - disponible, Fraction(0)), escala)
+        bajo_minimo = minimo > 0 and disponible < Fraction(minimo)
+        sugerido = max(por_rotacion, _techo(Fraction(minimo) - disponible, escala)) if bajo_minimo else por_rotacion
         limitado = False
         if maximo is not None:
-            tope = _piso(max(maximo - disponible, _CERO), escala)
+            tope = _piso(max(Fraction(maximo) - disponible, Fraction(0)), escala)
             limitado = sugerido > tope
             sugerido = min(sugerido, tope)
             por_rotacion = min(por_rotacion, tope)
@@ -449,11 +496,12 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
         if solo_a_pedir and sugerido <= 0:
             continue
 
-        cobertura = None if sin_ventas else float(round(utilizable * dias_de_muestra / unidades, 1))
+        cobertura = None if sin_ventas else float(round(_decimal(utilizable) * dias_de_muestra / unidades, 1))
         filas.append({
             "producto_id": pid, "codigo": p["codigo"], "nombre": p["name"], "unidad": p["unit_code"],
             "categoria": p["categoria"], "stock": _cantidad(stock, informe),
-            "vencido": _cantidad(vencido, informe), "en_camino": _cantidad(pedido, informe),
+            "vencido": _cantidad(vencido, informe), "por_vencer": _cantidad(_techo(por_vencer, informe), informe),
+            "en_camino": _cantidad(pedido, informe),
             "en_camino_sin_sucursal": _cantidad(en_camino_sin_sucursal.get(pid, _CERO), informe),
             "stock_minimo": _cantidad(minimo, informe), "stock_minimo_propio": minimo_propio,
             "unidades_vendidas": _cantidad(unidades, informe),
