@@ -32,14 +32,26 @@ from .margen_router import _csv
 
 _fastapi()
 from fastapi import APIRouter, Depends, HTTPException, Query  # noqa: E402
-from pydantic import BaseModel, ConfigDict  # noqa: E402
+from pydantic import BaseModel, ConfigDict, field_validator  # noqa: E402
 
 _CAMPOS = [
     "producto_id", "codigo", "nombre", "categoria", "unidad", "stock", "vencido", "en_camino", "en_camino_sin_sucursal",
     "stock_minimo", "unidades_vendidas", "dias_con_stock", "rotacion_diaria", "cobertura_dias", "sugerido",
     "motivo", "sin_ventas", "posible_quiebre", "variantes", "plazo_entrega_dias", "plazo_propio", "stock_maximo",
-    "limitado_por_maximo", "proveedor_id", "proveedor", "factor_estacional",
+    "limitado_por_maximo", "proveedor_id", "proveedor", "factor_estacional", "stock_minimo_propio",
 ]
+
+
+def _atajar(operacion):
+    """Corre `operacion` y traduce los errores del motor: 404 (producto), 503 (falta una revisión) y 422 (valor inválido)."""
+    try:
+        return operacion()
+    except reposicion.ProductoNoEncontrado as e:
+        raise HTTPException(404, str(e)) from e
+    except reposicion.SinRevision as e:
+        raise HTTPException(503, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
 
 
 class ParametrosDeReposicion(BaseModel):
@@ -148,16 +160,6 @@ def build_reposicion_parametros_router(
     abrir, _ = _deps(None, conexion)
     router = APIRouter(prefix=prefix, tags=["reposicion"])
 
-    def _atajar(operacion):
-        try:
-            return operacion()
-        except reposicion.ProductoNoEncontrado as e:
-            raise HTTPException(404, str(e)) from e
-        except reposicion.SinRevision as e:
-            raise HTTPException(503, str(e)) from e
-        except ValueError as e:
-            raise HTTPException(422, str(e)) from e
-
     def _en_ids_del_producto(conn, parametros: dict) -> dict:
         """El `proveedor_id` de la respuesta, en los ids del producto (identidad sin `proveedor_de`)."""
         if parametros.get("proveedor_id") is not None:
@@ -185,6 +187,58 @@ def build_reposicion_parametros_router(
                 respuesta = _en_ids_del_producto(conn, resultado)
                 conn.commit()
                 return respuesta
+        return _atajar(_op)
+
+    return router
+
+
+class MinimoDeSucursal(BaseModel):
+    """El cuerpo del `PUT` del mínimo por sucursal: el valor completo, `null` para borrar el propio y volver al global. Sin campos de más."""
+    model_config = ConfigDict(extra="forbid")
+    stock_minimo: float | None
+
+    @field_validator("stock_minimo", mode="before")
+    @classmethod
+    def _no_es_un_booleano(cls, valor):
+        """`true`/`false` no son un número: sin esto el modelo los convertiría en 1.0/0.0 antes de que el motor pueda rechazarlos."""
+        if isinstance(valor, bool):
+            raise ValueError("stock_minimo tiene que ser un número, no un booleano")
+        return valor
+
+
+def build_reposicion_minimos_router(
+    *,
+    conexion: Conexion | None = None,
+    prefix: str = "/api/productos",
+    dependencias_leer: Sequence[Any] | None = None,
+    dependencias_escribir: Sequence[Any] | None = None,
+):
+    """`GET /{producto_id}/reposicion/minimos` y `PUT /{producto_id}/reposicion/minimos/{sucursal_id}` (ADR-024): el stock mínimo de un producto en cada sucursal.
+    `GET` devuelve `{producto_id, sucursales: [{sucursal_id, sucursal, stock_minimo, stock_minimo_propio, stock_minimo_global}]}` (todas las sucursales activas;
+    `stock_minimo` es el que usa la reposición ahí: el propio o, sin él, el global). El `PUT` lleva `{stock_minimo}`: un número mayor o igual que 0 (`0` es «no avisar»
+    en esa sucursal) o `null` para borrar el propio y volver al global; responde lo mismo que el `GET`. 404 si el producto no existe, 422 si la sucursal no existe o el
+    valor no es válido, 503 sin la revisión `0005`. **Escribe el catálogo, así que la factory FALLA al construirse (`ValueError`) sin `dependencias_escribir`**
+    (una lista no vacía de `Depends(...)`); `dependencias_leer` es opcional. Va junto a `build_reposicion_parametros_router` (mismo prefijo, rutas distintas)."""
+    if not isinstance(dependencias_escribir, (list, tuple)) or not dependencias_escribir:
+        raise ValueError("build_reposicion_minimos_router necesita dependencias_escribir, una lista no vacía de "
+                         "Depends(...): no se expone una escritura del catálogo sin autorización")
+    abrir, _ = _deps(None, conexion)
+    router = APIRouter(prefix=prefix, tags=["reposicion"])
+
+    @router.get("/{producto_id}/reposicion/minimos", dependencies=list(dependencias_leer or []))
+    def leer(producto_id: int):
+        def _op():
+            with abrir() as conn:
+                return {"producto_id": producto_id, "sucursales": reposicion.minimos_por_sucursal_de(conn, producto_id)}
+        return _atajar(_op)
+
+    @router.put("/{producto_id}/reposicion/minimos/{sucursal_id}", dependencies=list(dependencias_escribir))
+    def fijar(producto_id: int, sucursal_id: int, cuerpo: MinimoDeSucursal):
+        def _op():
+            with abrir() as conn:
+                sucursales = reposicion.fijar_minimo_sucursal(conn, producto_id, sucursal_id, cuerpo.stock_minimo)
+                conn.commit()
+                return {"producto_id": producto_id, "sucursales": sucursales}
         return _atajar(_op)
 
     return router

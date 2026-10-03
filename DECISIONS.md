@@ -1058,3 +1058,34 @@ multiplica la proyección: `necesidad = unidades × H / días_de_muestra × fact
 
 **Consecuencias.** Falta el interruptor y la columna en la reposición (libra-ui) y activarlo en VentaLibra. Sigue diferido: `min_stock` por sucursal y descontar lo que vence dentro del horizonte.
 
+## ADR-024 — Reposición v2: stock mínimo por sucursal (2026-10-03, v0.36.0)
+
+**Contexto.** `catalog_items.min_stock` es global: la reposición por sucursal lo usaba como piso de todas por igual, aunque una sucursal chica y una grande no necesitan el mismo colchón de
+un mismo producto. Diferido desde ADR-017 y ADR-023.
+
+**Decisión.** Tabla nueva **`item_branch_min_stock(item_id, branch_id, min_stock NUMERIC NOT NULL CHECK (min_stock >= 0), PRIMARY KEY (item_id, branch_id))`**, con FK a `catalog_items` y a
+`branches`, creada por la revisión **`0005_min_stock_por_sucursal`** (aditiva, vacía, idempotente por introspección, el mismo SQL en SQLite y PostgreSQL; el downgrade baja la tabla y cada sucursal
+vuelve al global). Como las revisiones 0002 a 0004, **no está en `init_schema()`**: esa función y su fixture congelada (`test_schema_congelado`) no se tocan.
+
+- **Resolución del piso.** En `sugerencia_reposicion` con `sucursal_id`, el piso del producto es el de esa sucursal si tiene fila y, si no, el global. **Sin `sucursal_id` (toda la instancia) usa
+  siempre el global**, como hasta ahora: no se suman ni se promedian los mínimos de las sucursales (hablan del stock de cada una, no del total) y el global sigue siendo «el mínimo del producto».
+  `0` sigue siendo «no me avises», también como mínimo propio (una sucursal puede apagar el aviso de algo que el global vigila; borrar el propio —`None`— y poner `0` son cosas distintas).
+- **Lo que devuelve.** Cada fila trae `stock_minimo` **ya resuelto** (mismo nombre y tipo que antes) y `stock_minimo_propio` (`bool`: viene de la sucursal). El CSV agrega la columna
+  `stock_minimo_propio` **al final**, para no correr las columnas de quien lo lee por posición. Sin la revisión `0005` la consulta es la de siempre y `stock_minimo_propio` es `False`. La generación
+  de órdenes en borrador usa `sugerencia_reposicion` y hereda el cambio.
+- **API del motor.** `minimos_por_sucursal_de(conn, item_id)` lista **todas las sucursales activas** con `stock_minimo` (el efectivo), `stock_minimo_propio` y `stock_minimo_global` (la referencia).
+  `fijar_minimo_sucursal(conn, item_id, sucursal_id, stock_minimo)`: `None` borra el propio. Valida: el producto existe (`ProductoNoEncontrado`), la sucursal existe (`ValueError`), un número finito
+  de 0 a `MAX_STOCK_MINIMO` (mil millones: un seguro contra `1e400`, no una regla de negocio) y, si el producto tiene techo (`max_stock`), no mayor que él (el invariante de ADR-020). Como los demás
+  `fijar_*`, no distingue servicios de productos (un servicio no entra en la reposición, así que su mínimo no se usa). Una sucursal dada de baja no admite fijar un valor, pero sí borrarlo.
+  La inversa del invariante también se cuida: `fijar_parametros` rechaza un techo menor que algún mínimo por sucursal del producto.
+  Las dos escrituras (`fijar_parametros` y `fijar_minimo_sucursal`) se **serializan por producto** antes de validar: PostgreSQL toma el candado de la fila del producto (`SELECT ... FOR UPDATE`), SQLite un `UPDATE` sin efecto que toma el candado de escritura de la base. Sin eso, un techo de 50 y un mínimo de 80 a la vez pasaban cada uno contra lo que el otro no había confirmado.
+- **HTTP.** `build_reposicion_minimos_router`: `GET /{producto_id}/reposicion/minimos` y `PUT /{producto_id}/reposicion/minimos/{sucursal_id}` (cuerpo `{stock_minimo}`, número o `null`), con la
+  misma estructura que `build_reposicion_parametros_router` (falla al construirse sin `dependencias_escribir`; 404 producto, 422 valor o sucursal inválidos, 503 sin la `0005`).
+
+**Bordes dichos en voz alta.** (1) La vista de toda la instancia no refleja los mínimos por sucursal: un producto puede no figurar «a pedir» en el total y sí en una sucursal. (2) `delete_producto`
+borra sus mínimos por sucursal antes (la FK lo exigiría); las sucursales no se borran nunca (baja lógica, ver `erp.catalogo`). (3) Si el global **baja**, los propios no se tocan; si el global
+**sube** por encima del techo se rechaza como siempre, pero los propios no se validan contra el global (pueden ser mayores o menores). (4) `catalogo.update_producto` (subir el mínimo global contra el techo) no toma ese candado: su carrera con el techo viene de antes y no se cambió acá. (5) Un propio no se valida contra el techo de otra forma que
+al fijarlo o al fijar el techo; una base con datos cruzados de antes de esta guarda sigue siendo regida por «el techo manda sobre el piso» (ADR-020).
+
+**Consecuencias.** Falta la pantalla (libra-ui) y exponer el router en los productos. El router de `GET /api/reportes/reposicion` no cambia de contrato salvo el campo nuevo por fila.
+

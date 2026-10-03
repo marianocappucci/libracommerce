@@ -133,11 +133,14 @@ def test_url_de_commerce_no_toma_la_base_del_core_aunque_este_declarada():
 def test_un_prefijo_que_no_resuelve_falla_en_vez_de_caer_a_database_url():
     """🔴 Caer a `DATABASE_URL` cuando el prefijo no resuelve es el defecto que
     este módulo existe para evitar: migraría otra base y devolvería éxito."""
+    # Un prefijo inventado y no un producto real: desde libracore v1.12x `DATABASE_URL`
+    # es un nombre historico VALIDO del dominio de libracargo y libraclub, asi que con
+    # esos el prefijo si resuelve. Lo que se prueba es el caso que no resuelve.
     entorno = {"DATABASE_URL": "postgresql://u:p@h/otra"}
-    with pytest.raises(migrar.SinURL, match="LIBRACARGO_DATABASE_URL"):
-        migrar.url_de_commerce("libracargo", entorno=entorno)
-    entorno["LIBRACOMMERCE_MIGRAR_URL"] = "postgresql://u:p@h/libracargo"
-    assert migrar.url_de_commerce("libracargo", entorno=entorno).endswith("/libracargo")
+    with pytest.raises(migrar.SinURL, match="FICTICIO_DATABASE_URL"):
+        migrar.url_de_commerce("ficticio", entorno=entorno)
+    entorno["LIBRACOMMERCE_MIGRAR_URL"] = "postgresql://u:p@h/ficticio"
+    assert migrar.url_de_commerce("ficticio", entorno=entorno).endswith("/ficticio")
 
 
 def test_sin_prefijo_toma_database_url_y_sin_nada_falla():

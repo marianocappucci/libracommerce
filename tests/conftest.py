@@ -15,8 +15,50 @@ import sqlite3
 
 import pytest
 
+# ── Una base de PostgreSQL por worker, restaurada desde una plantilla ───────
+#
+# Cada test contra PostgreSQL arranca de una base **nueva**, y rearmarla con
+# `DROP SCHEMA public CASCADE` + `init_schema()` costaba ~1,5 s por test (medido;
+# la suite tiene ~1.000). Ahora la base sale de `CREATE DATABASE ... TEMPLATE`
+# (~0,1 s) desde una plantilla armada la primera vez que se pide, una por tipo de
+# fixture (`repo`, `abrir`, `ventas`), porque cada una deja un estado distinto.
+# El mecanismo (una base por worker de xdist, plantillas, `FORCE`) vive en
+# `libracore.testing.pg_por_worker`; aca queda lo propio de este repo: que hay en
+# cada plantilla.
+#
+# La URL del worker se pasa al resto de la suite pisando `LIBRACORE_POSTGRES_URL`,
+# que es de donde la leen todos (`url_postgres()`, `test_schema_congelado`,
+# `test_migraciones_alembic`). Esos dos ultimos hacen su propio `DROP SCHEMA` sobre
+# esa URL y no usan plantillas. Sin la variable (fuera de CI se saltean los tests
+# de PostgreSQL) no hace nada.
+from libracore.testing.pg_por_worker import base_por_worker  # noqa: E402
+
 from libracommerce.db.repository import SqliteCommerceRepository
 from libracommerce.db.schema import init_schema
+
+_PG = base_por_worker("libracommerce", os.environ.get("LIBRACORE_POSTGRES_URL", ""))
+if _PG:
+    os.environ["LIBRACORE_POSTGRES_URL"] = _PG.url
+
+
+def _en_base(url: str, construir) -> None:
+    """Corre `construir(conn)` sobre `url` con la capa de conexion de LibraCore y deja todo cerrado."""
+    from libracore.db import core
+
+    core.configure(url)
+    conn = core.get_connection()
+    try:
+        construir(conn)
+        conn.commit()
+    finally:
+        conn.close()
+        core._db_path = None
+        core._database_url = None
+
+
+def _restaurar(plantilla: str, construir) -> None:
+    """Deja la base del worker como una nueva armada con `construir(conn)`, copiada de la plantilla `plantilla`."""
+    _PG.restaurar(plantilla, lambda url: _en_base(url, construir))
 
 
 def url_postgres() -> str:
@@ -54,17 +96,13 @@ def repo(request) -> SqliteCommerceRepository:
     from libracore.db import core
 
     url = url_postgres()
+    # Cada test arranca con la base nueva: los ids son seriales y varios
+    # tests afirman sobre relaciones entre filas, no sobre valores fijos,
+    # pero el estado de uno anterior igual falsearia los conteos.
+    _restaurar("repo", init_schema)
     core.configure(url)
     conn = core.get_connection()
     try:
-        # Cada test arranca con la base vacia: los ids son seriales y varios
-        # tests afirman sobre relaciones entre filas, no sobre valores fijos,
-        # pero el estado de uno anterior igual falsearia los conteos.
-        conn.execute("DROP SCHEMA public CASCADE")
-        conn.execute("CREATE SCHEMA public")
-        conn.commit()
-        init_schema(conn)
-        conn.commit()
         yield SqliteCommerceRepository(conn)
     finally:
         conn.close()
@@ -114,17 +152,13 @@ def abrir(request, tmp_path):
     from libracore.db import core
 
     url = url_postgres()
-    core.configure(url)
-    conn = core.get_connection()
-    try:
-        conn.execute("DROP SCHEMA public CASCADE")
-        conn.execute("CREATE SCHEMA public")
-        conn.commit()
+
+    def _armar(conn):
         init_schema(conn)
         _deposito_principal(conn)
-        conn.commit()
-    finally:
-        conn.close()
+
+    _restaurar("abrir", _armar)
+    core.configure(url)
     yield core.get_connection
     core._db_path = None
     core._database_url = None
@@ -180,17 +214,15 @@ def abrir_ventas(request, tmp_path):
 
     if request.param == "sqlite":
         core.configure(str(tmp_path / "producto.db"))
+        conn = core.get_connection()
+        try:
+            _schema_de_producto(conn)
+        finally:
+            conn.close()
     else:
-        core.configure(url_postgres())
-    conn = core.get_connection()
-    try:
-        if request.param == "postgres":
-            conn.execute("DROP SCHEMA public CASCADE")
-            conn.execute("CREATE SCHEMA public")
-            conn.commit()
-        _schema_de_producto(conn)
-    finally:
-        conn.close()
+        url = url_postgres()
+        _restaurar("ventas", _schema_de_producto)
+        core.configure(url)
     yield core.get_connection
     core._db_path = None
     core._database_url = None

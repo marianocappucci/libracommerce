@@ -66,9 +66,9 @@ def test_la_revision_0004_corre_sobre_datos_previos_sin_tocar_una_fila_y_es_idem
         assert _ledger(conn) == antes
         return [f[0] for f in conn.execute("SELECT version_num FROM alembic_version_libracommerce").fetchall()]
 
-    assert _con_conexion(destino, verificar) == ["0004_proveedor_por_producto"]
+    assert _con_conexion(destino, verificar) == [_vto._CABEZA]
     migrar.upgrade(destino)
-    assert _con_conexion(destino, verificar) == ["0004_proveedor_por_producto"]
+    assert _con_conexion(destino, verificar) == [_vto._CABEZA]
 
 
 def test_la_revision_0004_baja_sin_tocar_el_ledger_ni_los_parametros(destino):
@@ -230,7 +230,7 @@ def test_el_router_lee_y_escribe_el_proveedor_y_la_clave_ausente_no_lo_toca(abri
     assert c.get("/api/reportes/reposicion", params={"proveedor_id": prov, "solo_a_pedir": "false"}).json()["proveedor_id"] == prov
     assert c.get("/api/reportes/reposicion", params={"proveedor_id": 99999}).status_code == 422
     csv = c.get("/api/reportes/reposicion/export", params={"solo_a_pedir": "false"}).text.splitlines()
-    assert csv[0].endswith(",proveedor_id,proveedor,factor_estacional") and csv[1].endswith(f",{prov},Distribuidora Norte,")
+    assert csv[0].endswith(",proveedor_id,proveedor,factor_estacional,stock_minimo_propio") and csv[1].endswith(f",{prov},Distribuidora Norte,,no")
 
 
 def test_el_router_traduce_los_ids_del_producto_con_los_ganchos_de_compras(abrir_vto_ventas):
