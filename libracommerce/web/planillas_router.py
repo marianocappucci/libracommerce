@@ -85,6 +85,8 @@ def parsear_planilla(contenido: bytes) -> list[dict[str, Any]]:
         if codigo is None or not str(codigo).strip():
             continue
         costo = fila[col_costo] if col_costo < len(fila) else None
+        if isinstance(costo, bool):   # una celda VERDADERO/FALSO: `float(True)` daría un costo de 1 (ADR-027)
+            raise PlanillaInvalida(f'Fila {numero_fila}: el costo "{costo}" no es un número.')
         try:
             costo = float(costo)
         except (TypeError, ValueError):

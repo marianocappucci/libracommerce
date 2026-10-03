@@ -26,13 +26,14 @@ from typing import Any
 
 from ..erp import compras, reposicion, reposicion_ordenes
 from . import fastapi as _fastapi
+from ._validacion import sin_booleanos
 from .catalogo_router import Conexion, _deps
 from .compras_router import _sin_traduccion
 from .margen_router import _csv
 
 _fastapi()
 from fastapi import APIRouter, Depends, HTTPException, Query  # noqa: E402
-from pydantic import BaseModel, ConfigDict, field_validator  # noqa: E402
+from pydantic import BaseModel, ConfigDict  # noqa: E402
 
 _CAMPOS = [
     "producto_id", "codigo", "nombre", "categoria", "unidad", "stock", "vencido", "en_camino", "en_camino_sin_sucursal",
@@ -54,23 +55,6 @@ def _atajar(operacion):
         raise HTTPException(422, str(e)) from e
 
 
-def _sin_booleanos(*campos: str):
-    """Un `field_validator(..., mode="before")` que rechaza `true`/`false` en los `campos` numéricos (ADR-026). Sin esto, pydantic convierte el booleano en `1`/`0` (o
-    `1.0`/`0.0`) antes de que el motor, que sí los rechaza, llegue a verlo. Mira también dentro de una lista y de un diccionario (`producto_ids`, `topes`). Un `0` numérico,
-    un entero o un texto numérico pasan igual que antes: la conversión que sigue es la de siempre."""
-    def _validar(cls, valor, info):
-        if isinstance(valor, dict):
-            adentro = [*valor, *valor.values()]
-        elif isinstance(valor, (list, tuple)):
-            adentro = valor
-        else:
-            adentro = [valor]
-        if any(isinstance(v, bool) for v in adentro):
-            raise ValueError(f"{info.field_name} tiene que ser un número, no un booleano")
-        return valor
-    return field_validator(*campos, mode="before")(classmethod(_validar))
-
-
 class ParametrosDeReposicion(BaseModel):
     """El cuerpo del `PUT`: los dos valores completos, `null` para borrar. Sin campos de más."""
     model_config = ConfigDict(extra="forbid")
@@ -79,7 +63,7 @@ class ParametrosDeReposicion(BaseModel):
     #: Opcional: si la clave no viene, el proveedor queda como estaba; `null` lo borra (ADR-021).
     proveedor_id: int | None = None
 
-    _no_son_booleanos = _sin_booleanos("plazo_entrega_dias", "stock_maximo", "proveedor_id")
+    _no_son_booleanos = sin_booleanos("plazo_entrega_dias", "stock_maximo", "proveedor_id")
 
 
 def build_reposicion_router(
@@ -220,7 +204,7 @@ class MinimoDeSucursal(BaseModel):
     model_config = ConfigDict(extra="forbid")
     stock_minimo: float | None
 
-    _no_es_un_booleano = _sin_booleanos("stock_minimo")   # `true`/`false` no son un número: el modelo los convertiría en 1.0/0.0
+    _no_es_un_booleano = sin_booleanos("stock_minimo")   # `true`/`false` no son un número: el modelo los convertiría en 1.0/0.0
 
 
 def build_reposicion_minimos_router(
@@ -279,7 +263,7 @@ class GenerarOrdenes(BaseModel):
     estacionalidad: bool = False
     descontar_por_vencer: bool = False
 
-    _no_son_booleanos = _sin_booleanos("dias_rotacion", "dias_cobertura", "plazo_entrega_dias", "sucursal_id", "proveedor_id", "producto_ids", "topes")
+    _no_son_booleanos = sin_booleanos("dias_rotacion", "dias_cobertura", "plazo_entrega_dias", "sucursal_id", "proveedor_id", "producto_ids", "topes")
 
 
 def build_reposicion_ordenes_router(

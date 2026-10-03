@@ -1144,3 +1144,62 @@ rechazo `isinstance(bool)` del motor: `plazo_entrega_dias: true` quedaba como 1 
 edición, incluida la actualización masiva de precios (una por línea, confirmando cada una): en PostgreSQL una escritura que referencia al producto (una línea de venta, por la clave foránea) puede esperar lo que dure esa edición (el `FOR UPDATE` choca con el `FOR KEY SHARE` de la FK; no se midió
 con carga); `fijar_parametros` y `fijar_minimo_sucursal` ya lo hacían. (4) `actualizacion_masiva.aplicar` relee el mínimo global antes de llamar a `update_producto`, fuera del candado: puede pisar con el valor de antes un mínimo que otro editó en el medio, pero
 nunca lo sube por encima del techo.
+
+## ADR-027 — Booleanos fuera de los campos numéricos en todos los routers, y la actualización masiva relee dentro del candado (2026-10-03)
+
+**Contexto.** Dos pendientes que ADR-026 dejó dichos: (a) arregló en `reposicion_router` que pydantic convierte `true`/`false` en `1`/`0` en un campo `int`/`float` **antes** de que el motor (que en varios lugares rechaza el
+booleano a propósito) lo vea, y quedaba el resto de los routers; (b) borde (4) de ADR-026: `actualizacion_masiva.aplicar` relee el producto fuera del candado que `update_producto` toma. Sin migración.
+
+**1. Relevamiento, con método.** Un script (no a ojo) arma cada una de las 21 factories de `web/` con sus opciones prendidas (`con_vencimientos`, `con_lotes`, `por_deposito`, `promociones`, `con_avisos_de_vencimiento`),
+recorre las rutas reales (`route.dependant`) y, para cada campo numérico de cada cuerpo (`int`, `float`, `Decimal`, y dentro de `list[...]`/`dict[...]` y de los modelos anidados), **instancia el modelo real
+con `True` y con `False`** en esa posición (con los validadores incluidos) y anota si lo acepta; para los parámetros de query y de path numéricos prueba el texto `"true"`, que es como llegan. Resultado antes del cambio:
+
+- **Aceptaban el booleano (y se arreglaron, `web/_validacion.sin_booleanos`):**
+  - `catalogo_router`: `ProductoPayload` (`precio_venta`, `precio_costo`, `stock_minimo`; también `ProductoConVencePayload`, que hereda), `DepositoCreatePayload.branch_id`, `DepositoPredeterminadoPayload.deposito_id`,
+    `TransferenciaPayload` (`producto_id`, `origen_id`, `destino_id`, `cantidad`, `variant_id`) y `AjustePayload` (`cantidad`, `factor`, `deposito_id`, `variant_id`; también `AjusteConLotePayload`).
+  - `ventas_router`: `ItemPayload` (`qty`, `precio`, `producto_id`, `variante_id`), `PagoPayload` (`monto`, `recibido`), `VentaPayload` (`descuento`, `cliente_id`, `deposito_id`), `DevolucionLinea` (`sale_item_id`, `cantidad`),
+    `DevolucionPayload.deposito_id`, y `PlanSalidaLinea`/`PlanSalidaPayload` (`producto_id`, `qty`, `variante_id`, `deposito_id`).
+  - `listas_router`: `ItemsPayload.precios` (los valores), `AjustePorcentualPayload.porcentaje`, `ImportarPayload.fuente_lista_id`, `QuiebrePayload` (`min_quantity`, `amount`), `PrecioVigentePayload` (`monto`, `sucursal_id`,
+    `cantidad_minima`) y `ListaDeClientePayload.lista_id`.
+  - `promociones_router`: `ItemPromocionPayload` (`producto_id`, `cantidad`), `PromocionPayload` (`paga`, `precio`) y, en `POST /calcular`, `LineaCalculoPayload` (`producto_id`, `qty`, `precio`).
+  - `compras_router`: `OrdenCreatePayload` (`proveedor_id`, `branch_id`), `OrdenItemPayload.item_id`, `RecepcionCreatePayload` (`proveedor_id`, `purchase_order_id`), `RecepcionItemPayload.item_id`, `ConfirmarPayload.deposito_id`.
+  - `vencimientos_router` (los tres `POST` que escriben el ledger): `AsignarPayload`, `EntradaPayload` y `MermaPayload` (`producto_id`, `deposito_id`, `variante_id`).
+  - `planillas_router` (otro mecanismo, el mismo defecto): una **celda VERDADERO** de la columna de costo del `.xlsx` llega como `True` y `float(True)` es `1.0`: la planilla bajaba el costo a 1 y el precio de venta con él.
+    Se rechaza con el mismo texto de siempre («el costo "True" no es un número»). Una FALSO ya caía en «mayor que cero».
+- **Ya lo rechazaban (se dejó fijado con tests, sin tocar):** todos los `Decimal` (`quantity_ordered`, `unit_cost`, `tax_rate`, `quantity` de compras y `cantidad` de los tres `POST` de vencimientos: pydantic no convierte un
+  booleano en `Decimal`), los `bool` de verdad y `StrictBool` (`vence`, `activo`, `activa`, `es_principal`, `cobrar_con_qr`, `solo_activos`, …) y `Literal` (`tipo`, `modo`, `base`).
+- **Llegaban al motor sin riesgo:** (i) las claves de un diccionario (`precios{id}`, `topes{id}`): una clave JSON siempre es texto, no hay clave booleana (el helper igual las mira); (ii) los 96 parámetros numéricos (distintos por ruta) de
+  `query` y de `path` de todos los routers (`dias_rotacion`, `producto_id`, `sucursal_id`, `limite`, …): llegan como texto y `"true"` no se convierte en entero ni en flotante (medido: ninguno lo acepta); (iii)
+  `QuiebrePayload.min_quantity`: el motor exige 2 o más, así que `true` (1.0) y `false` (0.0) se rechazaban igual, pero con un mensaje que no decía por qué; se aplicó el validador igual por uniformidad.
+  Ojo con la otra mitad de la frase: **«el motor lo rechaza de todos modos» no vale como excusa** para `variante_id` de vencimientos (`_validar_variante` rechaza el booleano) ni para `isinstance(bool)` de reposición: pydantic convierte
+  antes, así que el motor recibe un `1` y no ve nada. Por eso esos campos se arreglaron en el modelo.
+
+**Decisión.** `_sin_booleanos` de `reposicion_router` se movió a `libracommerce/web/_validacion.py` como `sin_booleanos(*campos)`, **sin cambiar su comportamiento ni su mensaje** («<campo> tiene que ser un número, no un booleano»,
+422, también dentro de listas y diccionarios); `reposicion_router` lo importa. Se aplica en los campos listados arriba, y sólo donde un `1` o un `0` producen un efecto real de negocio (ids de producto, proveedor, sucursal,
+depósito, lista, variante y cliente; cantidades, precios, costos, descuentos, porcentajes y factores). **`false` tampoco es un `0`**, aunque `0` sea un valor legítimo del campo (un conteo en cero, un descuento de 0, `stock_minimo: 0`):
+el `0` numérico sigue valiendo, el booleano no. Las respuestas no cambian de forma. `POST /ventas/plan-salida` y `POST /promociones/calcular` son lecturas que no escriben, pero son lo que el punto de venta muestra antes de cobrar:
+un `qty: true` mostraba el plan o el ahorro de una unidad; se aplicó también ahí. Los tests (`tests/test_web_booleanos.py`) llevan, para cada endpoint tocado, `true` y `false` en cada campo arreglado: 422, con el
+mensaje, y **ninguna tabla cambia** (se compara el contenido de todas); el cuerpo numérico y el mismo con los números como texto siguen dando 200. Sin el validador, los 18 casos × 2 motores fallan (se probó sobre una copia del repo fuera
+del worktree con los routers de antes: precio 1.0 escrito, venta de una unidad, +1 % a toda una lista, costo 1.0 desde la planilla).
+
+**2. La actualización masiva relee dentro del candado.** `update_producto` reescribe **todos** los campos del producto con lo que se le pasa y `aplicar` los sacaba de una relectura hecha antes de tomar `_bloquear_producto`:
+un mínimo editado en el medio (también el nombre, la categoría, el `activo`, …) se pisaba con el valor de antes. Dos salidas: (a) tomar el candado en `aplicar` **antes de releer**, o (b) no releer ni reescribir lo que no cambia
+(un `UPDATE` acotado de costo y precio). Se eligió **(a)**: `aplicar` llama `_bloquear_producto(conn, item_id)` y recién después `catalogo.get_producto` y `update_producto`. Razones: el repositorio confirma dentro de `save_catalog_item`
+(salvo dentro de su `transaction()`, que acá no aplica porque `repositorio_de(conn)` crea uno nuevo por llamada), y el candado (`FOR UPDATE` de la fila en PostgreSQL, el candado de escritura en SQLite) es de la transacción de
+`conn`, así que lo que `aplicar` toma queda tomado a través de la relectura y de la escritura, y `update_producto` lo vuelve a tomar sin esperar (la misma transacción) y lo suelta al confirmar: releer y escribir son una sola
+sección crítica, por línea, sin refactorizar `update_producto`. La (b) habría sido un camino de escritura paralelo al del producto (se salteaba `repo.save_catalog_item`, sus ganchos y el `_set_codigo`), que es justo lo que el docstring del
+módulo dice que no hace. Orden de candados: **producto primero**, igual que `delete_producto`, `fijar_parametros`, `fijar_minimo_sucursal` y `update_producto`; la tanda no retiene el candado de una línea al pasar a la siguiente (cada
+línea confirma), así que dos masivas con líneas en distinto orden no se esperan una a otra. Test (`tests/test_actualizacion_masiva.py`): dos hilos con barrera determinista, contra SQLite y PostgreSQL; la masiva, al releer, avisa y espera
+al otro hilo, que sube el mínimo de 5 a 9 y confirma. Sin el arreglo el mínimo final es 5 (la masiva lo pisó); con él es 9 y el costo y el precio son los nuevos.
+
+**Bordes dichos en voz alta.** (1) Un producto que hoy mande `true`/`false` a propósito en alguno de estos campos recibiría 422: la suite del motor no tiene ninguno, y los productos (VentaLibra, Contalibra, Restolibra) tienen que correr la
+suya al subir el pin; los `bool` de verdad no cambian. (2) Un producto que **herede** un payload (`ProductoPayload`, `AjustePayload`) y le sume campos numéricos propios no los tiene cubiertos: aplicar `sin_booleanos` a los suyos. (3) `aplicar`
+ahora toma el candado también en una base sin la revisión `0003` (`update_producto` no lo toma ahí): es la misma fila y el mismo orden, y arregla el mismo lost update en el nombre o la categoría; el borde (3) de ADR-026 (una escritura
+que referencia al producto —una línea de venta, por la FK— puede esperar lo que dure la edición en PostgreSQL) vale ahora también para esas bases. (4) Queda una ventana mínima que no cubre el candado: `update_producto` guarda el producto
+(confirma, suelta el candado) y recién después hace `_set_codigo`; si en ese instante otro cambia el código principal, `_set_codigo` lo reemplaza por el que `aplicar` había leído. Es el mismo orden de siempre de `update_producto` (no lo
+toca esta decisión); el código principal casi nunca cambia y `_set_codigo` no escribe si es el mismo. (5) `PUT /api/productos/{id}` sigue siendo un reemplazo completo con lo que manda el cliente: un precio editado a mano con datos viejos pisa
+el de otro; lo que se cierra acá es que la **masiva** pise lo que ella misma lee. (6) Si un producto pasa su propia fábrica de repositorio (`repositorio_de`) y su `save_catalog_item` no confirma, el candado queda tomado hasta que `conn` confirme,
+y varias líneas de una misma tanda retendrían varios candados a la vez (en el orden de las líneas); los dos productos que usan la masiva hoy confirman por línea. (7) El test de la masiva simula el «otro hilo» con una escritura que
+toma el candado y toca sólo el mínimo: no hay hoy en el motor un endpoint que cambie el mínimo global sin reescribir el resto del producto.
+
+**Consecuencias.** Sin migración; la versión sale del tag. Cierra el borde (4) de ADR-026. Los routers nuevos que reciban `int`/`float` en un cuerpo y donde un `1` o un `0` cambien algo deben usar `sin_booleanos` (ARCHITECTURE.md).

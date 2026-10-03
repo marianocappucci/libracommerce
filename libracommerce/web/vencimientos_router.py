@@ -46,6 +46,7 @@ from typing import Any
 
 from ..erp import vencimientos
 from . import fastapi as _fastapi
+from ._validacion import sin_booleanos
 from .catalogo_router import Conexion, _deps
 from .margen_router import _csv
 
@@ -76,6 +77,9 @@ class AsignarPayload(BaseModel):
     variante_id: int | None = None
     nota: str = ""
 
+    #: `true`/`false` no son un id (ADR-027): pydantic los convertiría en 1 antes de que el motor (que los rechaza) los vea. `cantidad` es `Decimal`, que ya los rechaza.
+    _no_son_booleanos = sin_booleanos("producto_id", "deposito_id", "variante_id")
+
 
 class EntradaPayload(BaseModel):
     """Una entrada manual de stock nuevo con lote y vencimiento (`POST /entrada`). `vence` es una fecha ISO
@@ -91,6 +95,8 @@ class EntradaPayload(BaseModel):
     clave_operacion: str = Field(min_length=1, max_length=vencimientos.MAX_LARGO_CLAVE)
     nota: str = ""
 
+    _no_son_booleanos = sin_booleanos("producto_id", "deposito_id", "variante_id")
+
 
 class MermaPayload(BaseModel):
     producto_id: int
@@ -103,6 +109,8 @@ class MermaPayload(BaseModel):
     variante_id: int | None = None
     motivo: str = "Vencimiento"
     nota: str = ""
+
+    _no_son_booleanos = sin_booleanos("producto_id", "deposito_id", "variante_id")
 
 
 def _http(error: Exception) -> HTTPException:
