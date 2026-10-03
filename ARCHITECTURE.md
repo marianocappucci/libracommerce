@@ -72,7 +72,8 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
   lectura sobre `erp.margen`; ADR-015) y
   `reposicion_router` (`build_reposicion_router`: qué pedir por producto y por sucursal, sólo lectura sobre
   `erp.reposicion`; ADR-017; los tres exports CSV —margen, reposición y vencimientos— pasan por un único `_csv` que
-  neutraliza las celdas de texto que una planilla leería como fórmula, `web/csv_seguro.py`) y
+  neutraliza las celdas de texto que una planilla leería como fórmula, `web/csv_seguro.py`; `build_reposicion_minimos_router`: el stock
+  mínimo de un producto por sucursal, `GET`/`PUT /{producto_id}/reposicion/minimos`, revisión `0005`; ADR-024) y
   `vencimientos_router` (`build_vencimientos_router`, de lectura, y `build_vencimientos_escritura_router`, con
   gates por operación: próximos a vencer, lotes de un producto, marcar «vence», asignar vencimiento a saldo sin
   lote, cargar una entrada de stock nuevo con lote (`POST /entrada`) y dar de baja un lote, sobre `erp.vencimientos`;

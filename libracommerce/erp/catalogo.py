@@ -956,6 +956,13 @@ def update_producto(conn, pid: int, nombre: str, codigo: str, descripcion: str,
 
 
 def delete_producto(conn, pid: int):
+    from .reposicion import _bloquear_producto, tiene_minimos_sucursal
+
+    if tiene_minimos_sucursal(conn):   # ADR-024: los mínimos por sucursal cuelgan del producto (FK) y se van con él
+        # Primero el candado del producto y después sus mínimos, el mismo orden que `fijar_minimo_sucursal`: al revés (mínimos y luego producto), un borrado
+        # a la vez con la carga de un mínimo existente se esperan uno al otro (deadlock en PostgreSQL).
+        _bloquear_producto(conn, pid)
+        conn.execute("DELETE FROM item_branch_min_stock WHERE item_id=?", (pid,))
     conn.execute("DELETE FROM item_codes WHERE item_id=?", (pid,))
     conn.execute("DELETE FROM catalog_items WHERE id=?", (pid,))
 
