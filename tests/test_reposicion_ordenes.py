@@ -195,6 +195,30 @@ def test_el_router_rechaza_lo_invalido_con_422_y_no_escribe(escenario, cuerpo):
     assert _cantidad_de_ordenes(escenario["abrir"]) == 0
 
 
+@pytest.mark.parametrize("campo, valor", [
+    (campo, valor) for valor in (True, False)
+    for campo in ("dias_rotacion", "dias_cobertura", "plazo_entrega_dias", "sucursal_id", "proveedor_id")
+] + [("producto_ids", [True]), ("producto_ids", [False]), ("topes", {"1": True}), ("topes", {"1": False})])
+def test_el_router_rechaza_los_booleanos_en_los_campos_numericos(escenario, campo, valor):
+    """`true` quedaba como 1 y `false` como 0 antes de llegar al motor, que sí los rechaza (ADR-026)."""
+    c = _cliente(escenario["abrir"])
+    r = c.post("/api/reportes/reposicion/ordenes", json={"clave_operacion": "k", campo: valor})
+    assert r.status_code == 422 and "booleano" in r.text, r.text
+    assert _cantidad_de_ordenes(escenario["abrir"]) == 0
+
+
+def test_el_router_sigue_aceptando_numeros_y_textos_numericos_en_los_campos_numericos(escenario):
+    e = escenario
+    c = _cliente(e["abrir"])
+    cuerpo = {"clave_operacion": "n", "dias_rotacion": "30", "dias_cobertura": 15, "plazo_entrega_dias": "3", "producto_ids": [e["yerba"], str(e["sal"])],
+              "topes": {str(e["yerba"]): 3, str(e["sal"]): "2.5"}}
+    r = c.post("/api/reportes/reposicion/ordenes", json=cuerpo)
+    assert r.status_code == 200, r.text
+    assert _cantidad_de_ordenes(e["abrir"]) == 2
+    r = c.post("/api/reportes/reposicion/ordenes", json={"clave_operacion": "cero", "sucursal_id": 0})   # el 0 numérico no es un booleano: lo juzga el motor
+    assert "booleano" not in r.text
+
+
 def test_el_router_traduce_los_ids_con_los_ganchos_de_compras(escenario):
     e = escenario
     offset = 100_000

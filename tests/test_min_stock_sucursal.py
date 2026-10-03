@@ -15,6 +15,7 @@ from alembic import command
 from conftest import USUARIO
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from test_proveedor_por_producto import _nuevo_tercero
 from test_reposicion import PREVIA, _dos_sucursales, _por_nombre, _producto, _reporte
 from test_vencimientos import _columnas_de, _con_conexion, _crear_base_al_dia_de_0001, _ledger, catalogo, migrar, stock
 
@@ -521,6 +522,40 @@ def test_el_put_rechaza_los_booleanos_en_vez_de_convertirlos_en_numero(abrir_vto
     assert c.put(f"/api/productos/{yerba}/reposicion/minimos/{centro}", json={"stock_minimo": 0}).status_code == 200   # el 0 numérico sigue valiendo
 
 
+def test_el_put_de_parametros_rechaza_los_booleanos_en_vez_de_convertirlos_en_numero(abrir_vto_ventas):
+    """`plazo_entrega_dias: true` quedaba como 1, `stock_maximo: true` como 1.0 y `proveedor_id: true` como 1 (ADR-026): pydantic los convertía antes de que el motor,
+    que sí los rechaza, los viera. Ahora 422 y no se escribe nada; los números, los enteros y los textos numéricos valen como siempre."""
+    abrir = abrir_vto_ventas
+    yerba, _, _ = _escenario(abrir)
+    prov = _nuevo_tercero(abrir)
+    c = _cliente(abrir)
+    ruta = f"/api/productos/{yerba}/reposicion"
+    valido = {"plazo_entrega_dias": 5, "stock_maximo": 50, "proveedor_id": prov}
+
+    def guardado():
+        with abrir() as conn:
+            p = reposicion.parametros_de(conn, yerba)
+        return p["plazo_entrega_dias"], p["stock_maximo"], p["proveedor_id"]
+
+    for campo in valido:
+        for booleano in (True, False):
+            r = c.put(ruta, json=dict(valido, **{campo: booleano}))
+            assert r.status_code == 422 and "booleano" in r.text, (campo, booleano, r.text)
+            assert guardado() == (None, None, None), (campo, booleano)               # ni 1, ni 1.0, ni 0: no escribió nada
+    r = c.put(ruta, json=valido)
+    assert r.status_code == 200, r.text
+    assert guardado() == (5, 50.0, prov)
+    r = c.put(ruta, json={"plazo_entrega_dias": "7", "stock_maximo": "60.5", "proveedor_id": str(prov)})   # un texto numérico sigue convirtiéndose
+    assert r.status_code == 200, r.text
+    assert guardado() == (7, 60.5, prov)
+    for campo in valido:                                                              # el 0 numérico no es un booleano: lo rechaza el motor, con su motivo
+        r = c.put(ruta, json=dict(valido, **{campo: 0}))
+        assert r.status_code == 422 and "booleano" not in r.text, (campo, r.text)
+    assert guardado() == (7, 60.5, prov)
+    assert c.put(ruta, json={"plazo_entrega_dias": None, "stock_maximo": None, "proveedor_id": None}).status_code == 200   # null sigue borrando
+    assert guardado() == (None, None, None)
+
+
 # ── Concurrencia: el techo y el mínimo por sucursal se validan uno contra el otro ──
 
 
@@ -580,6 +615,66 @@ def test_un_techo_y_un_minimo_por_sucursal_a_la_vez_nunca_quedan_cruzados(abrir_
         assert not any(v.startswith("error") for v in salida.values()), salida
         assert not cruzado(), f"ronda {ronda}: quedó un mínimo por sucursal por encima del techo ({salida})"
         assert sorted(salida.values()) == ["confirmada", "rechazada"], salida                # exactamente una gana
+
+
+def test_editar_el_minimo_global_y_bajar_el_techo_a_la_vez_nunca_quedan_cruzados(abrir_vto_ventas):
+    """`update_producto` valida el mínimo global contra el techo (ADR-020) y tiene que tomar el candado del producto ANTES de leerlo, como `fijar_parametros` (ADR-026).
+    El hilo del techo toma el candado, baja el techo a 50 y lo retiene sin confirmar; recién entonces arranca la edición que sube el mínimo a 80 (con el techo
+    confirmado en 100). Sin candado la edición lee el 100 de antes, valida y escribe en cuanto el otro confirma: mínimo 80, techo 50. Con candado espera, ve el 50 y se rechaza."""
+    import threading
+    import time
+
+    abrir = abrir_vto_ventas
+    with abrir() as conn:
+        sal = _producto(conn, "Sal", minimo=5.0)
+    with abrir() as conn:
+        reposicion.fijar_parametros(conn, sal, plazo_entrega_dias=None, stock_maximo=100)
+        conn.commit()
+
+    tomado, soltar = threading.Event(), threading.Event()
+    salida: dict[str, str] = {}
+
+    def bajar_techo():
+        try:
+            with abrir() as conn:
+                reposicion.fijar_parametros(conn, sal, plazo_entrega_dias=None, stock_maximo=50)   # escrito y validado, todavía sin confirmar
+                tomado.set()
+                soltar.wait(timeout=30)
+                conn.commit()
+            salida["techo"] = "confirmada"
+        except ValueError:
+            salida["techo"] = "rechazada"
+        except Exception as exc:  # noqa: BLE001 - se informa abajo
+            salida["techo"] = f"error: {exc!r}"
+        finally:
+            tomado.set()
+
+    def subir_minimo():
+        try:
+            assert tomado.wait(timeout=30)
+            with abrir() as conn:
+                catalogo.update_producto(conn, sal, "Sal", "", "", 100.0, 60.0, "u", "", 1, stock_minimo=80.0)
+                conn.commit()
+            salida["minimo"] = "confirmada"
+        except ValueError:
+            salida["minimo"] = "rechazada"
+        except Exception as exc:  # noqa: BLE001 - se informa abajo
+            salida["minimo"] = f"error: {exc!r}"
+
+    hilos = [threading.Thread(target=bajar_techo), threading.Thread(target=subir_minimo)]
+    for h in hilos:
+        h.start()
+    tomado.wait(timeout=30)
+    time.sleep(1.5)                                                  # la edición ya validó (sin candado) o está esperando el candado (con él)
+    soltar.set()
+    for h in hilos:
+        h.join(timeout=60)
+    assert not any(v.startswith("error") for v in salida.values()), salida
+    with abrir() as conn:
+        techo, minimo = conn.execute("SELECT max_stock, min_stock FROM catalog_items WHERE id = ?", (sal,)).fetchone()
+    assert float(minimo) <= float(techo), f"quedó un mínimo ({minimo}) por encima del techo ({techo}): {salida}"
+    assert sorted(salida.values()) == ["confirmada", "rechazada"], salida                # exactamente una gana
+    assert salida == {"techo": "confirmada", "minimo": "rechazada"} and (float(techo), float(minimo)) == (50.0, 5.0), salida
 
 
 def test_borrar_el_producto_y_fijar_un_minimo_a_la_vez_no_se_traban_entre_si(abrir_vto_ventas):
