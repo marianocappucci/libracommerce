@@ -68,6 +68,9 @@ dev = [
     # TestClient de FastAPI para ejercitar las factories de router por HTTP.
     "httpx>=0.27",
     "pytest-cov>=6",
+    # La suite corre en varios procesos, una base de PostgreSQL por worker
+    # (tests/conftest.py). reglas/ci.md del wiki.
+    "pytest-xdist>=3.8",
     "ruff>=0.13","pytest>=8.0",
     # SOLO PARA TESTS. Este motor no importa libracore en runtime y sigue
     # teniendo `dependencies = []` a proposito. Pero contra PostgreSQL su
