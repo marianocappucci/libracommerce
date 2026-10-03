@@ -580,3 +580,52 @@ def test_un_techo_y_un_minimo_por_sucursal_a_la_vez_nunca_quedan_cruzados(abrir_
         assert not any(v.startswith("error") for v in salida.values()), salida
         assert not cruzado(), f"ronda {ronda}: quedó un mínimo por sucursal por encima del techo ({salida})"
         assert sorted(salida.values()) == ["confirmada", "rechazada"], salida                # exactamente una gana
+
+
+def test_borrar_el_producto_y_fijar_un_minimo_a_la_vez_no_se_traban_entre_si(abrir_vto_ventas):
+    """El orden de los candados es siempre producto → mínimos. `fijar_minimo_sucursal` toma el producto y después escribe el mínimo; si `delete_producto` borrara
+    primero los mínimos y después tomara el producto, cada uno esperaría lo que tiene el otro (deadlock en PostgreSQL, que aborta a uno). El hilo A toma el producto y
+    espera un rato antes de escribir su mínimo, para que el hilo B alcance a hacer lo suyo: con el orden correcto B espera en el candado y los dos terminan."""
+    import threading
+    import time
+
+    abrir = abrir_vto_ventas
+    _, centro, _ = _escenario(abrir)
+    with abrir() as conn:
+        otro = _producto(conn, "Sin movimientos")
+    _fijar(abrir, otro, centro, 4)                            # un mínimo existente: A lo modifica, B lo borra
+
+    tomado = threading.Event()
+    salida: dict[str, str] = {}
+
+    def fijar():
+        try:
+            with abrir() as conn:
+                reposicion._bloquear_producto(conn, otro)       # lo que `fijar_minimo_sucursal` hace primero…
+                tomado.set()
+                time.sleep(1.5)                                  # …y B, mientras tanto, hace lo suyo
+                reposicion.fijar_minimo_sucursal(conn, otro, centro, 9)
+                conn.commit()
+            salida["fijar"] = "ok"
+        except Exception as exc:  # noqa: BLE001 - se informa abajo
+            salida["fijar"] = f"error: {exc!r}"
+
+    def borrar():
+        try:
+            assert tomado.wait(timeout=10)
+            with abrir() as conn:
+                catalogo.delete_producto(conn, otro)
+                conn.commit()
+            salida["borrar"] = "ok"
+        except Exception as exc:  # noqa: BLE001 - se informa abajo
+            salida["borrar"] = f"error: {exc!r}"
+
+    hilos = [threading.Thread(target=fijar), threading.Thread(target=borrar)]
+    for h in hilos:
+        h.start()
+    for h in hilos:
+        h.join(timeout=60)
+    assert salida == {"fijar": "ok", "borrar": "ok"}, salida
+    with abrir() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM catalog_items WHERE id = ?", (otro,)).fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM item_branch_min_stock WHERE item_id = ?", (otro,)).fetchone()[0] == 0
