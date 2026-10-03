@@ -505,7 +505,7 @@ def test_el_csv_lista_si_el_minimo_es_propio(abrir_vto_ventas):
     for sucursal, esperado in ((centro, ("15.0", "si")), (norte, ("12.0", "no"))):
         lineas = c.get("/api/reportes/reposicion/export", params={"sucursal_id": sucursal}).text.splitlines()
         cabecera = lineas[0].split(",")
-        assert cabecera[-1] == "stock_minimo_propio"
+        assert cabecera[-2:] == ["stock_minimo_propio", "por_vencer"]
         fila = lineas[1].split(",")
         assert (fila[cabecera.index("stock_minimo")], fila[cabecera.index("stock_minimo_propio")]) == esperado
 
