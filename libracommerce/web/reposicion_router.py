@@ -32,7 +32,7 @@ from .margen_router import _csv
 
 _fastapi()
 from fastapi import APIRouter, Depends, HTTPException, Query  # noqa: E402
-from pydantic import BaseModel, ConfigDict  # noqa: E402
+from pydantic import BaseModel, ConfigDict, field_validator  # noqa: E402
 
 _CAMPOS = [
     "producto_id", "codigo", "nombre", "categoria", "unidad", "stock", "vencido", "en_camino", "en_camino_sin_sucursal",
@@ -196,6 +196,14 @@ class MinimoDeSucursal(BaseModel):
     """El cuerpo del `PUT` del mínimo por sucursal: el valor completo, `null` para borrar el propio y volver al global. Sin campos de más."""
     model_config = ConfigDict(extra="forbid")
     stock_minimo: float | None
+
+    @field_validator("stock_minimo", mode="before")
+    @classmethod
+    def _no_es_un_booleano(cls, valor):
+        """`true`/`false` no son un número: sin esto el modelo los convertiría en 1.0/0.0 antes de que el motor pueda rechazarlos."""
+        if isinstance(valor, bool):
+            raise ValueError("stock_minimo tiene que ser un número, no un booleano")
+        return valor
 
 
 def build_reposicion_minimos_router(

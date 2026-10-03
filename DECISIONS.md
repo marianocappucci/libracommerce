@@ -1078,12 +1078,13 @@ vuelve al global). Como las revisiones 0002 a 0004, **no está en `init_schema()
   de 0 a `MAX_STOCK_MINIMO` (mil millones: un seguro contra `1e400`, no una regla de negocio) y, si el producto tiene techo (`max_stock`), no mayor que él (el invariante de ADR-020). Como los demás
   `fijar_*`, no distingue servicios de productos (un servicio no entra en la reposición, así que su mínimo no se usa). Una sucursal dada de baja no admite fijar un valor, pero sí borrarlo.
   La inversa del invariante también se cuida: `fijar_parametros` rechaza un techo menor que algún mínimo por sucursal del producto.
+  Las dos escrituras (`fijar_parametros` y `fijar_minimo_sucursal`) se **serializan por producto** antes de validar: PostgreSQL toma el candado de la fila del producto (`SELECT ... FOR UPDATE`), SQLite un `UPDATE` sin efecto que toma el candado de escritura de la base. Sin eso, un techo de 50 y un mínimo de 80 a la vez pasaban cada uno contra lo que el otro no había confirmado.
 - **HTTP.** `build_reposicion_minimos_router`: `GET /{producto_id}/reposicion/minimos` y `PUT /{producto_id}/reposicion/minimos/{sucursal_id}` (cuerpo `{stock_minimo}`, número o `null`), con la
   misma estructura que `build_reposicion_parametros_router` (falla al construirse sin `dependencias_escribir`; 404 producto, 422 valor o sucursal inválidos, 503 sin la `0005`).
 
 **Bordes dichos en voz alta.** (1) La vista de toda la instancia no refleja los mínimos por sucursal: un producto puede no figurar «a pedir» en el total y sí en una sucursal. (2) `delete_producto`
 borra sus mínimos por sucursal antes (la FK lo exigiría); las sucursales no se borran nunca (baja lógica, ver `erp.catalogo`). (3) Si el global **baja**, los propios no se tocan; si el global
-**sube** por encima del techo se rechaza como siempre, pero los propios no se validan contra el global (pueden ser mayores o menores). (4) Un propio no se valida contra el techo de otra forma que
+**sube** por encima del techo se rechaza como siempre, pero los propios no se validan contra el global (pueden ser mayores o menores). (4) `catalogo.update_producto` (subir el mínimo global contra el techo) no toma ese candado: su carrera con el techo viene de antes y no se cambió acá. (5) Un propio no se valida contra el techo de otra forma que
 al fijarlo o al fijar el techo; una base con datos cruzados de antes de esta guarda sigue siendo regida por «el techo manda sobre el piso» (ADR-020).
 
 **Consecuencias.** Falta la pantalla (libra-ui) y exponer el router en los productos. El router de `GET /api/reportes/reposicion` no cambia de contrato salvo el campo nuevo por fila.

@@ -508,3 +508,75 @@ def test_el_csv_lista_si_el_minimo_es_propio(abrir_vto_ventas):
         assert cabecera[-1] == "stock_minimo_propio"
         fila = lineas[1].split(",")
         assert (fila[cabecera.index("stock_minimo")], fila[cabecera.index("stock_minimo_propio")]) == esperado
+
+
+def test_el_put_rechaza_los_booleanos_en_vez_de_convertirlos_en_numero(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    yerba, centro, _ = _escenario(abrir)
+    c = _cliente(abrir)
+    for crudo in (b'{"stock_minimo": true}', b'{"stock_minimo": false}'):
+        r = c.put(f"/api/productos/{yerba}/reposicion/minimos/{centro}", content=crudo, headers={"content-type": "application/json"})
+        assert r.status_code == 422, crudo
+    assert _filas_propias(abrir, yerba) == []                                                 # ni 1.0 ni 0.0
+    assert c.put(f"/api/productos/{yerba}/reposicion/minimos/{centro}", json={"stock_minimo": 0}).status_code == 200   # el 0 numérico sigue valiendo
+
+
+# ── Concurrencia: el techo y el mínimo por sucursal se validan uno contra el otro ──
+
+
+def _escribir_y_esperar(abrir, barrera, salida: dict, nombre: str, operacion) -> None:
+    """Un hilo: abre su conexión, hace `operacion` (que valida y escribe), espera al otro antes de confirmar y anota cómo terminó."""
+    import threading
+
+    try:
+        with abrir() as conn:
+            try:
+                operacion(conn)
+            except ValueError:
+                conn.rollback()
+                salida[nombre] = "rechazada"
+                return
+            try:
+                barrera.wait(timeout=2)
+            except threading.BrokenBarrierError:
+                pass
+            conn.commit()
+            salida[nombre] = "confirmada"
+    except Exception as exc:  # noqa: BLE001 - se informa en el test
+        salida[nombre] = f"error: {exc!r}"
+
+
+def test_un_techo_y_un_minimo_por_sucursal_a_la_vez_nunca_quedan_cruzados(abrir_vto_ventas):
+    """Sin serializar, cada escritura valida contra lo que la otra todavía no confirmó y las dos pasan (mínimo 80, techo 50). Cada hilo, ya validada y escrita su
+    parte, espera al otro antes de confirmar: sin candado los dos llegan juntos a la barrera y confirman; con el candado del producto el segundo no puede ni validar
+    hasta que el primero confirma (la barrera se rompe por el plazo, y el primero confirma solo), y después ve lo del primero y se rechaza."""
+    import threading
+
+    abrir = abrir_vto_ventas
+    yerba, centro, _ = _escenario(abrir, minimo=5.0)
+
+    def cruzado() -> bool:
+        with abrir() as conn:
+            techo = conn.execute("SELECT max_stock FROM catalog_items WHERE id = ?", (yerba,)).fetchone()[0]
+            minimos = [float(f[0]) for f in conn.execute("SELECT min_stock FROM item_branch_min_stock WHERE item_id = ?", (yerba,)).fetchall()]
+        return techo is not None and any(m > float(techo) for m in minimos)
+
+    for ronda in range(4):
+        with abrir() as conn:                                  # cada ronda parte limpia
+            conn.execute("DELETE FROM item_branch_min_stock WHERE item_id = ?", (yerba,))
+            conn.execute("UPDATE catalog_items SET max_stock = NULL WHERE id = ?", (yerba,))
+            conn.commit()
+        barrera = threading.Barrier(2)
+        salida: dict[str, str] = {}
+
+        hilos = [
+            threading.Thread(target=_escribir_y_esperar, args=(abrir, barrera, salida, "minimo", lambda c: reposicion.fijar_minimo_sucursal(c, yerba, centro, 80))),
+            threading.Thread(target=_escribir_y_esperar, args=(abrir, barrera, salida, "techo", lambda c: reposicion.fijar_parametros(c, yerba, plazo_entrega_dias=None, stock_maximo=50))),
+        ]
+        for h in hilos:
+            h.start()
+        for h in hilos:
+            h.join(timeout=60)
+        assert not any(v.startswith("error") for v in salida.values()), salida
+        assert not cruzado(), f"ronda {ronda}: quedó un mínimo por sucursal por encima del techo ({salida})"
+        assert sorted(salida.values()) == ["confirmada", "rechazada"], salida                # exactamente una gana

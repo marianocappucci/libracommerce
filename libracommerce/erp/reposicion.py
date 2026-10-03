@@ -89,6 +89,7 @@ Agrupa por producto, no por variante (`variantes` dice cuántas activas tiene). 
 from __future__ import annotations
 
 import datetime
+import sqlite3
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from fractions import Fraction
 
@@ -494,6 +495,18 @@ def _fila_del_producto(conn, item_id: int):
     return filas[0]
 
 
+def _bloquear_producto(conn, item_id: int) -> None:
+    """Serializa las escrituras de reposición de UN producto (techo, plazo, proveedor y mínimos por sucursal) hasta el fin de la transacción. Hace falta porque
+    `fijar_parametros` y `fijar_minimo_sucursal` validan el invariante «mínimo <= techo» con lo que leyeron: dos a la vez, cada una sobre lo que la otra todavía no
+    confirmó, dejarían un mínimo de 80 y un techo de 50. Se toma ANTES de leer lo que se valida. PostgreSQL: el candado de la fila del producto (`FOR UPDATE`); bajo
+    `READ COMMITTED` la lectura que sigue ya ve lo que confirmó quien lo tenía. SQLite (sólo pruebas): un `UPDATE` sin efecto toma el candado de escritura de la
+    base, que ya serializa a los escritores (el mismo recurso que `reposicion_ordenes._serializar`). Un producto que no existe no bloquea nada: lo dice el que llama."""
+    if isinstance(conn, sqlite3.Connection):
+        conn.execute("UPDATE catalog_items SET min_stock = min_stock WHERE id = ?", (item_id,))
+    else:
+        conn.execute("SELECT id FROM catalog_items WHERE id = ? FOR UPDATE", (item_id,)).fetchall()
+
+
 def _exigir_parametros(conn) -> None:
     if not tiene_parametros(conn):
         raise SinRevision("Falta la revisión 0003_parametros_reposicion del motor: corré `libracommerce-migrar upgrade` "
@@ -525,6 +538,7 @@ def fijar_parametros(conn, item_id: int, *, plazo_entrega_dias, stock_maximo, pr
     el plazo, un entero de 1 a `MAX_PLAZO_ENTREGA_DIAS`; el techo, un número mayor que 0 y, si el producto tiene
     mínimo, no menor que él. `ValueError` con el motivo si no; `ProductoNoEncontrado`, `SinRevision`. No commitea."""
     _exigir_parametros(conn)
+    _bloquear_producto(conn, item_id)
     p = _fila_del_producto(conn, item_id)
     if plazo_entrega_dias is not None:
         _entero_en_rango("plazo_entrega_dias", plazo_entrega_dias, MAX_PLAZO_ENTREGA_DIAS)
@@ -594,8 +608,9 @@ def fijar_minimo_sucursal(conn, item_id: int, sucursal_id: int, stock_minimo) ->
     """Fija el stock mínimo de un producto en una sucursal; `None` borra el propio y esa sucursal vuelve al global. `0` es válido y significa «no me avises»
     en esa sucursal. Valida antes de escribir: la sucursal existe (y está activa para fijar un valor: borrar un propio de una sucursal dada de baja se
     permite, para poder limpiarlo), `stock_minimo` es un número finito mayor o igual que 0 y, si el producto tiene techo (`max_stock`), no lo pasa (el mismo
-    invariante de ADR-020). `ValueError` con el motivo si no; `ProductoNoEncontrado`, `SinRevision`. Devuelve `minimos_por_sucursal_de`. No commitea."""
+    invariante de ADR-020). `ValueError` con el motivo si no; `ProductoNoEncontrado`, `SinRevision`. Devuelve `minimos_por_sucursal_de`. Toma el candado del producto (`_bloquear_producto`) antes de validar, como `fijar_parametros`. No commitea."""
     _exigir_minimos_sucursal(conn)
+    _bloquear_producto(conn, item_id)
     p = _fila_del_producto(conn, item_id)
     if isinstance(sucursal_id, bool) or not isinstance(sucursal_id, int):
         raise ValueError(f"sucursal_id tiene que ser un entero: {sucursal_id!r}")
