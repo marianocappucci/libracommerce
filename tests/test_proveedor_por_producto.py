@@ -230,7 +230,7 @@ def test_el_router_lee_y_escribe_el_proveedor_y_la_clave_ausente_no_lo_toca(abri
     assert c.get("/api/reportes/reposicion", params={"proveedor_id": prov, "solo_a_pedir": "false"}).json()["proveedor_id"] == prov
     assert c.get("/api/reportes/reposicion", params={"proveedor_id": 99999}).status_code == 422
     csv = c.get("/api/reportes/reposicion/export", params={"solo_a_pedir": "false"}).text.splitlines()
-    assert csv[0].endswith(",proveedor_id,proveedor,factor_estacional,stock_minimo_propio,por_vencer") and csv[1].endswith(f",{prov},Distribuidora Norte,,no,0.0")
+    assert csv[0].endswith(",proveedor_id,proveedor,factor_estacional,stock_minimo_propio,por_vencer") and csv[1].endswith(f",{prov},Distribuidora Norte,,no,0")
 
 
 def test_el_router_traduce_los_ids_del_producto_con_los_ganchos_de_compras(abrir_vto_ventas):

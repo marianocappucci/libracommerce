@@ -3,7 +3,8 @@
 Hoy una sola: `sin_booleanos`. Los campos `int`/`float` de pydantic convierten `true` en `1` y `false` en `0` (en modo laxo, que es el de FastAPI) antes de que el
 motor, que en varios lugares rechaza el booleano a propósito (`isinstance(valor, bool)`), llegue a verlo: el cuerpo `{"proveedor_id": true}` entraba como el
 proveedor 1. Los campos `Decimal` ya rechazan el booleano solos, y los `bool` de verdad y los `StrictInt` no lo necesitan: **sólo** hay que aplicarlo a un campo
-`int`/`float` (o a una lista o un diccionario de ellos) donde un `1` o un `0` cambian algo del negocio.
+`int`/`float` (o a una lista o un diccionario de ellos) donde un `1` o un `0` cambian algo del negocio. Lo que quede sin aplicar lo encuentra
+`libracommerce.testing.campos_numericos_que_aceptan_booleano(app)` (ADR-028), que cada producto corre sobre su app completa.
 """
 
 from __future__ import annotations

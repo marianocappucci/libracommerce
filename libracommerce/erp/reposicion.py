@@ -91,7 +91,7 @@ saldo acumulado de los lotes no vencidos hasta `j` inclusive (orden por vencimie
 `max(0, máx_j (C_j − r × d_j))` sobre los `j` con `d_j <= H`: el **máximo** del acumulado y no la suma (lo que se pierde de un lote se vendería, si no, del siguiente), y por construcción nunca pasa de la suma de los
 saldos de esos lotes. Sólo cuentan los saldos positivos de los depósitos que se miran; el saldo «sin lote» (sin fecha) no cuenta, y un lote con `vence < hoy` ya va en `vencido` y no se duplica acá (con
 `descontar_vencido=False` tampoco entra en `por_vencer`). La aritmética es de racionales exactos (`Fraction`): un resto decimal no pide una unidad de más ni de menos, y `sugerido`, el mínimo y el techo se calculan con
-la pérdida exacta; `por_vencer` se informa redondeado hacia arriba a la escala del informe. **Borde:** un producto **sin ventas** (`r = 0`) pierde completo lo que vence dentro del horizonte; si además tiene un mínimo > 0,
+la pérdida exacta; `por_vencer` se informa redondeado hacia arriba a la escala de la unidad, la misma de `sugerido` (entero para una unidad entera, `decimal_scale` o 3 decimales para una fraccionable: ADR-028). **Borde:** un producto **sin ventas** (`r = 0`) pierde completo lo que vence dentro del horizonte; si además tiene un mínimo > 0,
 se sugiere reponerlo (es lo que dice la cuenta: lo que va a vencer sin venderse no sirve de colchón). Límites: supone que la rotación de la ventana se mantiene todo el horizonte, que el stock se vende por FEFO y
 que lo «sin lote» no compite con los lotes. Apagado por default porque cambia números que hoy se ven; sin la opción, `por_vencer` es 0 y la cuenta es la de siempre. Un producto sin marcar, o una base sin la revisión `0002`, no cambia en nada.
 
@@ -454,7 +454,8 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
         pid = p["id"]
         escala = (int(p["decimal_scale"] or 0) or _ESCALA_FRACCION) if p["allows_fraction"] else 0
         # Todas las cantidades se informan con la escala de la unidad (una de 6 decimales no puede mostrar 0,0004 como
-        # 0,0); una entera, o de menos de 3, conserva los 3 de siempre por si el saldo trae fracción. `sugerido` va con `escala`.
+        # 0,0); una entera, o de menos de 3, conserva los 3 de siempre por si el saldo trae fracción. `sugerido` y `por_vencer` van con `escala`
+        # (ADR-028: la pérdida de un lote se lee con los decimales de la unidad, no con los 3 mínimos del informe).
         informe = max(escala, _ESCALA_MINIMA_DE_INFORME)
         stock = saldos.get(pid, _CERO)
         pedido = en_camino.get(pid, _CERO)
@@ -500,7 +501,7 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
         filas.append({
             "producto_id": pid, "codigo": p["codigo"], "nombre": p["name"], "unidad": p["unit_code"],
             "categoria": p["categoria"], "stock": _cantidad(stock, informe),
-            "vencido": _cantidad(vencido, informe), "por_vencer": _cantidad(_techo(por_vencer, informe), informe),
+            "vencido": _cantidad(vencido, informe), "por_vencer": _cantidad(_techo(por_vencer, escala), escala),
             "en_camino": _cantidad(pedido, informe),
             "en_camino_sin_sucursal": _cantidad(en_camino_sin_sucursal.get(pid, _CERO), informe),
             "stock_minimo": _cantidad(minimo, informe), "stock_minimo_propio": minimo_propio,
