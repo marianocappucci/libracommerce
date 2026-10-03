@@ -39,6 +39,7 @@ from typing import Any
 from ..erp import catalogo, lotes, ventas
 from ..erp.hooks import SIN_GANCHOS, Hooks
 from . import fastapi as _fastapi
+from ._validacion import sin_booleanos
 from .catalogo_router import Conexion, _deps
 
 _fastapi()
@@ -65,6 +66,9 @@ class ItemPayload(BaseModel):
     #: Restolibra hoy.
     variante_id: int | None = None
 
+    #: `true`/`false` no son un número (ADR-027): pydantic los convertiría en 1 y 0 (una cantidad, un precio o el producto 1).
+    _no_son_booleanos = sin_booleanos("qty", "precio", "producto_id", "variante_id")
+
 
 class PagoPayload(BaseModel):
     #: 🔴 **Se valida.** Un medio inventado entraba, creaba su movimiento de
@@ -85,6 +89,8 @@ class PagoPayload(BaseModel):
     #: `INSERT` idéntico al de hoy para Contalibra y Restolibra, que no la
     #: mandan.
     recibido: float | None = None
+
+    _no_son_booleanos = sin_booleanos("monto", "recibido")
 
     @field_validator("medio")
     @classmethod
@@ -129,11 +135,15 @@ class VentaPayload(BaseModel):
     #: siempre: el motor resuelve el depósito por defecto.
     deposito_id: int | None = None
 
+    _no_son_booleanos = sin_booleanos("descuento", "cliente_id", "deposito_id")
+
 
 class DevolucionLinea(BaseModel):
     #: El id de `sale_items`, no la posición: acá la línea tiene id estable.
     sale_item_id: int
     cantidad: float
+
+    _no_son_booleanos = sin_booleanos("sale_item_id", "cantidad")
 
 
 class DevolucionPayload(BaseModel):
@@ -141,6 +151,8 @@ class DevolucionPayload(BaseModel):
     deposito_id: int
     #: Por dónde vuelve la plata; no tiene por qué ser el medio que cobró.
     medio_pago: str = "efectivo"
+
+    _no_son_booleanos = sin_booleanos("deposito_id")
 
     @field_validator("medio_pago")
     @classmethod
@@ -156,11 +168,15 @@ class PlanSalidaLinea(BaseModel):
     #: La variante del catálogo, o `None` (el producto sin variantes).
     variante_id: int | None = None
 
+    _no_son_booleanos = sin_booleanos("producto_id", "qty", "variante_id")
+
 
 class PlanSalidaPayload(BaseModel):
     items: list[PlanSalidaLinea]
     #: El depósito del que saldría la venta: el mismo `deposito_id` de `VentaPayload`. `None` = el por defecto.
     deposito_id: int | None = None
+
+    _no_son_booleanos = sin_booleanos("deposito_id")
 
 
 def _nombre_de_cliente_default(cliente_id: int) -> str | None:

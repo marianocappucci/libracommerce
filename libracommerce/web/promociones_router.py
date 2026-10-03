@@ -18,6 +18,7 @@ from typing import Literal
 
 from ..erp import promociones as promos
 from . import fastapi as _fastapi
+from ._validacion import sin_booleanos
 from .catalogo_router import Conexion, _deps
 
 _fastapi()
@@ -28,6 +29,9 @@ from pydantic import BaseModel  # noqa: E402
 class ItemPromocionPayload(BaseModel):
     producto_id: int
     cantidad: float
+
+    #: `true`/`false` no son un número (ADR-027): pydantic los convertiría en 1 y 0.
+    _no_son_booleanos = sin_booleanos("producto_id", "cantidad")
 
 
 class PromocionPayload(BaseModel):
@@ -42,11 +46,15 @@ class PromocionPayload(BaseModel):
     hasta: str = ""
     activa: bool = True
 
+    _no_son_booleanos = sin_booleanos("paga", "precio")
+
 
 class LineaCalculoPayload(BaseModel):
     producto_id: int | None = None
     qty: float
     precio: float
+
+    _no_son_booleanos = sin_booleanos("producto_id", "qty", "precio")
 
 
 class CalculoPayload(BaseModel):

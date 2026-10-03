@@ -19,6 +19,7 @@ from typing import Any
 
 from ..erp import compras
 from . import fastapi as _fastapi
+from ._validacion import sin_booleanos
 from .catalogo_router import Conexion, _deps
 
 _fastapi()
@@ -32,6 +33,9 @@ class OrdenCreatePayload(BaseModel):
     proveedor_id: int
     branch_id: int | None = None
 
+    #: `true`/`false` no son un id (ADR-027): pydantic los convertiría en 1 y 0 (los `Decimal` de abajo ya los rechazan solos).
+    _no_son_booleanos = sin_booleanos("proveedor_id", "branch_id")
+
 
 class OrdenItemPayload(BaseModel):
     item_id: int
@@ -39,11 +43,15 @@ class OrdenItemPayload(BaseModel):
     unit_cost: Decimal
     tax_rate: Decimal = Decimal("0")
 
+    _no_son_booleanos = sin_booleanos("item_id")
+
 
 class RecepcionCreatePayload(BaseModel):
     proveedor_id: int
     purchase_order_id: int | None = None
     document_reference: str | None = None
+
+    _no_son_booleanos = sin_booleanos("proveedor_id", "purchase_order_id")
 
 
 class RecepcionItemPayload(BaseModel):
@@ -53,10 +61,14 @@ class RecepcionItemPayload(BaseModel):
     lot_code: str | None = None
     expires_at: datetime | None = None
 
+    _no_son_booleanos = sin_booleanos("item_id")
+
 
 class ConfirmarPayload(BaseModel):
     #: El `id` del depósito de destino (`libracommerce.web.catalogo_router.build_depositos_router`).
     deposito_id: int
+
+    _no_son_booleanos = sin_booleanos("deposito_id")
 
 
 def _sin_traduccion(_conn: Any, id_: int) -> int:
