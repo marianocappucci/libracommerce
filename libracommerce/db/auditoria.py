@@ -275,7 +275,10 @@ class RepositorioAuditado:
                 json.dumps(cambios, ensure_ascii=False) if cambios else None,
             ),
         )
-        self._conn.commit()
+        # La confirmación la decide el repositorio de adentro (ADR-028): fuera de `transaction()` confirma, adentro no. Con un `self._conn.commit()` a secas, cada fila del log
+        # confirmaba TODO lo escrito hasta ahí en medio de la transacción (soltaba el candado, dejaba grabado lo que después se revertía) y la auditoría de una escritura
+        # que falla en el segundo paso quedaba registrada. Un repositorio sin `_commit` (no es el de este motor) conserva el commit de siempre.
+        getattr(self._repo, "_commit", self._conn.commit)()
 
 
 class ActividadRepository:
