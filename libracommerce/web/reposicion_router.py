@@ -32,14 +32,43 @@ from .margen_router import _csv
 
 _fastapi()
 from fastapi import APIRouter, Depends, HTTPException, Query  # noqa: E402
-from pydantic import BaseModel, ConfigDict  # noqa: E402
+from pydantic import BaseModel, ConfigDict, field_validator  # noqa: E402
 
 _CAMPOS = [
     "producto_id", "codigo", "nombre", "categoria", "unidad", "stock", "vencido", "en_camino", "en_camino_sin_sucursal",
     "stock_minimo", "unidades_vendidas", "dias_con_stock", "rotacion_diaria", "cobertura_dias", "sugerido",
     "motivo", "sin_ventas", "posible_quiebre", "variantes", "plazo_entrega_dias", "plazo_propio", "stock_maximo",
-    "limitado_por_maximo", "proveedor_id", "proveedor", "factor_estacional",
+    "limitado_por_maximo", "proveedor_id", "proveedor", "factor_estacional", "stock_minimo_propio", "por_vencer",
 ]
+
+
+def _atajar(operacion):
+    """Corre `operacion` y traduce los errores del motor: 404 (producto), 503 (falta una revisión) y 422 (valor inválido)."""
+    try:
+        return operacion()
+    except reposicion.ProductoNoEncontrado as e:
+        raise HTTPException(404, str(e)) from e
+    except reposicion.SinRevision as e:
+        raise HTTPException(503, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+
+
+def _sin_booleanos(*campos: str):
+    """Un `field_validator(..., mode="before")` que rechaza `true`/`false` en los `campos` numéricos (ADR-026). Sin esto, pydantic convierte el booleano en `1`/`0` (o
+    `1.0`/`0.0`) antes de que el motor, que sí los rechaza, llegue a verlo. Mira también dentro de una lista y de un diccionario (`producto_ids`, `topes`). Un `0` numérico,
+    un entero o un texto numérico pasan igual que antes: la conversión que sigue es la de siempre."""
+    def _validar(cls, valor, info):
+        if isinstance(valor, dict):
+            adentro = [*valor, *valor.values()]
+        elif isinstance(valor, (list, tuple)):
+            adentro = valor
+        else:
+            adentro = [valor]
+        if any(isinstance(v, bool) for v in adentro):
+            raise ValueError(f"{info.field_name} tiene que ser un número, no un booleano")
+        return valor
+    return field_validator(*campos, mode="before")(classmethod(_validar))
 
 
 class ParametrosDeReposicion(BaseModel):
@@ -49,6 +78,8 @@ class ParametrosDeReposicion(BaseModel):
     stock_maximo: float | None
     #: Opcional: si la clave no viene, el proveedor queda como estaba; `null` lo borra (ADR-021).
     proveedor_id: int | None = None
+
+    _no_son_booleanos = _sin_booleanos("plazo_entrega_dias", "stock_maximo", "proveedor_id")
 
 
 def build_reposicion_router(
@@ -63,7 +94,8 @@ def build_reposicion_router(
     (`erp.reposicion.MAX_*`); `sucursal_id` (sin él, toda la instancia), `categoria`, `producto_id` y `solo_a_pedir`
     (`true` por default: sólo los de `sugerido > 0`) y `descontar_vencido` (`true` por default: lo que está en lotes
     vencidos no cuenta como stock) y `proveedor_id` (sólo los productos de ese proveedor habitual, ADR-021) y `estacionalidad` (`false` por default: ajusta la proyección por lo que
-    pasó hace un año, ADR-023). `resolver_proveedor(conn, proveedor_id) -> party_id` y
+    pasó hace un año, ADR-023) y `descontar_por_vencer` (`false` por default: resta además del stock lo que, de los lotes que vencen dentro del horizonte, no llega a venderse antes, ADR-025;
+    cada fila trae `por_vencer`). `resolver_proveedor(conn, proveedor_id) -> party_id` y
     `proveedor_de(conn, party_id) -> proveedor_id` son los mismos ganchos que `OpcionesCompras`, para un producto cuyos proveedores no son el `party_id`
     del motor (VentaLibra): el `proveedor_id` del filtro y el de cada fila hablan en los ids del producto. Sin ellos, identidad. Un parámetro inválido, o una sucursal que no existe, es 422."""
     abrir, _ = _deps(None, conexion)
@@ -71,7 +103,8 @@ def build_reposicion_router(
 
     def _reporte(dias_rotacion: int, dias_cobertura: int, plazo_entrega_dias: int, sucursal_id: int | None,
                  categoria: str | None, producto_id: int | None, solo_a_pedir: bool,
-                 descontar_vencido: bool, proveedor_id: int | None, estacionalidad: bool) -> list[dict]:
+                 descontar_vencido: bool, proveedor_id: int | None, estacionalidad: bool,
+                 descontar_por_vencer: bool) -> list[dict]:
         try:
             with abrir() as conn:
                 party_id = resolver_proveedor(conn, proveedor_id) if proveedor_id is not None else None
@@ -80,6 +113,7 @@ def build_reposicion_router(
                     plazo_entrega_dias=plazo_entrega_dias, sucursal_id=sucursal_id, categoria=categoria or None,
                     producto_id=producto_id, solo_a_pedir=solo_a_pedir,
                     descontar_vencido=descontar_vencido, proveedor_id=party_id, estacionalidad=estacionalidad,
+                    descontar_por_vencer=descontar_por_vencer,
                 )
                 # El `proveedor_id` de cada fila, en los ids del producto.
                 return [dict(f, proveedor_id=proveedor_de(conn, f["proveedor_id"]) if f["proveedor_id"] is not None else None)
@@ -94,14 +128,15 @@ def build_reposicion_router(
                                                 le=reposicion.MAX_PLAZO_ENTREGA_DIAS),
                 sucursal_id: int | None = None, categoria: str | None = None, producto_id: int | None = None,
                 solo_a_pedir: bool = True, descontar_vencido: bool = True,
-                proveedor_id: int | None = None, estacionalidad: bool = False):
+                proveedor_id: int | None = None, estacionalidad: bool = False, descontar_por_vencer: bool = False):
         productos = _reporte(dias_rotacion, dias_cobertura, plazo_entrega_dias, sucursal_id, categoria, producto_id,
-                             solo_a_pedir, descontar_vencido, proveedor_id, estacionalidad)
+                             solo_a_pedir, descontar_vencido, proveedor_id, estacionalidad, descontar_por_vencer)
         return {
             "dias_rotacion": dias_rotacion, "dias_cobertura": dias_cobertura,
             "plazo_entrega_dias": plazo_entrega_dias, "sucursal_id": sucursal_id, "categoria": categoria,
             "producto_id": producto_id, "solo_a_pedir": solo_a_pedir, "descontar_vencido": descontar_vencido,
             "proveedor_id": proveedor_id, "estacionalidad": estacionalidad,
+            "descontar_por_vencer": descontar_por_vencer,
             "resumen": {
                 "productos": len(productos),
                 "a_pedir": sum(1 for p in productos if p["sugerido"] > 0),
@@ -118,9 +153,9 @@ def build_reposicion_router(
                                                  le=reposicion.MAX_PLAZO_ENTREGA_DIAS),
                  sucursal_id: int | None = None, categoria: str | None = None, producto_id: int | None = None,
                  solo_a_pedir: bool = True, descontar_vencido: bool = True,
-                 proveedor_id: int | None = None, estacionalidad: bool = False):
+                 proveedor_id: int | None = None, estacionalidad: bool = False, descontar_por_vencer: bool = False):
         productos = _reporte(dias_rotacion, dias_cobertura, plazo_entrega_dias, sucursal_id, categoria, producto_id,
-                             solo_a_pedir, descontar_vencido, proveedor_id, estacionalidad)
+                             solo_a_pedir, descontar_vencido, proveedor_id, estacionalidad, descontar_por_vencer)
         return _csv(productos, _CAMPOS, f"reposicion_{datetime.date.today().isoformat()}.csv")
 
     return router
@@ -147,16 +182,6 @@ def build_reposicion_parametros_router(
                          "Depends(...): no se expone una escritura del catálogo sin autorización")
     abrir, _ = _deps(None, conexion)
     router = APIRouter(prefix=prefix, tags=["reposicion"])
-
-    def _atajar(operacion):
-        try:
-            return operacion()
-        except reposicion.ProductoNoEncontrado as e:
-            raise HTTPException(404, str(e)) from e
-        except reposicion.SinRevision as e:
-            raise HTTPException(503, str(e)) from e
-        except ValueError as e:
-            raise HTTPException(422, str(e)) from e
 
     def _en_ids_del_producto(conn, parametros: dict) -> dict:
         """El `proveedor_id` de la respuesta, en los ids del producto (identidad sin `proveedor_de`)."""
@@ -190,6 +215,52 @@ def build_reposicion_parametros_router(
     return router
 
 
+class MinimoDeSucursal(BaseModel):
+    """El cuerpo del `PUT` del mínimo por sucursal: el valor completo, `null` para borrar el propio y volver al global. Sin campos de más."""
+    model_config = ConfigDict(extra="forbid")
+    stock_minimo: float | None
+
+    _no_es_un_booleano = _sin_booleanos("stock_minimo")   # `true`/`false` no son un número: el modelo los convertiría en 1.0/0.0
+
+
+def build_reposicion_minimos_router(
+    *,
+    conexion: Conexion | None = None,
+    prefix: str = "/api/productos",
+    dependencias_leer: Sequence[Any] | None = None,
+    dependencias_escribir: Sequence[Any] | None = None,
+):
+    """`GET /{producto_id}/reposicion/minimos` y `PUT /{producto_id}/reposicion/minimos/{sucursal_id}` (ADR-024): el stock mínimo de un producto en cada sucursal.
+    `GET` devuelve `{producto_id, sucursales: [{sucursal_id, sucursal, stock_minimo, stock_minimo_propio, stock_minimo_global}]}` (todas las sucursales activas;
+    `stock_minimo` es el que usa la reposición ahí: el propio o, sin él, el global). El `PUT` lleva `{stock_minimo}`: un número mayor o igual que 0 (`0` es «no avisar»
+    en esa sucursal) o `null` para borrar el propio y volver al global; responde lo mismo que el `GET`. 404 si el producto no existe, 422 si la sucursal no existe o el
+    valor no es válido, 503 sin la revisión `0005`. **Escribe el catálogo, así que la factory FALLA al construirse (`ValueError`) sin `dependencias_escribir`**
+    (una lista no vacía de `Depends(...)`); `dependencias_leer` es opcional. Va junto a `build_reposicion_parametros_router` (mismo prefijo, rutas distintas)."""
+    if not isinstance(dependencias_escribir, (list, tuple)) or not dependencias_escribir:
+        raise ValueError("build_reposicion_minimos_router necesita dependencias_escribir, una lista no vacía de "
+                         "Depends(...): no se expone una escritura del catálogo sin autorización")
+    abrir, _ = _deps(None, conexion)
+    router = APIRouter(prefix=prefix, tags=["reposicion"])
+
+    @router.get("/{producto_id}/reposicion/minimos", dependencies=list(dependencias_leer or []))
+    def leer(producto_id: int):
+        def _op():
+            with abrir() as conn:
+                return {"producto_id": producto_id, "sucursales": reposicion.minimos_por_sucursal_de(conn, producto_id)}
+        return _atajar(_op)
+
+    @router.put("/{producto_id}/reposicion/minimos/{sucursal_id}", dependencies=list(dependencias_escribir))
+    def fijar(producto_id: int, sucursal_id: int, cuerpo: MinimoDeSucursal):
+        def _op():
+            with abrir() as conn:
+                sucursales = reposicion.fijar_minimo_sucursal(conn, producto_id, sucursal_id, cuerpo.stock_minimo)
+                conn.commit()
+                return {"producto_id": producto_id, "sucursales": sucursales}
+        return _atajar(_op)
+
+    return router
+
+
 class GenerarOrdenes(BaseModel):
     """El cuerpo del `POST` que genera las órdenes en borrador: los parámetros de la reposición (los que no vienen, los defaults), la clave
     de la operación y, opcionalmente, los productos a pedir. Sin campos de más."""
@@ -206,6 +277,9 @@ class GenerarOrdenes(BaseModel):
     topes: dict[int, float] | None = None
     descontar_vencido: bool = True
     estacionalidad: bool = False
+    descontar_por_vencer: bool = False
+
+    _no_son_booleanos = _sin_booleanos("dias_rotacion", "dias_cobertura", "plazo_entrega_dias", "sucursal_id", "proveedor_id", "producto_ids", "topes")
 
 
 def build_reposicion_ordenes_router(
@@ -246,6 +320,7 @@ def build_reposicion_ordenes_router(
                     numerador=numerador, dias_rotacion=cuerpo.dias_rotacion, dias_cobertura=cuerpo.dias_cobertura,
                     plazo_entrega_dias=cuerpo.plazo_entrega_dias, sucursal_id=cuerpo.sucursal_id, categoria=cuerpo.categoria or None,
                     proveedor_id=party, descontar_vencido=cuerpo.descontar_vencido, estacionalidad=cuerpo.estacionalidad,
+                    descontar_por_vencer=cuerpo.descontar_por_vencer,
                 )
                 # Los proveedores de las órdenes, en los ids del producto, ANTES de confirmar (si el gancho falla no queda nada escrito).
                 resultado["ordenes"] = [

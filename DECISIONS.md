@@ -1058,3 +1058,89 @@ multiplica la proyección: `necesidad = unidades × H / días_de_muestra × fact
 
 **Consecuencias.** Falta el interruptor y la columna en la reposición (libra-ui) y activarlo en VentaLibra. Sigue diferido: `min_stock` por sucursal y descontar lo que vence dentro del horizonte.
 
+## ADR-024 — Reposición v2: stock mínimo por sucursal (2026-10-03, v0.36.0)
+
+**Contexto.** `catalog_items.min_stock` es global: la reposición por sucursal lo usaba como piso de todas por igual, aunque una sucursal chica y una grande no necesitan el mismo colchón de
+un mismo producto. Diferido desde ADR-017 y ADR-023.
+
+**Decisión.** Tabla nueva **`item_branch_min_stock(item_id, branch_id, min_stock NUMERIC NOT NULL CHECK (min_stock >= 0), PRIMARY KEY (item_id, branch_id))`**, con FK a `catalog_items` y a
+`branches`, creada por la revisión **`0005_min_stock_por_sucursal`** (aditiva, vacía, idempotente por introspección, el mismo SQL en SQLite y PostgreSQL; el downgrade baja la tabla y cada sucursal
+vuelve al global). Como las revisiones 0002 a 0004, **no está en `init_schema()`**: esa función y su fixture congelada (`test_schema_congelado`) no se tocan.
+
+- **Resolución del piso.** En `sugerencia_reposicion` con `sucursal_id`, el piso del producto es el de esa sucursal si tiene fila y, si no, el global. **Sin `sucursal_id` (toda la instancia) usa
+  siempre el global**, como hasta ahora: no se suman ni se promedian los mínimos de las sucursales (hablan del stock de cada una, no del total) y el global sigue siendo «el mínimo del producto».
+  `0` sigue siendo «no me avises», también como mínimo propio (una sucursal puede apagar el aviso de algo que el global vigila; borrar el propio —`None`— y poner `0` son cosas distintas).
+- **Lo que devuelve.** Cada fila trae `stock_minimo` **ya resuelto** (mismo nombre y tipo que antes) y `stock_minimo_propio` (`bool`: viene de la sucursal). El CSV agrega la columna
+  `stock_minimo_propio` **al final**, para no correr las columnas de quien lo lee por posición. Sin la revisión `0005` la consulta es la de siempre y `stock_minimo_propio` es `False`. La generación
+  de órdenes en borrador usa `sugerencia_reposicion` y hereda el cambio.
+- **API del motor.** `minimos_por_sucursal_de(conn, item_id)` lista **todas las sucursales activas** con `stock_minimo` (el efectivo), `stock_minimo_propio` y `stock_minimo_global` (la referencia).
+  `fijar_minimo_sucursal(conn, item_id, sucursal_id, stock_minimo)`: `None` borra el propio. Valida: el producto existe (`ProductoNoEncontrado`), la sucursal existe (`ValueError`), un número finito
+  de 0 a `MAX_STOCK_MINIMO` (mil millones: un seguro contra `1e400`, no una regla de negocio) y, si el producto tiene techo (`max_stock`), no mayor que él (el invariante de ADR-020). Como los demás
+  `fijar_*`, no distingue servicios de productos (un servicio no entra en la reposición, así que su mínimo no se usa). Una sucursal dada de baja no admite fijar un valor, pero sí borrarlo.
+  La inversa del invariante también se cuida: `fijar_parametros` rechaza un techo menor que algún mínimo por sucursal del producto.
+  Las dos escrituras (`fijar_parametros` y `fijar_minimo_sucursal`) se **serializan por producto** antes de validar: PostgreSQL toma el candado de la fila del producto (`SELECT ... FOR UPDATE`), SQLite un `UPDATE` sin efecto que toma el candado de escritura de la base. Sin eso, un techo de 50 y un mínimo de 80 a la vez pasaban cada uno contra lo que el otro no había confirmado.
+- **HTTP.** `build_reposicion_minimos_router`: `GET /{producto_id}/reposicion/minimos` y `PUT /{producto_id}/reposicion/minimos/{sucursal_id}` (cuerpo `{stock_minimo}`, número o `null`), con la
+  misma estructura que `build_reposicion_parametros_router` (falla al construirse sin `dependencias_escribir`; 404 producto, 422 valor o sucursal inválidos, 503 sin la `0005`).
+
+**Bordes dichos en voz alta.** (1) La vista de toda la instancia no refleja los mínimos por sucursal: un producto puede no figurar «a pedir» en el total y sí en una sucursal. (2) `delete_producto`
+borra sus mínimos por sucursal antes (la FK lo exigiría); las sucursales no se borran nunca (baja lógica, ver `erp.catalogo`). (3) Si el global **baja**, los propios no se tocan; si el global
+**sube** por encima del techo se rechaza como siempre, pero los propios no se validan contra el global (pueden ser mayores o menores). (4) `catalogo.update_producto` (subir el mínimo global contra el techo) no toma ese candado: su carrera con el techo viene de antes y no se cambió acá (la cerró ADR-026). (5) Un propio no se valida contra el techo de otra forma que
+al fijarlo o al fijar el techo; una base con datos cruzados de antes de esta guarda sigue siendo regida por «el techo manda sobre el piso» (ADR-020).
+
+**Consecuencias.** Falta la pantalla (libra-ui) y exponer el router en los productos. El router de `GET /api/reportes/reposicion` no cambia de contrato salvo el campo nuevo por fila.
+
+
+## ADR-025 — Reposición v2: descontar lo que vence dentro del horizonte (2026-10-03)
+
+**Contexto.** ADR-019 descuenta del stock lo que ya está vencido, pero un lote que vence dentro de poco y no se va a vender a tiempo sigue contando como stock: el producto figura cubierto y a los pocos
+días se tira. Diferido desde ADR-019, ADR-022 y ADR-023.
+
+**Decisión.** Parámetro **opt-in** `descontar_por_vencer` (**apagado por default**: cambia números que hoy se ven; sin él, el resultado es el de v0.36.0) en `sugerencia_reposicion`, en
+`GET /api/reportes/reposicion` (query param, eco en la respuesta y su export CSV) y en el cuerpo de la generación de órdenes en borrador (las órdenes se calculan con el mismo ajuste que se ve, como
+`estacionalidad`; la `clave_operacion` ya usada con el otro valor es un pedido distinto, 409). Cada fila trae **`por_vencer`** (cantidad, con la escala de informe; la columna del CSV va **al final**, después
+de `stock_minimo_propio`; `0` sin la opción). Sólo cuenta para productos con `tracks_expiry = 1`, saldos positivos con fecha de los depósitos que se miran (la misma consulta de lotes que usa `vencido`,
+`erp.lotes.saldos_por_bucket`: una sola, no dos); el saldo «sin lote» no cuenta y un lote con `vence < hoy` ya va en `vencido` y no entra acá (tampoco con `descontar_vencido=false`).
+
+**La cuenta.** Con `H = dias_cobertura + plazo` del producto (el `horizonte` de la fila) y `r = proyectado / H` (la rotación diaria **proyectada**, que ya incluye el factor estacional si está prendido),
+los lotes se venden por orden de vencimiento (FEFO). Para cada lote `j` con `d_j <= H`, donde `d_j = (vence_j − hoy).días + 1` (hoy cuenta y el día del vencimiento todavía se vende) y `C_j` es el saldo acumulado
+de los lotes no vencidos hasta `j` inclusive, al vencer `j` se vendieron a lo sumo `r × d_j` unidades y sobran `C_j − r × d_j`.
+
+    por_vencer = max(0, máx_j (C_j − r × d_j))          utilizable = max(stock − vencido − por_vencer, 0)
+
+Es el **máximo** del acumulado y no la suma: lo que sobra de un lote ya está contado en el acumulado del siguiente. Nunca pasa de la suma de saldos de los lotes dentro del horizonte (`r × d_j >= 0`).
+`stock` sigue siendo el real y `vencido` lo ya vencido; `cobertura_dias` usa el nuevo utilizable y `posible_quiebre` no cambia.
+
+- **Aritmética exacta.** `proyectado`, `r`, la pérdida, el disponible, el mínimo y el techo son `Fraction` y se redondean con `_techo`/`_piso` (que ahora aceptan un `Fraction` y redondean con enteros):
+  un resto decimal no pide una unidad de más ni de menos. Se midió al diseñarlo que con cocientes de `Decimal` (`1/30 × 5` y la resta que sigue) el caso «1 vendida en 30 días, horizonte 5, un lote de 1 que vence en 5 días»
+  pedía 1 unidad cuando la cuenta exacta da 0. Las filas sin la opción dan lo mismo que antes (las suites previas, sin cambios salvo el encabezado del CSV, lo confirman). `por_vencer` se **informa**
+  redondeado hacia arriba a la escala del informe, pero `sugerido` usa la pérdida exacta, no la redondeada.
+- **Sin migración.** Una base sin la revisión `0002`, o sin productos marcados, devuelve `por_vencer = 0` sin error.
+
+**Bordes dichos en voz alta.** (1) **Sin ventas (`r = 0`) todo lo que vence dentro del horizonte se pierde:** un producto sin rotación con un lote por vencer y mínimo > 0 se sugiere reponer (lo que va a vencer sin
+venderse no sirve de colchón: es lo que dice la cuenta); sin mínimo no se sugiere nada. (2) Supone que la rotación de la ventana se mantiene todo el horizonte y que todo lo vendido sale de los lotes por FEFO: lo «sin lote» no compite con ellos, así que si en la práctica parte de lo vendido sale de lo
+«sin lote», la pérdida real es mayor que la calculada (se subestima, no se sobreestima). (3) El acumulado junta los lotes de todos los depósitos que se miran, como un solo FEFO y una sola rotación (en la realidad cada depósito vende de lo suyo). (4) `por_vencer` no mira lo que viene en camino ni su vencimiento. (5) Dos lotes del mismo día valen como uno (el máximo cae en el último del día). (6) La `clave_operacion` de una
+generación de órdenes hecha antes de este cambio, reintentada después, tiene otra huella (el parámetro entra en ella) y responde 409, como pasó con `estacionalidad`.
+
+**Consecuencias.** Falta el interruptor y la columna en la reposición (libra-ui) y activarlo en VentaLibra. Con esto queda cerrado lo que ADR-019 había diferido («lo que vence dentro del horizonte»).
+
+## ADR-026 — Reposición v2: el candado del producto en la edición y booleanos fuera de los campos numéricos (2026-10-03)
+
+**Contexto.** Dos defectos de antes, medidos al revisar ADR-020 a ADR-025; ninguno cambia un contrato que alguien use bien.
+
+**1. `catalogo.update_producto` y el techo.** Valida que el mínimo global no pase el techo (`max_stock`, ADR-020) leyendo el techo **sin candado**, y ADR-024 lo había dejado dicho como borde (4).
+Con un techo de 100 y un hilo que lo baja a 50 sin haber confirmado, otro que sube el mínimo a 80 leía el 100, validaba y escribía apenas el primero confirmaba: mínimo 80, techo 50. **Decisión:**
+`update_producto` toma `_bloquear_producto` (el candado de `fijar_parametros` y `fijar_minimo_sucursal`) **antes de leer** el techo, dentro de `_exigir_minimo_bajo_el_techo`. El orden de candados sigue siendo
+producto primero (como `delete_producto`: producto y después mínimos por sucursal), así que no hay un orden nuevo que pueda cruzarse. Una base sin la revisión `0003` no tiene techos y no toma el candado.
+El repositorio confirma dentro de `save_catalog_item` (salvo dentro de `transaction()`), así que el candado se suelta apenas se guarda el producto: validar y escribir quedan juntos.
+
+**2. Booleanos como números en el cuerpo de `PUT /{producto_id}/reposicion` y de la generación de órdenes.** Los campos `int`/`float` de pydantic convierten `true` en `1` y `false` en `0` antes del
+rechazo `isinstance(bool)` del motor: `plazo_entrega_dias: true` quedaba como 1 día, `stock_maximo: true` como un techo de 1.0 y `proveedor_id: true` como el proveedor 1. **Decisión:** el validador
+`mode="before"` que ya tenía `MinimoDeSucursal` (ADR-024) pasa a ser uno compartido, `_sin_booleanos(*campos)`, que responde 422 con `true`/`false` y se aplica a `ParametrosDeReposicion`
+(`plazo_entrega_dias`, `stock_maximo`, `proveedor_id`) y a `GenerarOrdenes` (`dias_rotacion`, `dias_cobertura`, `plazo_entrega_dias`, `sucursal_id`, `proveedor_id`, y los `producto_ids` y los valores de
+`topes`, donde mira también adentro de la lista y del diccionario). Todo lo demás se convierte como antes: números, enteros, textos numéricos y el `0` numérico (que el motor sigue juzgando él).
+
+**Bordes dichos en voz alta.** (1) Los parámetros de `GET` (`dias_rotacion=true` en la query) no tenían el defecto: son texto y pydantic no convierte `"true"` en entero. (2) Los campos `bool` de verdad
+(`descontar_vencido`, `estacionalidad`, `descontar_por_vencer`) siguen aceptando lo que pydantic acepta como booleano (`1`, `"yes"`, …), como antes. (3) El candado nuevo toma la fila del producto en cada
+edición, incluida la actualización masiva de precios (una por línea, confirmando cada una): en PostgreSQL una escritura que referencia al producto (una línea de venta, por la clave foránea) puede esperar lo que dure esa edición (el `FOR UPDATE` choca con el `FOR KEY SHARE` de la FK; no se midió
+con carga); `fijar_parametros` y `fijar_minimo_sucursal` ya lo hacían. (4) `actualizacion_masiva.aplicar` relee el mínimo global antes de llamar a `update_producto`, fuera del candado: puede pisar con el valor de antes un mínimo que otro editó en el medio, pero
+nunca lo sube por encima del techo.

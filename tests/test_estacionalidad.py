@@ -129,7 +129,7 @@ def test_el_router_acepta_estacionalidad_la_devuelve_y_el_csv_trae_el_factor(abr
     assert r.status_code == 200 and r.json()["estacionalidad"] is True
     assert c.get("/api/reportes/reposicion").json()["estacionalidad"] is False
     csv = c.get("/api/reportes/reposicion/export", params={"solo_a_pedir": "false"}).text.splitlines()
-    assert csv[0].endswith(",factor_estacional")
+    assert csv[0].endswith(",factor_estacional,stock_minimo_propio,por_vencer")
 
 
 def test_las_ordenes_en_borrador_usan_el_mismo_ajuste_si_se_pide(abrir_vto_ventas):
