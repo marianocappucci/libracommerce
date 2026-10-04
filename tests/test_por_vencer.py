@@ -334,7 +334,7 @@ def test_un_resto_decimal_no_pide_una_unidad_de_mas(abrir_vto_ventas):
     abrir = abrir_vto_ventas
     _exacto(abrir, vendidas=1, cantidad=1, vence_en=4)
     fila = _con(abrir, "Exacto", dias_cobertura=2)
-    assert fila["stock"] == 1 and fila["por_vencer"] == 0.834                      # 5/6 informado hacia arriba a 3 decimales
+    assert fila["stock"] == 1 and fila["por_vencer"] == 1                          # 5/6 informado hacia arriba a la escala de la unidad (entera: 1)
     assert fila["sugerido"] == 0 and fila["motivo"] is None
 
 
@@ -343,8 +343,8 @@ def test_una_necesidad_fraccionaria_que_da_un_entero_exacto_pide_ese_entero(abri
     abrir = abrir_vto_ventas
     _exacto(abrir)
     fila = _con(abrir, "Exacto", dias_cobertura=10)
-    assert fila["stock"] == 10 and fila["por_vencer"] == 8.667                     # informado hacia arriba, a la escala del informe
-    assert fila["sugerido"] == 3 and isinstance(fila["sugerido"], int)
+    assert fila["stock"] == 10 and fila["por_vencer"] == 9                         # 26/3 informado hacia arriba, a la escala de la unidad (entera)
+    assert fila["sugerido"] == 3 and isinstance(fila["sugerido"], int)             # y la cuenta sigue con la pérdida exacta: con el 9 redondeado saldría 4
 
 
 def test_una_unidad_fraccionable_informa_y_pide_con_su_escala(abrir_vto_ventas):
@@ -361,6 +361,36 @@ def test_una_unidad_de_escala_fina_informa_la_perdida_con_su_escala(abrir_vto_ve
     _lote(abrir, fino, "A", _en(10), 0.000123)                                     # sin ventas: lo que vence dentro del horizonte se pierde entero
     fila = _con(abrir, "Fino")
     assert fila["stock"] == 0.000123 and fila["por_vencer"] == 0.000123            # con 3 decimales saldría 0,001
+
+
+def test_por_vencer_de_una_unidad_entera_sale_entero_y_no_con_decimales_de_mas(abrir_vto_ventas):
+    """ADR-028: antes `por_vencer` iba con los 3 decimales mínimos del informe y una unidad entera mostraba `8.667` donde `sugerido` mostraba enteros. Ahora va con la escala de la
+    unidad (0): hacia arriba, sin tocar la cuenta."""
+    abrir = abrir_vto_ventas
+    _exacto(abrir)                                                                 # pérdida exacta 26/3 = 8,666...
+    fila = _con(abrir, "Exacto", dias_cobertura=10)
+    assert fila["por_vencer"] == 9 and isinstance(fila["por_vencer"], int)
+    assert isinstance(fila["sugerido"], int) and fila["sugerido"] == 3             # la pérdida exacta: con el 9 redondeado saldría 4
+    assert fila["cobertura_dias"] == 4.0                                           # utilizable 10 − 26/3 = 4/3 con la pérdida exacta, ÷ r = 1/3; con el 9 redondeado serían 3
+    assert fila["stock"] == 10 and fila["vencido"] == 0
+
+
+def test_por_vencer_de_una_unidad_fraccionable_va_con_los_tres_decimales_de_kg(abrir_vto_ventas):
+    abrir = abrir_vto_ventas
+    _exacto(abrir, unidad="kg", fraccion=True)
+    fila = _con(abrir, "Exacto", dias_cobertura=10)                                # la misma pérdida exacta, 26/3
+    assert fila["por_vencer"] == 8.667 and isinstance(fila["por_vencer"], float)   # 3 decimales, hacia arriba (no 8.666 ni 9)
+    assert fila["sugerido"] == 3 and isinstance(fila["sugerido"], int | float)
+
+
+def test_por_vencer_de_una_unidad_fraccionable_de_un_decimal_va_con_uno(abrir_vto_ventas):
+    """Una unidad con `decimal_scale` bajo (1) informa la pérdida con ese decimal y no con los 3 mínimos del informe: 26/3 hacia arriba a 1 decimal es 8,7 (con 3 era 8,667); `sugerido` sigue siendo 3 (la necesidad exacta, 13/3 − 4/3)."""
+    abrir = abrir_vto_ventas
+    _exacto(abrir, unidad="kg", fraccion=True)
+    with abrir() as conn:
+        conn.execute("UPDATE units SET decimal_scale=1 WHERE code='kg'")
+    fila = _con(abrir, "Exacto", dias_cobertura=10)
+    assert fila["por_vencer"] == 8.7 and fila["sugerido"] == 3
 
 
 @pytest.mark.parametrize("valor, escala, techo, piso", [
@@ -446,7 +476,7 @@ def test_el_csv_trae_por_vencer_al_final(abrir_vto_ventas):
     yerba = _yerba_de_hoy(abrir)
     _lote(abrir, yerba, "A", _en(5, datetime.date.today()), 20)
     c = _rep._cliente(abrir)
-    for params, esperado in (({}, "0.0"), ({"descontar_por_vencer": "true"}, "14.0")):
+    for params, esperado in (({}, "0"), ({"descontar_por_vencer": "true"}, "14")):   # la yerba es de unidades enteras: sin decimales (ADR-028)
         lineas = c.get("/api/reportes/reposicion/export", params={"solo_a_pedir": "false", **params}).text.splitlines()
         cabecera = lineas[0].split(",")
         assert cabecera[-2:] == ["stock_minimo_propio", "por_vencer"]

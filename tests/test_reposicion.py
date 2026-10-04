@@ -673,8 +673,8 @@ def test_export_csv(abrir_ventas):
                          "motivo,sin_ventas,posible_quiebre,variantes,plazo_entrega_dias,plazo_propio,stock_maximo,limitado_por_maximo,proveedor_id,proveedor,factor_estacional,stock_minimo_propio,por_vencer")
     # Yerba: hay 10, rota 1 por día y vienen 5 (sin sucursal): 18 − 10 − 5 = 3. Quieto: sin rotación, va al final y sólo lo
     # empuja el mínimo (8 − 5 = 3). Los booleanos, legibles, y el `None` de la cobertura, vacío.
-    assert lineas[1] == f"{_id_de(abrir, 'Yerba')},,Yerba,,u,10.0,0.0,5.0,5.0,0.0,30.0,30,1.0,10.0,3,por_rotacion,no,no,0,3,no,,no,,,,no,0.0"
-    assert lineas[2] == f"{quieto},,Quieto,,u,5.0,0.0,0.0,0.0,8.0,0.0,30,0.0,,3,bajo_minimo,si,no,0,3,no,,no,,,,no,0.0"
+    assert lineas[1] == f"{_id_de(abrir, 'Yerba')},,Yerba,,u,10.0,0.0,5.0,5.0,0.0,30.0,30,1.0,10.0,3,por_rotacion,no,no,0,3,no,,no,,,,no,0"
+    assert lineas[2] == f"{quieto},,Quieto,,u,5.0,0.0,0.0,0.0,8.0,0.0,30,0.0,,3,bajo_minimo,si,no,0,3,no,,no,,,,no,0"
     assert len(lineas) == 3
 
 

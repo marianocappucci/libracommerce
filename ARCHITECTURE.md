@@ -167,7 +167,21 @@ duplicada. `usecases/` sigue puro; lo que cruza a LibraCore va en `erp/` (extra
 - **Un cuerpo con campos `int`/`float` rechaza `true`/`false`** donde un `1` o un `0` cambian algo del negocio (ids,
   cantidades, precios, porcentajes): pydantic los convertiría en `1`/`0` antes de que el motor los vea. Se declara con
   `web/_validacion.sin_booleanos(*campos)` dentro del modelo (todos los routers, ADR-026 y ADR-027; los `Decimal`, los
-  `bool` y los `Literal` no lo necesitan).
+  `bool` y los `Literal` no lo necesitan). **La guardia que lo comprueba (ADR-028)**: `libracommerce.testing.campos_numericos_que_aceptan_booleano(app)`
+  recorre las rutas de una `FastAPI` ya armada, instancia el modelo real con `True`/`False` en cada hoja numérica (también en `list`, `dict` y modelos anidados;
+  en query y path, con el texto `"true"`) y devuelve `[(método y ruta, campo, tipo), …]` de lo que **todavía** lo acepta. Cada producto la corre en su suite sobre
+  su `create_app()` completa, para ver routers propios y payloads heredados sin `sin_booleanos`:
+
+  ```python
+  from libracommerce.testing import campos_numericos_que_aceptan_booleano
+
+  def test_ningun_campo_numerico_acepta_un_booleano():
+      assert campos_numericos_que_aceptan_booleano(create_app()) == []
+  ```
+
+  Si informa algo: `sin_booleanos` en ese campo; y sólo si un `1` o un `0` no cambian nada del negocio, `ignorar={("POST /api/x", "campo")}` con un comentario
+  que lo justifique. No ve un `model_validator(mode="after")` con campos de relleno inarmables ni lo que no es pydantic (la celda de una planilla). Necesita el
+  extra `[web]`.
 - Lo financiero (caja, cuenta corriente, tesorería, clientes, logs) sigue en
   LibraCore; este motor lo llama, no lo reemplaza. Donde LibraCore necesita saber
   de dónde salen las ventas lo pide como puerto y este motor lo implementa:

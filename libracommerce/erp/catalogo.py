@@ -914,7 +914,7 @@ def _exigir_minimo_bajo_el_techo(conn, pid: int, stock_minimo) -> None:
     """ADR-020: si el producto tiene un techo de reposición (`max_stock`), el stock mínimo no puede pasarlo. `fijar_parametros` ya lo
     exige al cargar el techo; acá se exige al subir el mínimo, para que editar el producto no deje la invariante rota. `ValueError`
     (el router lo contesta 422), pero sólo si el mínimo SUBE: dejar el que ya tenía no se rechaza. Toma el candado del producto (`_bloquear_producto`) antes de leer el
-    techo: queda tomado hasta que `update_producto` guarda (el repositorio confirma ahí) o la transacción termina. Una base sin la revisión `0003` no tiene techos: no hace
+    techo: queda tomado hasta el commit del final de `update_producto` (guardado y código en una sola transacción, ADR-028) o hasta que la transacción termina. Una base sin la revisión `0003` no tiene techos: no hace
     nada ni bloquea."""
     from .reposicion import _bloquear_producto, tiene_parametros
 
@@ -956,8 +956,12 @@ def update_producto(conn, pid: int, nombre: str, codigo: str, descripcion: str,
         # son la estación. Un `CatalogItem` nuevo los reseteaba a su default en cada edición.
         metadata = {k: v for k, v in anterior.metadata.items() if k != "estacion"} | nuevo.metadata
         nuevo = replace(nuevo, purchasable=anterior.purchasable, tax_profile=anterior.tax_profile, metadata=metadata)
-    repo.save_catalog_item(nuevo)
-    _set_codigo(repo, conn, pid, codigo)
+    # El guardado y el reemplazo del código principal, en una sola transacción (ADR-028): `repo.transaction()` hace que ninguno confirme solo, así que el candado del
+    # producto que tomó `_exigir_minimo_bajo_el_techo` (o el que tomó quien llama, como la actualización masiva) sigue tomado hasta el único commit del final, y un
+    # código repetido (que falla en `_set_codigo`) deshace también lo que ya se había guardado.
+    with repo.transaction():
+        repo.save_catalog_item(nuevo)
+        _set_codigo(repo, conn, pid, codigo)
 
 
 def delete_producto(conn, pid: int):

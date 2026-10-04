@@ -809,22 +809,69 @@ def test_la_entrada_exige_deposito_activo_pero_leer_asignar_y_mermar_siguen_vali
     assert c.get(f"/api/vencimientos/productos/{pid}/lotes", params={"deposito_id": viejo}).status_code == 200
 
 
-def test_limitacion_preexistente_la_edicion_no_es_atomica_respecto_del_codigo_duplicado(abrir_vto):
-    """LIMITACIÓN PREEXISTENTE (no la introdujo la marca `vence`, y está fuera de alcance de C-1): `update_producto`
-    commitea los campos y DESPUÉS reemplaza el código; un código repetido falla tarde (422) y los demás campos ya
-    quedaron guardados, con o sin `vence`. Lo que sí se garantiza: la marca sólo se escribe si el guardado completo
-    tuvo éxito, así que acá no cambia. Este test fija el comportamiento actual; si algún día el guardado se hace
-    atómico, hay que invertir las dos primeras aserciones."""
+def test_la_edicion_es_atomica_respecto_del_codigo_duplicado(abrir_vto):
+    """ADR-028: `update_producto` guarda los campos y reemplaza el código principal en UNA transacción. Antes (limitación preexistente, fijada acá hasta entonces) los campos se
+    confirmaban y DESPUÉS fallaba el código repetido: 422 con el nombre y el precio ya guardados. Ahora el 422 no guarda nada, con o sin `vence`, y la marca tampoco cambia."""
     c = _productos_app(abrir_vto, opciones=OpcionesCatalogo(con_vencimientos=True))
     pid = _alta(c, "Yogur")["id"]
     _alta(c, "Leche", codigo="DUP-1")
+    antes = _foto_del_producto(abrir_vto, pid)
     r = c.put(f"/api/productos/{pid}", json={"nombre": "Yogur editado", "precio_venta": 77.0, "codigo": "DUP-1",
                                               "vence": True})
     assert r.status_code == 422
-    nombre, precio = _foto_del_producto(abrir_vto, pid)[0], _foto_del_producto(abrir_vto, pid)[3]
-    assert (nombre, float(precio)) == ("Yogur editado", 77.0), "los campos ya no persisten: el guardado ahora es atómico"
+    assert _foto_del_producto(abrir_vto, pid) == antes, "un código repetido guardó campos del producto"
     assert _marca_en_la_base(abrir_vto, pid) is False
     # Sin `vence` (y con la opción apagada, el router de siempre) pasa exactamente lo mismo: no es cosa de la marca.
     apagada = _productos_app(abrir_vto)
     r = apagada.put(f"/api/productos/{pid}", json={"nombre": "Yogur otra vez", "precio_venta": 88.0, "codigo": "DUP-1"})
-    assert r.status_code == 422 and _foto_del_producto(abrir_vto, pid)[0] == "Yogur otra vez"
+    assert r.status_code == 422 and _foto_del_producto(abrir_vto, pid) == antes
+
+
+def test_el_codigo_de_otra_edicion_no_se_pisa_entre_el_guardado_y_el_reemplazo(abrir_vto, monkeypatch):
+    """La ventana de ADR-027 (4), cerrada en ADR-028, con barrera determinista (hilos, los dos motores). El hilo A edita el producto SIN querer cambiar el código (manda el `111` que
+    leyó, como la actualización masiva) y se detiene justo antes del `_set_codigo`, que antes corría DESPUÉS de que el repositorio confirmara y soltara el candado. El hilo B edita el mismo
+    producto y cambia el código a `222`. Antes B no esperaba, confirmaba, y el `_set_codigo` de A (que ve `222`, distinto de su `111`) lo reemplazaba: B dejaba su precio y perdía su código
+    (final `111`). Ahora el guardado y el reemplazo son una sola transacción con el candado tomado hasta el final: B espera (el plazo de A se agota, no hay forma de que haya terminado), escribe
+    después y el final es `222`."""
+    import threading
+
+    abrir = abrir_vto
+    with abrir() as conn:
+        pid = catalogo.create_producto(conn, nombre="Yerba", codigo="111", precio_venta=10, precio_costo=5)
+    guardado, otro_listo = threading.Event(), threading.Event()
+    real = catalogo._set_codigo
+
+    def set_codigo_tarde(repo, conn, item_id, codigo):
+        if threading.current_thread().name == "A":
+            guardado.set()
+            otro_listo.wait(timeout=5)         # con el guardado atómico, B espera el candado y este plazo se agota: no hay forma de que haya terminado
+        return real(repo, conn, item_id, codigo)
+
+    monkeypatch.setattr(catalogo, "_set_codigo", set_codigo_tarde)
+
+    def editar(codigo, precio):
+        with abrir() as conn:
+            catalogo.update_producto(conn, pid=pid, nombre="Yerba", codigo=codigo, descripcion="", precio_venta=precio,
+                                     precio_costo=5, unidad="u", categoria="", activo=1)
+
+    errores: list[str] = []
+
+    def hilo_b():
+        try:
+            assert guardado.wait(timeout=30)
+            editar("222", 12)
+        except Exception as exc:  # noqa: BLE001 - se informa abajo
+            errores.append(repr(exc))
+        finally:
+            otro_listo.set()
+
+    b = threading.Thread(target=hilo_b, name="B")
+    b.start()
+    a = threading.Thread(target=editar, args=("111", 11), name="A")
+    a.start()
+    a.join(timeout=60)
+    b.join(timeout=60)
+    assert not errores, errores
+    with abrir() as conn:
+        final = catalogo.get_producto(conn, pid)
+    assert final["codigo"] == "222", f"B dejó su precio ({final['precio_venta']}) y perdió su código: quedó {final['codigo']}"

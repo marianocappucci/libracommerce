@@ -99,9 +99,9 @@ def aplicar(conn, actualizaciones: list[LineaActualizada]) -> int:
     **Relee el producto DENTRO del candado** (ADR-027): `update_producto` reescribe todos los campos del producto (también el mínimo global) con lo que se le
     pasa, y acá eso sale de una relectura. Si la relectura fuera antes del candado, una edición que otro confirma entre ella y la escritura se pisaría con el valor
     de antes (lost update). Por eso se toma `_bloquear_producto` ANTES de leer; `update_producto` lo vuelve a tomar (la misma transacción, no espera) y el
-    repositorio confirma al guardar, que es lo que lo suelta: releer y escribir quedan en una sola sección crítica, línea por línea. Siempre producto primero, el
+    commit del final de `update_producto` (el guardado y el código van en una sola transacción, ADR-028) es lo que lo suelta: releer y escribir quedan en una sola sección crítica, línea por línea. Siempre producto primero, el
     orden de `delete_producto`, `fijar_parametros`, `fijar_minimo_sucursal` y `update_producto`; la tanda no retiene el candado de una línea al pasar a la
-    siguiente (cada línea confirma al guardar)."""
+    siguiente (cada línea confirma al final de `update_producto`)."""
     aplicadas = 0
     for linea in actualizaciones:
         _bloquear_producto(conn, linea.item_id)   # ANTES de leer lo que se va a volver a escribir
