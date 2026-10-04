@@ -647,9 +647,11 @@ def obtener_venta(conn, vid: int) -> dict | None:
     # El detalle también nombra el comprobante: cuando sólo lo armaba el
     # listado, el bloque "Factura generada" del detalle era código muerto.
     fac = conn.execute(
-        "SELECT tipo, punto_venta, numero FROM facturas WHERE id=?",
+        "SELECT tipo, punto_venta, numero, cae FROM facturas WHERE id=?",
         (d["factura_id"],),
     ).fetchone() if d["factura_id"] else None
+    # Para que la pantalla avise ANTES de anular que la factura la tiene ARCA (ver `VentaConFacturaCAE`).
+    d["factura_cae"] = fac["cae"] if fac and _tiene_cae(fac["cae"]) else None
     d["factura_display"] = factura_display(
         fac["tipo"], fac["punto_venta"], fac["numero"]
     ) if fac else None
@@ -767,6 +769,50 @@ class VentaConDevoluciones(ValueError):
     """
 
 
+class VentaConFacturaCAE(ValueError):
+    """La venta tiene una factura con CAE de ARCA y **sin nota de crédito**: no se puede anular todavía.
+
+    🔴 Anular acá no llega a ARCA: la factura seguiría vigente allá (y el cliente la tiene) mientras el stock vuelve
+    y la caja se revierte. Se revierte con la **nota de crédito del motor** (`libracore.notas_de_credito`,
+    `POST /api/facturas/{id}/nota-credito`) y *después* se anula la venta. Mismo criterio que el ADR-026 de
+    LibraCargo. Lleva `factura_id` para que la ruta lo devuelva y la pantalla pueda llevar a esa factura.
+    """
+
+    def __init__(self, mensaje: str, factura_id: int):
+        super().__init__(mensaje)
+        self.factura_id = factura_id
+
+
+def _tiene_cae(cae) -> bool:
+    """Un CAE real: no vacío y distinto de `PENDIENTE` (el criterio del núcleo de notas del motor)."""
+    return bool(cae) and cae != "PENDIENTE"
+
+
+def _factura_de_la_venta(conn, vid: int):
+    """La factura vinculada a la venta (`tipo`, `punto_venta`, `numero`, `cae`), o `None`."""
+    return conn.execute(
+        """SELECT f.id, f.tipo, f.punto_venta, f.numero, f.cae
+           FROM venta_links vl JOIN facturas f ON f.id = vl.factura_id
+           WHERE vl.venta_id = ?""",
+        (vid,),
+    ).fetchone()
+
+
+def _nota_con_cae_de(conn, factura) -> bool:
+    """¿La factura ya tiene una nota de crédito **con CAE**? Una nota sin CAE no la revierte ante ARCA."""
+    from libracore import tipos_comprobante as tipos
+
+    marcas = ",".join("?" for _ in tipos.NC)
+    for nota in conn.execute(
+        f"""SELECT cae FROM facturas
+            WHERE tipo IN ({marcas}) AND cbte_asoc_tipo=? AND cbte_asoc_pv=? AND cbte_asoc_nro=?""",
+        (*tipos.NC, factura["tipo"], factura["punto_venta"], factura["numero"]),
+    ).fetchall():
+        if _tiene_cae(nota["cae"]):
+            return True
+    return False
+
+
 def anular_venta(conn, vid: int, usuario_id: int | None = None,
                  hooks: Hooks = SIN_GANCHOS, *, caja_con_turno: bool = False) -> bool:
     """Anula una venta: repone el stock que se había descontado (los insumos de
@@ -817,6 +863,12 @@ def anular_venta(conn, vid: int, usuario_id: int | None = None,
     (merma) después de la venta: el lote reaparece con esa cantidad, que es lo que dice el ledger (la merma ya descontó
     lo que tenía entonces). No bloquea: suma stock.
 
+    🔴 **Una venta con factura CON CAE y sin nota de crédito no se anula** — levanta `VentaConFacturaCAE`
+    (ver esa clase), también ANTES de tocar nada. Con la nota ya emitida sí se anula, y **la cuenta corriente
+    no se acredita otra vez** si la nota ya abonó la deuda (`libracore.notas_de_credito.cc_acreditada_por_nota`):
+    sin eso, el saldo del cliente quedaba en −total. Una factura sin CAE (sin ARCA, o que ARCA no autorizó)
+    se anula como siempre.
+
     Devuelve `False` si ya estaba anulada —no-op, para no revertir dos veces
     si se reintenta la acción—. Levanta `ValueError` si no existe. No
     commitea.
@@ -840,6 +892,19 @@ def anular_venta(conn, vid: int, usuario_id: int | None = None,
             "La venta tiene devoluciones: no se puede anular; devolvé el "
             "resto de las líneas."
         )
+
+    cc_ya_acreditada = False
+    factura = _factura_de_la_venta(conn, vid)
+    if factura is not None and _tiene_cae(factura["cae"]):
+        if not _nota_con_cae_de(conn, factura):
+            raise VentaConFacturaCAE(
+                f"La venta tiene la factura #{factura['id']} emitida por ARCA (con CAE): ARCA la tiene vigente. "
+                "Emití primero la nota de crédito de esa factura y después anulá la venta.",
+                factura["id"],
+            )
+        from libracore.notas_de_credito import cc_acreditada_por_nota
+
+        cc_ya_acreditada = cc_acreditada_por_nota(conn, factura["id"])
 
     fecha = _ar_now().split(" ")[0]
 
@@ -873,7 +938,9 @@ def anular_venta(conn, vid: int, usuario_id: int | None = None,
     turno = hooks.turno_para(conn, usuario_id) if caja_con_turno else None
     revertir_cobro_venta(
         venta_id=vid, numero=venta["numero"], fecha=fecha, pagos=acreditados,
-        cliente_id=hooks.cliente_cc_de(conn, venta), usuario_id=usuario_id, conn=conn,
+        # Sin cliente no se acredita la cuenta corriente: la nota ya lo hizo (la caja se revierte igual).
+        cliente_id=(None if cc_ya_acreditada else hooks.cliente_cc_de(conn, venta)),
+        usuario_id=usuario_id, conn=conn,
         turno_id=(turno["id"] if turno else None),
     )
 

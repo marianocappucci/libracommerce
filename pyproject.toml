@@ -47,7 +47,9 @@ migrations = [
 erp = [
     # >=1.87: `libracore.db.logs` con partes componibles y `libracore.reportes`
     # (P9-M4); `erp.actividad` y `erp.reportes` los usan.
-    "libracore>=1.87,<2",
+    # >=1.128 (ADR-032, 2026-10-04): `anular_venta` pregunta `libracore.notas_de_credito.cc_acreditada_por_nota`
+    # para no acreditar la cuenta corriente dos veces cuando la nota de la factura ya la abonó.
+    "libracore>=1.128,<2",
 ]
 web = [
     "fastapi>=0.115,<1",

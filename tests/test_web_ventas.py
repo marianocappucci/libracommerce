@@ -558,3 +558,34 @@ def test_validar_deposito_rechaza_devolucion_da_422_por_la_api(abrir_ventas):
     assert "no autorizado" in r.json()["detail"]
     assert client.get(f"/api/stock/{pid}").json()["stock_actual"] == 6.0
     assert client.get(f"/api/ventas/{venta['id']}").json()["estado"] == "cobrada"
+
+
+def test_anular_con_factura_con_cae_y_sin_nota_es_409_y_con_la_nota_anula(abrir_ventas):
+    """ADR-032: ARCA tiene la factura vigente, así que primero va la nota; la venta no se mueve."""
+    client = _app(abrir_ventas)
+    venta = _venta(client, pagos=[{"medio": "efectivo", "monto": 400.0}],
+                   items=[{"nombre": "Suelto", "qty": 4, "precio": 100.0}])
+    with abrir_ventas() as conn:
+        conn.execute(
+            "INSERT INTO facturas (tipo, punto_venta, numero, fecha, cliente_cuit, cliente_razon, cliente_iva_cond, "
+            "items, subtotal, iva_amount, total, ambiente, cae) VALUES (11, 5, 11, '2026-10-01', '', 'CF', 5, '[]', "
+            "400, 0, 400, 'homologacion', '75123456789012')")
+        fid = conn.execute("SELECT MAX(id) FROM facturas").fetchone()[0]
+        ventas.vincular_factura(conn, venta["id"], fid)
+        conn.commit()
+    detalle = client.get(f"/api/ventas/{venta['id']}").json()
+    assert detalle["factura_cae"] == "75123456789012", "la pantalla puede avisar antes de anular"
+
+    r = client.post(f"/api/ventas/{venta['id']}/anular")
+    assert r.status_code == 409
+    assert "nota de crédito" in r.json()["detail"] and f"#{fid}" in r.json()["detail"]
+    assert client.get(f"/api/ventas/{venta['id']}").json()["estado"] != "anulada"
+
+    with abrir_ventas() as conn:
+        conn.execute(
+            "INSERT INTO facturas (tipo, punto_venta, numero, fecha, cliente_cuit, cliente_razon, cliente_iva_cond, "
+            "items, subtotal, iva_amount, total, ambiente, cae, cbte_asoc_tipo, cbte_asoc_pv, cbte_asoc_nro) VALUES "
+            "(13, 5, 1, '2026-10-01', '', 'CF', 5, '[]', 400, 0, 400, 'homologacion', '75123456789099', 11, 5, 11)")
+        conn.commit()
+    assert client.post(f"/api/ventas/{venta['id']}/anular").status_code == 200
+    assert client.get(f"/api/ventas/{venta['id']}").json()["estado"] == "anulada"
