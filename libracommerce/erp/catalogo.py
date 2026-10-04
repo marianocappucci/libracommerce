@@ -1017,22 +1017,23 @@ def update_producto(conn, pid: int, nombre: str, codigo: str, descripcion: str,
     _exigir_minimo_bajo_el_techo(conn, pid, stock_minimo)
     repo = repositorio_de(conn)
     anterior = repo.get_catalog_item(pid)
-    nuevo = _catalog_item(
-        pid, nombre=nombre, unidad=unidad, categoria_id=_resolver_categoria_id(conn, categoria),
-        descripcion=descripcion, activo=activo, vendible=vendible, estacion=estacion,
-        precio_venta=precio_venta, precio_costo=precio_costo, stock_minimo=stock_minimo,
-        item_type=item_type, permite_fraccion=_resolver_permite_fraccion(conn, unidad, permite_fraccion),
-        unit=_unidad(conn, unidad, _resolver_permite_fraccion(conn, unidad, permite_fraccion)),
-    )
-    if anterior is not None:
-        # Lo que este payload no maneja se conserva: `purchasable`, `tax_profile` y las claves de `metadata` que no
-        # son la estación. Un `CatalogItem` nuevo los reseteaba a su default en cada edición.
-        metadata = {k: v for k, v in anterior.metadata.items() if k != "estacion"} | nuevo.metadata
-        nuevo = replace(nuevo, purchasable=anterior.purchasable, tax_profile=anterior.tax_profile, metadata=metadata)
     # El guardado y el reemplazo del código principal, en una sola transacción (ADR-028): `repo.transaction()` hace que ninguno confirme solo, así que el candado del
     # producto que tomó `_exigir_minimo_bajo_el_techo` (o el que tomó quien llama, como la actualización masiva) sigue tomado hasta el único commit del final, y un
-    # código repetido (que falla en `_set_codigo`) deshace también lo que ya se había guardado.
+    # código repetido (que falla en `_set_codigo`) deshace también lo que ya se había guardado. El `CatalogItem` se arma ADENTRO: `_resolver_categoria_id` crea la categoría
+    # si no existe, y una categoría nueva tiene que deshacerse con el resto cuando falla el código, también dentro de una transacción exterior (savepoint, ADR-031).
     with _codigo_repetido_como_error_de_dominio(codigo), repo.transaction():
+        nuevo = _catalog_item(
+            pid, nombre=nombre, unidad=unidad, categoria_id=_resolver_categoria_id(conn, categoria),
+            descripcion=descripcion, activo=activo, vendible=vendible, estacion=estacion,
+            precio_venta=precio_venta, precio_costo=precio_costo, stock_minimo=stock_minimo,
+            item_type=item_type, permite_fraccion=_resolver_permite_fraccion(conn, unidad, permite_fraccion),
+            unit=_unidad(conn, unidad, _resolver_permite_fraccion(conn, unidad, permite_fraccion)),
+        )
+        if anterior is not None:
+            # Lo que este payload no maneja se conserva: `purchasable`, `tax_profile` y las claves de `metadata` que no
+            # son la estación. Un `CatalogItem` nuevo los reseteaba a su default en cada edición.
+            metadata = {k: v for k, v in anterior.metadata.items() if k != "estacion"} | nuevo.metadata
+            nuevo = replace(nuevo, purchasable=anterior.purchasable, tax_profile=anterior.tax_profile, metadata=metadata)
         repo.save_catalog_item(nuevo)
         _set_codigo(repo, conn, pid, codigo)
 
