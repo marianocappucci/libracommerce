@@ -556,6 +556,10 @@ def build_productos_router(
                 raise HTTPException(404, "Producto no encontrado")
             try:
                 return catalogo.add_codigo(conn, pid, payload.tipo, codigo, payload.es_principal)
+            except catalogo.CodigoRepetido as e:
+                # Antes de `ValueError` (lo es): un código repetido es un conflicto, 409 como siempre, pero con el mensaje de
+                # dominio y no el texto de la base.
+                raise HTTPException(409, str(e)) from e
             except ValueError as e:
                 raise HTTPException(422, str(e)) from e
             except sqlite3.IntegrityError as e:
