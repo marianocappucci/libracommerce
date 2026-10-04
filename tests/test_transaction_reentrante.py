@@ -408,3 +408,19 @@ def test_la_profundidad_se_limpia_al_salir_bien_o_mal(abrir_vto):
         # y fuera de toda transacción una escritura vuelve a confirmar sola
         _barcode(repo, pid, "777")
     assert "777" in _codigos(abrir_vto, pid)
+
+
+def test_una_categoria_nueva_de_un_update_interior_que_falla_se_va_con_el_savepoint(abrir_vto):
+    """Borde 1 de ADR-031, cerrado: `update_producto` arma el `CatalogItem` (y con él crea la categoría nueva) ADENTRO de su transacción, así que si el código repetido se atrapa la categoría
+    no queda en la exterior."""
+    abrir = abrir_vto
+    with abrir() as conn:
+        p1 = _crear(conn, "Yerba", "111")
+        _crear(conn, "Otro", "DUP")
+    with abrir() as conn:
+        with repositorio_de(conn).transaction():
+            with pytest.raises(catalogo.CodigoRepetido):
+                catalogo.update_producto(conn, pid=p1, nombre="Yerba", codigo="DUP", descripcion="", precio_venta=1, precio_costo=1, unidad="u", categoria="CategoriaNueva", activo=1)
+    with abrir() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM categories WHERE name='CategoriaNueva'").fetchone()[0] == 0
+        assert catalogo.get_producto(conn, p1)["codigo"] == "111"
