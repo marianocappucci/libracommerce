@@ -173,6 +173,33 @@ def _las_dos_cadenas_conviven(destino: str):
     assert _version_registrada(destino, migrar.TABLA_DE_VERSION) == [_revision_head()]
 
 
+def _base_con_la_baseline_vieja(destino: str):
+    """Como la de una instancia que migró con la baseline de hace meses (Compulibra, 2026-10-04): el schema de entonces,
+    SIN `branches` (las sucursales llegaron después y las crea el arranque, no la cadena), con la baseline ya registrada.
+    """
+
+    def crear(conn):
+        init_schema(conn)
+        conn.execute("DROP TABLE branches")
+        conn.commit()
+
+    _con_conexion(destino, crear)
+    migrar.stamp(destino, "0001_baseline_commerce")
+
+
+def _la_cadena_alcanza_una_base_sin_branches(destino: str):
+    """🔴 Medido sobre una copia real de Compulibra: `0005_min_stock_por_sucursal` hacía `REFERENCES branches(id)` y la
+    cadena moría con `relation "branches" does not exist`. Una revisión no puede suponer que el arranque de la app ya
+    corrió: el deploy migra ANTES de arrancar."""
+    _base_con_la_baseline_vieja(destino)
+    assert "branches" not in _tablas(destino)
+
+    migrar.upgrade(destino)
+
+    assert _version_registrada(destino, migrar.TABLA_DE_VERSION) == [_revision_head()]
+    assert {"branches", "item_branch_min_stock"} <= _tablas(destino)
+
+
 # ───────────────────────────────────────────────────────────────────── SQLite
 
 
@@ -233,6 +260,16 @@ def test_la_baseline_no_se_baja(tmp_path):
 
 
 # ───────────────────────────────────────────────────────────────── PostgreSQL
+
+
+def test_la_cadena_alcanza_una_base_sin_branches_sqlite(tmp_path):
+    _la_cadena_alcanza_una_base_sin_branches(str(tmp_path / "vieja.db"))
+
+
+def test_la_cadena_alcanza_una_base_sin_branches_postgres():
+    url = _url_postgres()
+    _limpiar_postgres(url)
+    _la_cadena_alcanza_una_base_sin_branches(url)
 
 
 def test_las_dos_rutas_al_schema_convergen_postgres(tmp_path):

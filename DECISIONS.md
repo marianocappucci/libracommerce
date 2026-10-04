@@ -1351,3 +1351,12 @@ rechaza después con un mensaje propio de rango se informa (ver `ge=2`); si ese 
 - Lo que **no** resuelve: emitir la nota desde la anulación (opción B); una venta anulada *antes* de este cambio con factura CAE a la que después se le emita la nota (acreditaría dos veces; no se midió que exista); la nota parcial; el aviso en la UI.
 - Consecuencias: el extra `erp` pide `libracore>=1.128`. **Cambia el comportamiento de anular** en Contalibra, Restolibra y VentaLibra cuando la venta tiene factura con CAE (hoy sólo Contalibra tiene instancia real). VentaLibra además necesita montar el router de comprobantes para poder emitir la nota (cambio de producto).
 
+
+## ADR-033 — La revisión 0005 no supone que el arranque de la app ya creó `branches` (2026-10-04)
+
+**Contexto:** al probar el salto de Contalibra (`libracommerce` v0.23.0 → v0.41.0) sobre una **copia real de Compulibra**, `libracommerce-migrar upgrade` moría en `0005_min_stock_por_sucursal` con `relation "branches" does not exist` y abortaba el deploy entero. `branches` (las sucursales) llegó después de la baseline: la crea `init_schema()` —el **arranque** de la app—, no la cadena, y el deploy migra *antes* de arrancar. Una base cuya baseline (`0001`) ya estaba registrada nunca volvió a pasar por `init_schema()`. Los tests no lo veían: sólo cubrían una base viva *sin versión* con el schema ya al día, y una base vacía. VentaLibra no lo sufrió porque tiene su propia revisión que crea `branches`.
+
+- Decisión 1 — **`0005` llama a `init_schema()` antes de crear la tabla.** Es idempotente (todo `CREATE ... IF NOT EXISTS`) y es lo mismo que hacen la baseline y el arranque, así que no cambia nada de lo que ya esté.
+- Decisión 2 — nuevo test sobre los dos motores: una base en la baseline vieja (el schema sin `branches`, estampada en `0001`) llega al `head`.
+- Lo que **no** cambia: las revisiones `0002` a `0004` (agregan columnas por introspección y pasaron sobre la copia real).
+- Regla que queda: **una revisión no puede suponer que el arranque de la app ya corrió.** Medido sobre la base de un cliente real, no sobre una sintética.
