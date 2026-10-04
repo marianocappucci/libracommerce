@@ -19,6 +19,9 @@ cada sucursal vuelve a usar el mínimo global). Hacer backup antes, como con cua
 """
 import sqlalchemy as sa
 from alembic import op
+from libracore.db.migraciones import conexion_libracore
+
+from libracommerce.db.schema import init_schema
 
 revision = "0005_min_stock_por_sucursal"
 down_revision = "0004_proveedor_por_producto"
@@ -33,6 +36,12 @@ def _existe(bind) -> bool:
 
 
 def upgrade():
+    # 🔴 **No supone que el arranque de la app ya corrió.** La tabla referencia `branches`, y `branches` la crea
+    # `init_schema()` —el arranque—, no la cadena: una instancia que migró con la baseline de hace meses (Compulibra) no la
+    # tiene, y el deploy migra ANTES de arrancar. Medido sobre una copia real: sin esto, `CREATE TABLE` moría con
+    # `relation "branches" does not exist` y el deploy entero se abortaba. `init_schema()` es idempotente (todo es
+    # `CREATE ... IF NOT EXISTS`) y es lo mismo que hace la baseline y el arranque, así que no cambia nada que ya esté.
+    init_schema(conexion_libracore(op.get_bind()))
     if not _existe(op.get_bind()):
         op.execute(
             f"""CREATE TABLE {_TABLA} (
