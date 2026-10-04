@@ -590,6 +590,7 @@ planillas = [
 ]
 web = [
     { name = "fastapi" },
+    { name = "libracore" },
     { name = "pydantic" },
 ]
 
@@ -602,8 +603,10 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.115,<1" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "libracore", marker = "extra == 'dev'", specifier = ">=1.87,<2" },
-    { name = "libracore", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libracore.git?rev=v1.122.0" },
+    { name = "libracore", marker = "extra == 'dev'", specifier = ">=1.125,<2" },
+    { name = "libracore", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libracore.git?rev=v1.125.0" },
     { name = "libracore", marker = "extra == 'erp'", specifier = ">=1.87,<2" },
+    { name = "libracore", marker = "extra == 'web'", specifier = ">=1.125,<2" },
     { name = "libracore", extras = ["migrations"], marker = "extra == 'dev'", specifier = ">=1.53,<2" },
     { name = "libracore", extras = ["migrations"], marker = "extra == 'migrations'", specifier = ">=1.53,<2" },
     { name = "libraedge", marker = "extra == 'offline'", git = "https://github.com/marianocappucci/libraedge.git?rev=develop" },
@@ -623,8 +626,8 @@ provides-extras = ["dev", "erp", "migrations", "offline", "offline-server", "pla
 
 [[package]]
 name = "libracore"
-version = "1.122.0"
-source = { git = "https://github.com/marianocappucci/libracore.git?rev=v1.122.0#82a4db175fbb7f6b7b2422c7d076f4db928feca8" }
+version = "1.125.0"
+source = { git = "https://github.com/marianocappucci/libracore.git?rev=v1.125.0#7fdcca9193039183e361690ed541e051ce3e54bd" }
 dependencies = [
     { name = "cryptography" },
     { name = "fastapi" },

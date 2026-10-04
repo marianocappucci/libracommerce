@@ -13,6 +13,10 @@ en medio del arranque de un producto. Mismo criterio para `openpyxl`, que trae
 el extra aparte `[planillas]` (sólo lo necesita `planillas_router`, no el resto
 de esta capa).
 
+La excepción documentada a ese «FastAPI no es dependencia»: desde ADR-030 el extra `[web]` también pide
+`libracore>=1.125`, porque `_validacion.py` y `testing.py` reexportan de ahí `sin_booleanos` y la guardia de
+booleanos. El núcleo del motor (sin `web`) sigue con `dependencies = []` y sin importar libracore.
+
 M0 deja el paquete y la guarda; M1 trae la primera factory (catálogo y stock).
 """
 
@@ -25,6 +29,16 @@ class SinFastAPI(RuntimeError):
 
 class SinOpenpyxl(RuntimeError):
     """Falta el extra `[planillas]`, que es quien trae openpyxl."""
+
+
+class SinLibracore(ImportError):
+    """Falta libracore, o es anterior a v1.125.0 (ADR-030): `web/_validacion.py` y `testing.py` reexportan de ahí
+    `sin_booleanos` y la guardia de booleanos. Los trae el extra `[web]`. Es un `ImportError` para que quien importa
+    de forma opcional (`pytest.importorskip`, un `try/except ImportError`) lo siga leyendo como una ausencia."""
+
+    def __init__(self, mensaje: str = "libracommerce[web] necesita libracore>=1.125 (pip install libracommerce[web]): "
+                                      "`libracore.validacion` y `libracore.testing` llegaron en libracore v1.125.0 (ADR-030)."):
+        super().__init__(mensaje)
 
 
 def fastapi():
@@ -54,4 +68,4 @@ def openpyxl():
     return _openpyxl
 
 
-__all__ = ["SinFastAPI", "SinOpenpyxl", "fastapi", "openpyxl"]
+__all__ = ["SinFastAPI", "SinLibracore", "SinOpenpyxl", "fastapi", "openpyxl"]
