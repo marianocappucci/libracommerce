@@ -161,6 +161,8 @@ duplicada. `usecases/` sigue puro; lo que cruza a LibraCore va en `erp/` (extra
 
 - Un caso de uso de `erp/` recibe la conexión abierta y nunca abre una propia
   ni decide el commit: la atomicidad es del llamador.
+- `repo.transaction()` **anida** (ADR-031): la profundidad es de la conexión, la transacción exterior es dueña del commit y del rollback, y cada interior es un `SAVEPOINT`
+  (una interior que falla y se atrapa revierte sólo lo suyo; `update_producto` y `create_producto` se pueden llamar dentro de la `transaction()` de un producto).
 - La variación entre productos entra por `erp.hooks.Hooks` (`resolver_receta`,
   `al_confirmar_venta`, `al_anular_venta`, `lista_de_precio_para`, `canales`),
   con defaults que son el comportamiento de Contalibra. **Sin `if producto`.**
