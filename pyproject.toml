@@ -49,7 +49,8 @@ erp = [
     # (P9-M4); `erp.actividad` y `erp.reportes` los usan.
     # >=1.128 (ADR-032, 2026-10-04): `anular_venta` pregunta `libracore.notas_de_credito.cc_acreditada_por_nota`
     # para no acreditar la cuenta corriente dos veces cuando la nota de la factura ya la abonó.
-    "libracore>=1.128,<2",
+    # >=1.130 (ADR-035): las notas SUMAN (`saldo_acreditable`) y el abono de cada nota lleva su marca (`nc:factura:<id>:<nota>`).
+    "libracore>=1.130,<2",
 ]
 web = [
     "fastapi>=0.115,<1",
