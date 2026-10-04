@@ -312,11 +312,22 @@ def test_control_sin_transaccion_la_mercaderia_se_pierde(repo, monkeypatch):
     assert repo.current_stock(item.id, camioneta.id) == Decimal("0")
 
 
-def test_transaction_no_admite_anidamiento(repo):
-    with pytest.raises(RuntimeError, match="anidamiento"):
+def test_transaction_anida_y_la_exterior_es_duena_del_commit(repo):
+    """Desde ADR-031 `transaction()` es reentrante (antes levantaba `RuntimeError`): la interior es un savepoint y no confirma ni revierte la exterior.
+    El detalle contra los dos motores, con `update_producto` y la auditoria, esta en `test_transaction_reentrante.py`."""
+    item, central = _producto(repo), _deposito(repo, "Central")
+    with repo.transaction():
+        _cargar(repo, item, central, 7)
         with repo.transaction():
+            _cargar(repo, item, central, 3)
+    assert repo.current_stock(item.id, central.id) == Decimal("10")
+    with pytest.raises(RuntimeError, match="afuera"):
+        with repo.transaction():
+            _cargar(repo, item, central, 5)
             with repo.transaction():
-                pass
+                _cargar(repo, item, central, 1)
+            raise RuntimeError("afuera")
+    assert repo.current_stock(item.id, central.id) == Decimal("10"), "la exterior no revirtio lo de la interior ya liberada"
 
 
 def test_lo_escrito_fuera_de_transaction_sigue_commiteando(repo):
