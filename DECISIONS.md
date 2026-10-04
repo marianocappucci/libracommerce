@@ -1125,6 +1125,8 @@ generación de órdenes hecha antes de este cambio, reintentada después, tiene 
 
 ## ADR-026 — Reposición v2: el candado del producto en la edición y booleanos fuera de los campos numéricos (2026-10-03)
 
+> **Nota (ADR-030, 2026-10-04).** Desde ADR-030 la canónica de `sin_booleanos` y de la guardia de booleanos que se mencionan acá vive en libracore v1.125.0 (`libracore.validacion` y `libracore.testing`); este repo las reexporta, con el mismo comportamiento. El texto de abajo es la historia y no se reescribe.
+
 **Contexto.** Dos defectos de antes, medidos al revisar ADR-020 a ADR-025; ninguno cambia un contrato que alguien use bien.
 
 **1. `catalogo.update_producto` y el techo.** Valida que el mínimo global no pase el techo (`max_stock`, ADR-020) leyendo el techo **sin candado**, y ADR-024 lo había dejado dicho como borde (4).
@@ -1146,6 +1148,8 @@ con carga); `fijar_parametros` y `fijar_minimo_sucursal` ya lo hacían. (4) `act
 nunca lo sube por encima del techo.
 
 ## ADR-027 — Booleanos fuera de los campos numéricos en todos los routers, y la actualización masiva relee dentro del candado (2026-10-03)
+
+> **Nota (ADR-030, 2026-10-04).** Desde ADR-030 la canónica de `sin_booleanos` y de la guardia de booleanos que se mencionan acá vive en libracore v1.125.0 (`libracore.validacion` y `libracore.testing`); este repo las reexporta, con el mismo comportamiento. El texto de abajo es la historia y no se reescribe.
 
 **Contexto.** Dos pendientes que ADR-026 dejó dichos: (a) arregló en `reposicion_router` que pydantic convierte `true`/`false` en `1`/`0` en un campo `int`/`float` **antes** de que el motor (que en varios lugares rechaza el
 booleano a propósito) lo vea, y quedaba el resto de los routers; (b) borde (4) de ADR-026: `actualizacion_masiva.aplicar` relee el producto fuera del candado que `update_producto` toma. Sin migración.
@@ -1206,6 +1210,8 @@ toma el candado y toca sólo el mínimo: no hay hoy en el motor un endpoint que 
 
 
 ## ADR-028 — Guardia reutilizable contra booleanos en campos numéricos, «por vencer» con la escala de la unidad, y `update_producto` guarda el producto y su código en una transacción (2026-10-03)
+
+> **Nota (ADR-030, 2026-10-04).** Desde ADR-030 la canónica de `sin_booleanos` y de la guardia de booleanos que se mencionan acá vive en libracore v1.125.0 (`libracore.validacion` y `libracore.testing`); este repo las reexporta, con el mismo comportamiento. El texto de abajo es la historia y no se reescribe.
 
 **Contexto.** Tres pendientes que ADR-026 y ADR-027 dejaron dichos. Sin migración; la versión sale del tag.
 
@@ -1280,3 +1286,21 @@ rechaza después con un mensaje propio de rango se informa (ver `ge=2`); si ese 
 **Bordes dichos en voz alta.** (1) La constante `item_codes_code_type_code_key` es el nombre que PostgreSQL da al `UNIQUE(code_type, code)` de `init_schema`; una base cuyo schema lo nombre distinto caería al camino de antes (el texto crudo, 422/409), nunca a un falso «código repetido». (2) `create_producto` ahora usa `repo.transaction()`, que **no admite anidamiento**: un producto que lo llame dentro de su propio `transaction()` recibe `RuntimeError` (lo mismo que ya pasaba con `update_producto` desde ADR-028); en este repo sólo lo llama el router. (3) El mensaje dice «producto» aunque el choque sea con un código de otro tipo de uso (el único es `(tipo, código)`): es el texto pedido.
 
 **Consecuencias.** Sin migración; la versión sale del tag. `CodigoRepetido` es API pública nueva del motor. Los productos que ya atrapaban `sqlite3.IntegrityError` alrededor de `add_codigo`/`create_producto` para un código repetido ahora reciben `CodigoRepetido` (un `ValueError`, con la `IntegrityError` de `__cause__`): lo revisan al subir el pin y corren su suite completa. `tests/test_codigo_repetido.py` fija los dos motores.
+
+## ADR-030 — `sin_booleanos` y la guardia de booleanos se reexportan de libracore: el extra `web` pide `libracore>=1.125` (2026-10-04)
+
+**Contexto.** La regla del humano (`reglas/producto.md` del wiki, 2026-10-03): «toda lógica de fondo se escribe y se arregla en libracore». Este motor tenía copias de dos piezas que no son del comercio sino de cualquier router de la familia: `web/_validacion.sin_booleanos` (ADR-026, ADR-027) y `testing.campos_numericos_que_aceptan_booleano` (ADR-028). Con libracore v1.125.0 (ADR-013 de libracore) quedaron las canónicas: `libracore.validacion` (`sin_booleanos(*campos)` y `rechazar_booleanos(valor, campos, donde, *, esperado)`) y `libracore.testing` (`campos_numericos_que_aceptan_booleano(app, *, ignorar)`, en `libracore/testing/booleanos.py`). Cada copia traía su propio arreglo futuro: un defecto de la guardia había que corregirlo en dos repos. Sin migración; la versión sale del tag (se propone **v0.40.0**: sube el piso de libracore del extra `web`).
+
+**Medido antes de cambiar.** Se compararon con `diff` las copias de este repo contra `git show v1.125.0:libracore/validacion.py` y `…:libracore/testing/booleanos.py`: el cuerpo de `sin_booleanos` y toda la guardia (`_pelar`, `_dummy`, `_hojas`, `_errores`, `_se_convierte`, `_rutas`, `_dependants`, `_parametros`, `_ignorados`, `campos_numericos_que_aceptan_booleano`, `_tipo_del_parametro`, `_nombre_del_campo`) son **línea por línea iguales**, con el mismo mensaje (422): «<campo> tiene que ser un número, no un booleano». Sólo difieren los docstrings (las referencias a ADR-026/027/028 contra ADR-013) y tres puntos de import: (1) este repo pasaba por `web.fastapi()` antes de importar FastAPI, para levantar `SinFastAPI` (ya no, ver Bordes); (2) libracore trae además `rechazar_booleanos`, que este motor no tenía; (3) en este repo el módulo vivía en la capa `web/`.
+
+**Decisión.**
+1. `libracommerce/web/_validacion.py` y `libracommerce/testing.py` pasan a ser módulos finos que **reexportan** (`__all__`): `sin_booleanos` y `rechazar_booleanos` de `libracore.validacion`, y `campos_numericos_que_aceptan_booleano` de `libracore.testing`. Se reexporta, y no se cambia a cada llamador, porque los siete routers (`catalogo`, `compras`, `listas`, `promociones`, `reposicion`, `vencimientos`, `ventas`) y los productos ya importan de ahí: ninguno se toca. La identidad es la misma (`libracommerce.web._validacion.sin_booleanos is libracore.validacion.sin_booleanos`, y lo mismo para `rechazar_booleanos` y la guardia), y `tests/test_reexporta_libracore.py` la fija.
+2. **El extra `web` pide `libracore>=1.125,<2`** (sin URL, igual que `migrations` y `erp`: el consumidor pinea el tag). El piso es 1.125.0 porque ahí llegan `libracore.validacion` y `libracore.testing.booleanos`. Esto es una excepción **documentada y sólo para `web`** al principio de P9-M0 («el motor no importa libracore en runtime», comentario de `pyproject.toml`): `dependencies = []` del núcleo **no cambia** y sin extras el motor (dominio, repositorio, schema) sigue sin importar libracore; `erp` y `migrations` ya lo importan y ya lo pedían por versión. **Medido, y dicho sin maquillar:** la capa `web/` ya dependía de libracore sin declararlo: `web/ventas_router.py` hace `from libracore import medios_pago, pagos` y `from libracore.db.caja import …` a nivel de módulo (líneas 47 a 49), y `catalogo_router` y `listas_router` lo importan dentro de funciones; el extra `web` no lo pedía, así que `pip install libracommerce[web]` solo ya fallaba al importar `ventas_router`. Esta decisión declara lo que ya era cierto, con un piso que además cubre lo nuevo. FastAPI y pydantic siguen en el extra `web` y también los trae libracore.
+3. Sin libracore, o con uno anterior a v1.125.0, importar `libracommerce.testing` o `libracommerce.web._validacion` (y por ende cualquier router que use `sin_booleanos`) levanta `libracommerce.web.SinLibracore`, un `ImportError` cuyo texto dice «libracommerce[web] necesita libracore>=1.125 (pip install libracommerce[web])» y que viene `from` el `ImportError` original. Mismo criterio que `SinFastAPI` y `SinOpenpyxl`: que la ausencia se lea como lo que es.
+4. El pin de la suite (`dev`: `libracore @ git+…@v1.122.0`) sube a **v1.125.0**; `uv.lock` se regeneró con `uv lock`.
+
+**Qué no cambia.** La API pública (`sin_booleanos` y `campos_numericos_que_aceptan_booleano` se importan de los mismos módulos, con las mismas firmas y el mismo informe); el mensaje y el 422; los routers; el comportamiento de la guardia (21 factories, `[]`). `tests/test_guardia_booleanos.py` y `tests/test_web_booleanos.py` pasan sin tocar sus aserciones. El test de que la guardia «no es muda» anula ahora `libracore.validacion.sin_booleanos` (la canónica, antes de importar los routers) y mide los mismos campos.
+
+**Bordes dichos en voz alta.** (1) **Los productos que suban libracommerce a esta versión tienen que tener libracore >= v1.125.0 pineado**; con uno anterior pip/uv no resuelve (el extra `web` lo pide) o, si instalan sin el extra, el `SinLibracore` de arriba lo dice. (2) `libracommerce.testing` ya no pasa por `web.fastapi()`: sin FastAPI instalado (pero tampoco libracore, que lo trae) el error es `SinLibracore`, no `SinFastAPI`; con libracore instalado FastAPI siempre está. (3) `rechazar_booleanos` queda disponible desde `libracommerce.web._validacion`, pero este motor no lo usa (sus cuerpos son tipados). (4) Desde ahora un arreglo de `sin_booleanos` o de la guardia se hace en libracore y llega acá al subir el piso; las notas de ADR-026/027/028 apuntan acá y no se reescribe su historia.
+
+**Consecuencias.** Menos código propio (−202 líneas netas en `testing.py` y `_validacion.py`, contando el docstring nuevo), una sola fuente de verdad, y la guardia que corre cada producto es la de libracore sin importar por qué motor la importe. Los productos corren su suite completa al subir el pin, como siempre.

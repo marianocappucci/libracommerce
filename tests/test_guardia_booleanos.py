@@ -91,11 +91,14 @@ def test_las_21_factories_no_aceptan_un_booleano_en_ningun_campo_numerico():
 
 def test_la_guardia_ve_los_campos_que_adr_027_arreglo_si_se_anula_sin_booleanos():
     """Sin esto, el `[]` de arriba valdría igual con una guardia que no mide nada. Otro proceso (los routers se importan una vez) con `sin_booleanos` convertido en un no-op: tienen que aparecer
-    los campos de ADR-027 y de ADR-026 (reposición)."""
+    los campos de ADR-027 y de ADR-026 (reposición). Desde ADR-030 la que se anula es la **canónica** (`libracore.validacion.sin_booleanos`), ANTES de importar los routers: `_validacion` la reexporta
+    y los routers la toman de ahí, así que anularla en libracore es anularla en todos y mide lo mismo que antes."""
     codigo = (
         "import json\n"
-        "import libracommerce.web._validacion as v\n"
+        "import libracore.validacion as v\n"
         "v.sin_booleanos = lambda *campos: None\n"
+        "import libracommerce.web._validacion as e\n"
+        "assert e.sin_booleanos is v.sin_booleanos\n"
         "import sys; sys.path.insert(0, 'tests')\n"
         "from test_guardia_booleanos import _app_del_motor\n"
         "from libracommerce.testing import campos_numericos_que_aceptan_booleano as g\n"

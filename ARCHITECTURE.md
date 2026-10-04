@@ -181,7 +181,9 @@ duplicada. `usecases/` sigue puro; lo que cruza a LibraCore va en `erp/` (extra
 
   Si informa algo: `sin_booleanos` en ese campo; y sólo si un `1` o un `0` no cambian nada del negocio, `ignorar={("POST /api/x", "campo")}` con un comentario
   que lo justifique. No ve un `model_validator(mode="after")` con campos de relleno inarmables ni lo que no es pydantic (la celda de una planilla). Necesita el
-  extra `[web]`.
+  extra `[web]`. **Desde ADR-030 `sin_booleanos` (con `rechazar_booleanos`) y la guardia viven en `libracore` (`libracore.validacion`, `libracore.testing`,
+  v1.125.0) y `web/_validacion.py` y `libracommerce/testing.py` sólo las reexportan**: el extra `[web]` pide `libracore>=1.125` (`ventas_router` ya lo importaba sin que
+  el extra lo declarara; el núcleo sin `web` sigue con `dependencies = []`).
 - Lo financiero (caja, cuenta corriente, tesorería, clientes, logs) sigue en
   LibraCore; este motor lo llama, no lo reemplaza. Donde LibraCore necesita saber
   de dónde salen las ventas lo pide como puerto y este motor lo implementa:
