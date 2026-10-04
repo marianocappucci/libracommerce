@@ -220,3 +220,18 @@ def test_el_detalle_de_la_venta_trae_el_cae_para_que_la_pantalla_avise(abrir_ven
         assert ventas.obtener_venta(conn, sin)["factura_cae"] is None
         _factura(conn, sin, cae="PENDIENTE", numero=12)
         assert ventas.obtener_venta(conn, sin)["factura_cae"] is None, "PENDIENTE no es un CAE"
+
+
+def test_el_detalle_de_la_venta_dice_si_la_factura_ya_tiene_su_nota(abrir_ventas):
+    """`nota_credito_display`: la pantalla lo usa para no seguir ofreciendo la nota al reabrir la venta (antes sólo lo sabía el estado local de quien la emitió)."""
+    vid = _venta(abrir_ventas, pagos=[{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}])
+    sin = _venta(abrir_ventas, pagos=[{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        _factura(conn, vid)
+        assert ventas.obtener_venta(conn, vid)["nota_credito_display"] is None, "con factura y sin nota"
+        assert ventas.obtener_venta(conn, sin)["nota_credito_display"] is None, "sin factura"
+        _nota(conn, cae="PENDIENTE")
+        assert ventas.obtener_venta(conn, vid)["nota_credito_display"] is None, "una nota sin CAE no cuenta"
+        _nota(conn, numero=2)
+        d = ventas.obtener_venta(conn, vid)
+        assert d["nota_credito_display"] == "NOTA CREDITO C 0005-00000002", d["nota_credito_display"]

@@ -655,6 +655,10 @@ def obtener_venta(conn, vid: int) -> dict | None:
     d["factura_display"] = factura_display(
         fac["tipo"], fac["punto_venta"], fac["numero"]
     ) if fac else None
+    # La nota de crédito de esa factura, si ya se emitió con CAE (`NOTA DE CREDITO C 0005-00000001`): la pantalla la usa para decir que se puede anular y para no seguir ofreciendo
+    # emitirla cuando se vuelve a abrir la venta (antes sólo lo sabía el estado local de quien la acababa de emitir). `None` si no hay factura, no tiene CAE o no tiene nota.
+    nota = _nota_de_credito_con_cae_de(conn, fac) if fac and _tiene_cae(fac["cae"]) else None
+    d["nota_credito_display"] = factura_display(nota["tipo"], nota["punto_venta"], nota["numero"]) if nota else None
     return d
 
 
@@ -798,19 +802,25 @@ def _factura_de_la_venta(conn, vid: int):
     ).fetchone()
 
 
-def _nota_con_cae_de(conn, factura) -> bool:
-    """¿La factura ya tiene una nota de crédito **con CAE**? Una nota sin CAE no la revierte ante ARCA."""
+def _nota_de_credito_con_cae_de(conn, factura):
+    """La nota de crédito **con CAE** de la factura (`tipo`, `punto_venta`, `numero`, `cae`), o `None`. Una nota sin CAE no la revierte ante ARCA."""
     from libracore import tipos_comprobante as tipos
 
     marcas = ",".join("?" for _ in tipos.NC)
     for nota in conn.execute(
-        f"""SELECT cae FROM facturas
-            WHERE tipo IN ({marcas}) AND cbte_asoc_tipo=? AND cbte_asoc_pv=? AND cbte_asoc_nro=?""",
+        f"""SELECT tipo, punto_venta, numero, cae FROM facturas
+            WHERE tipo IN ({marcas}) AND cbte_asoc_tipo=? AND cbte_asoc_pv=? AND cbte_asoc_nro=?
+            ORDER BY id""",
         (*tipos.NC, factura["tipo"], factura["punto_venta"], factura["numero"]),
     ).fetchall():
         if _tiene_cae(nota["cae"]):
-            return True
-    return False
+            return nota
+    return None
+
+
+def _nota_con_cae_de(conn, factura) -> bool:
+    """¿La factura ya tiene una nota de crédito **con CAE**? Una nota sin CAE no la revierte ante ARCA."""
+    return _nota_de_credito_con_cae_de(conn, factura) is not None
 
 
 def anular_venta(conn, vid: int, usuario_id: int | None = None,

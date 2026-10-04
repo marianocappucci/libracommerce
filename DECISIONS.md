@@ -1360,3 +1360,12 @@ rechaza después con un mensaje propio de rango se informa (ver `ge=2`); si ese 
 - Decisión 2 — nuevo test sobre los dos motores: una base en la baseline vieja (el schema sin `branches`, estampada en `0001`) llega al `head`.
 - Lo que **no** cambia: las revisiones `0002` a `0004` (agregan columnas por introspección y pasaron sobre la copia real).
 - Regla que queda: **una revisión no puede suponer que el arranque de la app ya corrió.** Medido sobre la base de un cliente real, no sobre una sintética.
+
+
+## ADR-034 — El detalle de la venta trae `nota_credito_display`: la pantalla sabe, al reabrir la venta, que la factura ya tiene su nota (2026-10-04)
+
+**Hallazgo (verificación en Chromium de VentaLibra con libra-ui 0.113.x).** Emitir la nota de crédito desde el detalle de la venta sólo dejaba una marca en el **estado local** de la pantalla: al recargar o abrir la venta en otra pestaña, con la nota ya emitida en el servidor, el aviso volvía a decir «hay que emitir antes la nota de crédito» y el botón reaparecía; al tocarlo, el motor contestaba 409 («una factura se acredita una sola vez»). El detalle (`obtener_venta`) traía `factura_cae` pero nada de la nota.
+
+**Decisión (arreglo de fondo en el motor).** `obtener_venta` agrega `nota_credito_display`: el comprobante de la nota de crédito **con CAE** de la factura de la venta, como lo lee una persona (`NOTA CREDITO C 0005-00000001`, mismo `factura_display`), o `None` si no hay factura, la factura no tiene CAE o no tiene nota. Una nota sin CAE (`PENDIENTE`) no cuenta, el mismo criterio con el que `anular_venta` exige la nota (ADR-032): `_nota_con_cae_de` pasa a apoyarse en `_nota_de_credito_con_cae_de`, que devuelve la nota. Campo aditivo: ningún consumidor existente cambia. Sin migración.
+
+**Límites.** Es la nota **total** de la factura (la única que el motor emite hoy). Si hubiera más de una nota con CAE para la misma factura se informa la primera por `id`.
