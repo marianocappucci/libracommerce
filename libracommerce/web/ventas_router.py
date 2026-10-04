@@ -448,6 +448,10 @@ def build_ventas_router(
             except ventas.VentaConDevoluciones as exc:
                 conn.rollback()
                 raise HTTPException(409, str(exc)) from None
+            except ventas.VentaConFacturaCAE as exc:
+                conn.rollback()
+                # Detalle de texto, como los demás 409: las pantallas lo muestran tal cual.
+                raise HTTPException(409, str(exc)) from None
             except Exception:
                 conn.rollback()
                 raise

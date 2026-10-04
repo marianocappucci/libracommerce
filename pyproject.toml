@@ -47,7 +47,9 @@ migrations = [
 erp = [
     # >=1.87: `libracore.db.logs` con partes componibles y `libracore.reportes`
     # (P9-M4); `erp.actividad` y `erp.reportes` los usan.
-    "libracore>=1.87,<2",
+    # >=1.128 (ADR-032, 2026-10-04): `anular_venta` pregunta `libracore.notas_de_credito.cc_acreditada_por_nota`
+    # para no acreditar la cuenta corriente dos veces cuando la nota de la factura ya la abonó.
+    "libracore>=1.128,<2",
 ]
 web = [
     "fastapi>=0.115,<1",
@@ -119,7 +121,10 @@ dev = [
     # productos es el piso del extra `web` (`libracore>=1.125`, ADR-030). v1.125.0 trae
     # `libracore.validacion` y `libracore.testing.booleanos`, que `web/_validacion.py` y `testing.py`
     # reexportan: la suite tiene que correr contra esa version.
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.125.0",
+    #
+    # v1.125.0 -> v1.128.0 (2026-10-04, ADR-032): `anular_venta` usa `notas_de_credito.cc_acreditada_por_nota`
+    # (v1.128.0), que es ademas el piso del extra `erp`.
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.128.0",
 ]
 offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@develop"]
 offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@develop"]
