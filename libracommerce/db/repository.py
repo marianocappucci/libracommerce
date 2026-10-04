@@ -37,18 +37,28 @@ def _to_decimal(value: str | int | float) -> Decimal:
     return Decimal(str(value))
 
 
+#: Profundidad de `transaction()` por CONEXION (`id(conn)` -> niveles abiertos). Es de la conexion y no del repositorio porque `repositorio_de(conn)` arma uno nuevo en cada
+#: llamada: con el estado en el objeto, el `transaction()` de adentro de `update_producto` no sabia que quien lo llamo ya habia abierto el suyo sobre OTRA instancia y
+#: confirmaba lo de la exterior (ADR-031). Va en un dict del modulo porque `sqlite3.Connection` no admite atributos ni referencias debiles. La entrada existe solo mientras
+#: haya una transaccion abierta (se borra al salir la exterior, bien o mal), asi que no hay fuga ni un `id()` reusado que herede una profundidad.
+_PROFUNDIDAD: dict[int, int] = {}
+
+
 class SqliteCommerceRepository:
     """SQLite adapter for CommerceRepository. Lives outside the domain layer."""
 
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
-        self._en_transaccion = False
+
+    @property
+    def _en_transaccion(self) -> bool:
+        return _PROFUNDIDAD.get(id(self._conn), 0) > 0
 
     # transacciones
 
     @contextmanager
     def transaction(self):
-        """Agrupa varias escrituras en un solo commit, con rollback ante error.
+        """Agrupa varias escrituras en un solo commit, con rollback ante error. Reentrante (ADR-031).
 
         Hasta ahora **todos** los metodos de escritura de este repositorio
         commiteaban solos, asi que una operacion de dos pasos no existia: la
@@ -59,29 +69,57 @@ class SqliteCommerceRepository:
         su propia conexion cada vez.
 
         Adentro del bloque `_commit()` es un no-op: el unico commit lo hace la
-        salida del contexto, y cualquier excepcion revierte **todo** lo
-        escrito adentro.
+        salida de la transaccion EXTERIOR, y cualquier excepcion que llegue
+        hasta ella revierte **todo** lo escrito adentro.
 
-        No admite anidamiento: un `transaction()` dentro de otro dejaria que
-        el interno decida el destino de lo que escribio el externo.
+        Anida (por conexion, no por repositorio: ver `_PROFUNDIDAD`). Una
+        transaccion interior es un SAVEPOINT: no confirma nunca, y si falla
+        revierte **solo lo suyo** (`ROLLBACK TO SAVEPOINT`) antes de dejar subir
+        la excepcion. Si el codigo que rodea al `with` interior la atrapa, la
+        exterior sigue viva, con lo anterior intacto y la conexion usable (en
+        PostgreSQL un error aborta la transaccion entera; el savepoint es lo que
+        la rescata). Si no la atrapa, sube hasta la exterior y esta revierte todo.
         """
-        if self._en_transaccion:
-            raise RuntimeError("transaction() no admite anidamiento")
-        self._en_transaccion = True
+        clave = id(self._conn)
+        nivel = _PROFUNDIDAD.get(clave, 0)
+        if nivel == 0:
+            _PROFUNDIDAD[clave] = 1
+            try:
+                yield self
+            except BaseException:
+                self._conn.rollback()
+                raise
+            else:
+                # Commit directo, no `_commit()`: adentro del contexto ese seria
+                # un no-op y nada se grabaria.
+                self._conn.commit()
+            finally:
+                del _PROFUNDIDAD[clave]
+            return
+        nombre = f"lcm_sp_{nivel}"
+        # SQLite: el modulo `sqlite3` emite el BEGIN perezosamente, antes del primer INSERT/UPDATE/DELETE. Un SAVEPOINT sin transaccion abierta ABRE una (y su RELEASE,
+        # siendo el mas externo, CONFIRMA): si la exterior todavia no escribio nada, hay que abrirla antes. PostgreSQL (psycopg) abre la transaccion sola con la primera sentencia.
+        if getattr(self._conn, "in_transaction", True) is False:
+            self._conn.execute("BEGIN")
+        self._conn.execute(f"SAVEPOINT {nombre}")
+        _PROFUNDIDAD[clave] = nivel + 1
         try:
             yield self
         except BaseException:
-            self._conn.rollback()
+            try:
+                self._conn.execute(f"ROLLBACK TO SAVEPOINT {nombre}")
+                self._conn.execute(f"RELEASE SAVEPOINT {nombre}")
+            finally:
+                _PROFUNDIDAD[clave] = nivel
             raise
         else:
-            # Commit directo, no `_commit()`: adentro del contexto ese seria
-            # un no-op y nada se grabaria.
-            self._conn.commit()
-        finally:
-            self._en_transaccion = False
+            try:
+                self._conn.execute(f"RELEASE SAVEPOINT {nombre}")
+            finally:
+                _PROFUNDIDAD[clave] = nivel
 
     def _commit(self) -> None:
-        """Commit real, salvo que estemos dentro de `transaction()`."""
+        """Commit real, salvo que estemos dentro de `transaction()` (en cualquier nivel, sobre esta conexion)."""
         if not self._en_transaccion:
             self._conn.commit()
 
