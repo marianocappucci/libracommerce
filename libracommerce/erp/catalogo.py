@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
+from contextlib import contextmanager
 from dataclasses import asdict, replace
 from datetime import date as _date
 from datetime import datetime as _datetime
@@ -53,6 +55,73 @@ def _validar_tipo(tipo: str) -> CatalogItemType:
     if tipo not in _TIPO_A_ITEM_TYPE:
         raise ValueError(f"tipo inválido: {tipo!r} (debe ser 'producto' o 'servicio')")
     return _TIPO_A_ITEM_TYPE[tipo]
+
+
+# ── El código repetido: un error de dominio, no el texto de la base ──────
+
+
+class CodigoRepetido(ValueError):
+    """Ya hay un `item_code` con ese `(code_type, code)`: el índice único de `item_codes`. El mensaje es para la persona
+    (castellano, con el código); la excepción de la base queda de `__cause__`. Es un `ValueError` como el resto de los
+    rechazos del motor, así que lo que ya atrapa `ValueError` (o `Exception`, como el router) sigue andando."""
+
+    def __init__(self, codigo: str):
+        self.codigo = codigo
+        super().__init__(f"Ya existe un producto con el código «{codigo}».")
+
+
+#: El `UNIQUE(code_type, code)` de `item_codes`, en cada motor. PostgreSQL le pone ese nombre (se lee de
+#: `diag.constraint_name`); SQLite no nombra la restricción y la identifica por sus columnas.
+_UNICO_DE_CODIGOS_PG = "item_codes_code_type_code_key"
+_UNICO_DE_CODIGOS_SQLITE = frozenset({"item_codes.code_type", "item_codes.code"})
+_PREFIJO_UNICO_SQLITE = "UNIQUE constraint failed:"
+
+
+def _es_codigo_repetido(exc: BaseException) -> bool:
+    """¿`exc` es la violación del índice único `(code_type, code)` de `item_codes`, y no otro error de integridad?
+
+    El único lugar donde se decide. Recorre la cadena de `__cause__` (no la de `__context__`: un error ajeno que se lanzó mientras se atendía éste no es éste) porque contra PostgreSQL
+    `libracore` convierte el error de psycopg en un `sqlite3.IntegrityError` (para que los `except` de los productos
+    anden en los dos motores) y deja el original de `__cause__`.
+
+    - **PostgreSQL**: `psycopg.errors.UniqueViolation` cuyo `diag.constraint_name` es el único de los códigos. Otra
+      unicidad de la misma tabla (`idx_item_codes_one_primary_per_item`, un segundo principal), una FK o un check no.
+    - **SQLite**: `sqlite3.IntegrityError` con `sqlite_errorname == "SQLITE_CONSTRAINT_UNIQUE"`. SQLite no da el nombre
+      de la restricción, sólo las columnas en el texto del error (`UNIQUE constraint failed: item_codes.code_type,
+      item_codes.code`): lo único que se lee del mensaje es ese conjunto de columnas, y sólo cuando la clase del error ya
+      es la de una unicidad de SQLite. Un segundo principal falla con `item_codes.item_id`, y no coincide.
+    """
+    try:
+        from psycopg.errors import UniqueViolation
+    except ImportError:   # sin psycopg (sólo SQLite) no hay nada de PostgreSQL que reconocer
+        UniqueViolation = None  # noqa: N806
+    visto: set[int] = set()
+    actual: BaseException | None = exc
+    while actual is not None and id(actual) not in visto:
+        visto.add(id(actual))
+        if UniqueViolation is not None and isinstance(actual, UniqueViolation):
+            return getattr(getattr(actual, "diag", None), "constraint_name", None) == _UNICO_DE_CODIGOS_PG
+        if isinstance(actual, sqlite3.IntegrityError) and getattr(actual, "sqlite_errorname", None) == "SQLITE_CONSTRAINT_UNIQUE":
+            mensaje = str(actual)
+            if mensaje.startswith(_PREFIJO_UNICO_SQLITE):
+                columnas = {c.strip() for c in mensaje[len(_PREFIJO_UNICO_SQLITE):].split(",")}
+                return columnas == _UNICO_DE_CODIGOS_SQLITE
+            return False
+        actual = actual.__cause__
+    return False
+
+
+@contextmanager
+def _codigo_repetido_como_error_de_dominio(codigo: str):
+    """Todo camino que escribe un `item_code` pasa por acá: la violación del único de códigos sale como `CodigoRepetido`
+    (con el código pedido) y **cualquier otra excepción sigue su camino sin tocarse** (una FK, un check, un segundo
+    principal, una base caída). Se usa por FUERA del `repo.transaction()`: el rollback ya se hizo cuando se traduce."""
+    try:
+        yield
+    except Exception as e:
+        if _es_codigo_repetido(e):
+            raise CodigoRepetido(codigo) from e
+        raise
 
 
 # ── Depósitos ────────────────────────────────────────────────────────────
@@ -743,9 +812,10 @@ def agregar_codigo_balanza(conn, pid: int, codigo: str) -> None:
     (`item_codes.code_type='scale'`) -- no es el EAN que imprime la etiqueta
     (ese trae el peso adentro, ver `domain/scale.py`), es el código corto que
     el comercio eligió al cargarlo en el equipo. Lo consume `escanear`."""
-    repositorio_de(conn).save_item_code(
-        ItemCode(id=None, item_id=pid, code_type=ItemCodeType.SCALE, code=codigo)
-    )
+    with _codigo_repetido_como_error_de_dominio(codigo):
+        repositorio_de(conn).save_item_code(
+            ItemCode(id=None, item_id=pid, code_type=ItemCodeType.SCALE, code=codigo)
+        )
 
 
 def _set_codigo(repo, conn, item_id: int, codigo: str):
@@ -821,14 +891,17 @@ def create_producto(conn, nombre: str, codigo: str = "", descripcion: str = "",
                     permite_fraccion: bool | None = None) -> int:
     item_type = _validar_tipo(tipo)
     repo = repositorio_de(conn)
-    saved = repo.save_catalog_item(_catalog_item(
-        None, nombre=nombre, unidad=unidad, categoria_id=_resolver_categoria_id(conn, categoria),
-        descripcion=descripcion, activo=True, vendible=vendible, estacion=estacion,
-        precio_venta=precio_venta, precio_costo=precio_costo, stock_minimo=stock_minimo,
-        item_type=item_type, permite_fraccion=_resolver_permite_fraccion(conn, unidad, permite_fraccion),
-        unit=_unidad(conn, unidad, _resolver_permite_fraccion(conn, unidad, permite_fraccion)),
-    ))
-    _set_codigo(repo, conn, saved.id, codigo)
+    # El producto y su código en una sola transacción, como `update_producto` (ADR-028; ADR-029): `save_catalog_item` confirmaba solo, así que un código repetido
+    # (que falla recién en `_set_codigo`) dejaba el producto guardado y sin código.
+    with _codigo_repetido_como_error_de_dominio(codigo), repo.transaction():
+        saved = repo.save_catalog_item(_catalog_item(
+            None, nombre=nombre, unidad=unidad, categoria_id=_resolver_categoria_id(conn, categoria),
+            descripcion=descripcion, activo=True, vendible=vendible, estacion=estacion,
+            precio_venta=precio_venta, precio_costo=precio_costo, stock_minimo=stock_minimo,
+            item_type=item_type, permite_fraccion=_resolver_permite_fraccion(conn, unidad, permite_fraccion),
+            unit=_unidad(conn, unidad, _resolver_permite_fraccion(conn, unidad, permite_fraccion)),
+        ))
+        _set_codigo(repo, conn, saved.id, codigo)
     return saved.id
 
 
@@ -959,7 +1032,7 @@ def update_producto(conn, pid: int, nombre: str, codigo: str, descripcion: str,
     # El guardado y el reemplazo del código principal, en una sola transacción (ADR-028): `repo.transaction()` hace que ninguno confirme solo, así que el candado del
     # producto que tomó `_exigir_minimo_bajo_el_techo` (o el que tomó quien llama, como la actualización masiva) sigue tomado hasta el único commit del final, y un
     # código repetido (que falla en `_set_codigo`) deshace también lo que ya se había guardado.
-    with repo.transaction():
+    with _codigo_repetido_como_error_de_dominio(codigo), repo.transaction():
         repo.save_catalog_item(nuevo)
         _set_codigo(repo, conn, pid, codigo)
 
@@ -996,13 +1069,15 @@ def get_codigos(conn, pid: int) -> list[dict]:
 
 
 def add_codigo(conn, pid: int, tipo: str, codigo: str, es_principal: bool = False) -> dict:
-    """Agrega un código. `ValueError` si el tipo no es de `TIPOS_DE_CODIGO`; el `IntegrityError` de un código repetido
-    o de un segundo principal lo traduce el router (409)."""
+    """Agrega un código. `ValueError` si el tipo no es de `TIPOS_DE_CODIGO`; `CodigoRepetido` (también un `ValueError`, con el
+    mensaje para la persona) si ya existe ese `(tipo, código)`. El `IntegrityError` de un segundo principal (u otro error de
+    integridad) sube tal cual y lo traduce el router (409)."""
     if tipo not in TIPOS_DE_CODIGO:
         raise ValueError(f"tipo de código inválido: {tipo!r} (los válidos: {', '.join(TIPOS_DE_CODIGO)})")
-    repositorio_de(conn).save_item_code(
-        ItemCode(id=None, item_id=pid, code_type=ItemCodeType(tipo), code=codigo, is_primary=es_principal)
-    )
+    with _codigo_repetido_como_error_de_dominio(codigo):
+        repositorio_de(conn).save_item_code(
+            ItemCode(id=None, item_id=pid, code_type=ItemCodeType(tipo), code=codigo, is_primary=es_principal)
+        )
     return next(c for c in get_codigos(conn, pid) if c["codigo"] == codigo and c["tipo"] == tipo)
 
 
