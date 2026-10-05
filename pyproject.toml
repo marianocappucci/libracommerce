@@ -125,7 +125,8 @@ dev = [
     #
     # v1.125.0 -> v1.128.0 (2026-10-04, ADR-032): `anular_venta` usa `notas_de_credito.cc_acreditada_por_nota`
     # (v1.128.0), que es ademas el piso del extra `erp`.
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.128.0",
+    # v1.128.0 -> v1.130.0 (2026-10-05, ADR-035): `anular_venta` usa `saldo_acreditable` (las notas suman) y el abono por nota.
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.130.0",
 ]
 offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@develop"]
 offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@develop"]
