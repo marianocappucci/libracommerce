@@ -647,7 +647,7 @@ def obtener_venta(conn, vid: int) -> dict | None:
     # El detalle también nombra el comprobante: cuando sólo lo armaba el
     # listado, el bloque "Factura generada" del detalle era código muerto.
     fac = conn.execute(
-        "SELECT tipo, punto_venta, numero, cae FROM facturas WHERE id=?",
+        "SELECT tipo, punto_venta, numero, cae, total FROM facturas WHERE id=?",
         (d["factura_id"],),
     ).fetchone() if d["factura_id"] else None
     # Para que la pantalla avise ANTES de anular que la factura la tiene ARCA (ver `VentaConFacturaCAE`).
@@ -659,6 +659,15 @@ def obtener_venta(conn, vid: int) -> dict | None:
     # emitirla cuando se vuelve a abrir la venta (antes sólo lo sabía el estado local de quien la acababa de emitir). `None` si no hay factura, no tiene CAE o no tiene nota.
     nota = _nota_de_credito_con_cae_de(conn, fac) if fac and _tiene_cae(fac["cae"]) else None
     d["nota_credito_display"] = factura_display(nota["tipo"], nota["punto_venta"], nota["numero"]) if nota else None
+    # Cuánto de la factura queda por acreditar (las notas con CAE SUMAN: libracore ADR-018). La pantalla lo usa para seguir
+    # ofreciendo la nota mientras quede saldo, para sugerir el importe de la próxima y para decir cuándo ya se puede anular
+    # la venta (saldo en cero). `None` si no hay factura con CAE: ahí no hay nada que acreditar.
+    if fac and _tiene_cae(fac["cae"]):
+        saldo, _previas = _saldo_sin_acreditar(conn, {**dict(fac), "id": d["factura_id"]})
+        d["factura_total"] = float(fac["total"])
+        d["factura_saldo_acreditable"] = float(saldo)
+    else:
+        d["factura_total"] = d["factura_saldo_acreditable"] = None
     return d
 
 
