@@ -678,6 +678,71 @@ def test_export_csv(abrir_ventas):
     assert len(lineas) == 3
 
 
+def _fila(pid, nombre, **kw):
+    return {"producto_id": pid, "nombre": nombre, "codigo": None, "stock": 0.0, "en_camino": 0.0, "stock_minimo": 0.0,
+            "unidades_vendidas": 0.0, "rotacion_diaria": 0.0, "cobertura_dias": None, "sugerido": 0, "motivo": None,
+            "proveedor": None, "factor_estacional": None, **kw}
+
+
+def test_ordenar_sugerencia_deja_lo_sin_valor_al_final_en_los_dos_sentidos():
+    filas = [_fila(1, "A", cobertura_dias=5.0), _fila(2, "B"), _fila(3, "C", cobertura_dias=2.0), _fila(4, "D", cobertura_dias=9.0)]
+    ids = lambda r: [f["producto_id"] for f in r]  # noqa: E731
+    assert ids(reposicion.ordenar_sugerencia(filas, "cobertura_dias", "asc")) == [3, 1, 4, 2]
+    assert ids(reposicion.ordenar_sugerencia(filas, "cobertura_dias", "desc")) == [4, 1, 3, 2]
+    # Sin `orden`, tal cual vienen (el de urgencia del motor).
+    assert ids(reposicion.ordenar_sugerencia(filas, None, "desc")) == [1, 2, 3, 4]
+
+
+def test_ordenar_sugerencia_textos_sin_acentos_ni_mayusculas_y_motivo_como_se_lee():
+    filas = [_fila(1, "zeta", codigo="b-2", motivo="por_rotacion", proveedor="Álamo"),
+             _fila(2, "Ágata", codigo="A-1", motivo="bajo_minimo", proveedor="barra"),
+             _fila(3, "Beta", codigo=None, motivo="ambos", proveedor=None),
+             _fila(4, "abeja", codigo="", motivo=None, proveedor="")]
+    ids = lambda o, s="asc": [f["producto_id"] for f in reposicion.ordenar_sugerencia(filas, o, s)]  # noqa: E731
+    assert ids("nombre") == [4, 2, 3, 1]          # abeja, Ágata, Beta, zeta (Á cuenta como a)
+    assert ids("nombre", "desc") == [1, 3, 2, 4]
+    assert ids("codigo") == [2, 1, 3, 4]          # A-1, b-2; sin código ('' y None) al final, en su orden
+    assert ids("proveedor") == [1, 2, 3, 4]       # Álamo, barra
+    assert ids("motivo") == [2, 3, 1, 4]          # Bajo el mínimo, Bajo el mínimo y por rotación, Por rotación, sin motivo
+    assert ids("motivo", "desc") == [1, 3, 2, 4]
+
+
+def test_ordenar_sugerencia_un_empate_conserva_el_orden_de_urgencia_y_lo_desconocido_es_valueerror():
+    filas = [_fila(1, "A", sugerido=5), _fila(2, "B", sugerido=5), _fila(3, "C", sugerido=7)]
+    for sentido in ("asc", "desc"):
+        r = [f["producto_id"] for f in reposicion.ordenar_sugerencia(filas, "sugerido", sentido)]
+        assert r.index(1) < r.index(2), sentido
+    for malo in ("precio", "", "NOMBRE"):
+        with pytest.raises(ValueError):
+            reposicion.ordenar_sugerencia(filas, malo, "asc")
+    with pytest.raises(ValueError):
+        reposicion.ordenar_sugerencia(filas, "nombre", "arriba")
+    with pytest.raises(ValueError):
+        reposicion.ordenar_sugerencia(filas, None, "arriba")
+
+
+def test_el_orden_viaja_a_la_lista_y_al_csv_y_uno_desconocido_es_422(abrir_ventas):
+    abrir = abrir_ventas
+    _yerba_de_hoy(abrir)
+    with abrir() as conn:
+        _producto(conn, "Arroz", inicial=5.0, minimo=8.0)
+    c = _cliente(abrir)
+    # Sin orden: urgencia (Yerba rota, cobertura 10; Arroz sin rotación va al final).
+    assert [p["nombre"] for p in c.get("/api/reportes/reposicion").json()["productos"]] == ["Yerba", "Arroz"]
+    por_nombre = c.get("/api/reportes/reposicion", params={"orden": "nombre", "sentido": "asc"}).json()["productos"]
+    assert [p["nombre"] for p in por_nombre] == ["Arroz", "Yerba"]
+    csv_asc = c.get("/api/reportes/reposicion/export", params={"orden": "nombre"}).text.splitlines()
+    assert [fila.split(",")[2] for fila in csv_asc[1:]] == ["Arroz", "Yerba"]
+    csv_desc = c.get("/api/reportes/reposicion/export", params={"orden": "nombre", "sentido": "desc"}).text.splitlines()
+    assert [fila.split(",")[2] for fila in csv_desc[1:]] == ["Yerba", "Arroz"]
+    # Cobertura: Arroz no tiene (sin rotación) y va al final aunque el sentido sea desc.
+    csv_cob = c.get("/api/reportes/reposicion/export", params={"orden": "cobertura_dias", "sentido": "desc"}).text.splitlines()
+    assert [fila.split(",")[2] for fila in csv_cob[1:]] == ["Yerba", "Arroz"]
+    for malo in ({"orden": "precio"}, {"sentido": "arriba"}, {"orden": "nombre", "sentido": "x"}):
+        assert c.get("/api/reportes/reposicion", params=malo).status_code == 422, malo
+        assert c.get("/api/reportes/reposicion/export", params=malo).status_code == 422, malo
+
+
 def _id_de(abrir, nombre):
     with abrir() as conn:
         return conn.execute("SELECT id FROM catalog_items WHERE name=?", (nombre,)).fetchone()["id"]

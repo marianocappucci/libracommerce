@@ -103,6 +103,7 @@ from __future__ import annotations
 
 import datetime
 import sqlite3
+import unicodedata
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from fractions import Fraction
 
@@ -129,6 +130,15 @@ FACTOR_ESTACIONAL_MAX = Fraction(4)
 _MIN_DIAS_CON_VENTA_ESTACIONAL = 3
 
 MOTIVOS = ("bajo_minimo", "por_rotacion", "ambos")
+
+# El orden que puede pedirse a la lista y al CSV (ADR-037): las columnas de la pantalla de reposición. Sin pedirlo, el
+# de urgencia de `sugerencia_reposicion`.
+ORDENES = ("nombre", "codigo", "stock", "en_camino", "stock_minimo", "unidades_vendidas", "rotacion_diaria",
+           "cobertura_dias", "sugerido", "motivo", "proveedor", "factor_estacional", "por_vencer")
+SENTIDOS = ("asc", "desc")
+# `motivo` se ordena como se lee en la pantalla («Bajo el mínimo», «Bajo el mínimo y por rotación», «Por rotación»),
+# no por el código.
+_RANGO_MOTIVO = {"bajo_minimo": 0, "ambos": 1, "por_rotacion": 2}
 
 #: Las órdenes que todavía no llegaron: todo menos `received` y `cancelled` (ver "En camino" en el docstring).
 _ESTADOS_EN_CAMINO = ("draft", "sent", "partial")
@@ -519,6 +529,39 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
     # consultas seguidas den el mismo orden.
     return sorted(filas, key=lambda r: (r["cobertura_dias"] is None, r["cobertura_dias"] or 0, -r["sugerido"],
                                         r["nombre"].casefold(), r["producto_id"]))
+
+
+def _sin_acentos(texto: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFD", texto.casefold()) if not unicodedata.combining(c))
+
+
+def ordenar_sugerencia(filas: list[dict], orden: str | None, sentido: str = "asc") -> list[dict]:
+    """Las filas de `sugerencia_reposicion` por la columna `orden` (una de `ORDENES`), o tal cual con `orden=None`.
+
+    Los textos se comparan sin mayúsculas ni acentos, como la pantalla. Lo que no tiene valor (sin código, sin
+    cobertura, sin motivo, sin proveedor, sin factor, sin lotes por vencer) va siempre al final, sea cual sea el
+    sentido. Un empate conserva el orden de urgencia que traen las filas. Una columna o un sentido desconocidos son
+    `ValueError`, que los routers traducen en 422."""
+    if sentido not in SENTIDOS:
+        raise ValueError(f"sentido inválido: {sentido!r} (uno de {', '.join(SENTIDOS)})")
+    if orden is None:
+        return filas
+    if orden not in ORDENES:
+        raise ValueError(f"orden inválido: {orden!r} (uno de {', '.join(ORDENES)})")
+
+    def valor(f: dict):
+        v = f.get(orden)
+        if orden == "motivo":
+            return _RANGO_MOTIVO.get(v)
+        if orden in ("codigo", "proveedor"):
+            return _sin_acentos(v) if v else None
+        if orden == "nombre":
+            return _sin_acentos(v)
+        return v
+
+    con_valor = [f for f in filas if valor(f) is not None]
+    sin_valor = [f for f in filas if valor(f) is None]
+    return sorted(con_valor, key=valor, reverse=sentido == "desc") + sin_valor
 
 
 # ── Parámetros propios del producto (ADR-020) ────────────────────────────
