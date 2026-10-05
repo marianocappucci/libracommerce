@@ -296,3 +296,39 @@ def test_con_notas_parciales_la_cuenta_corriente_no_se_acredita_otra_vez(abrir_v
         conn.commit()
         abonos = conn.execute("SELECT monto FROM cc_pagos WHERE cliente_id=? ORDER BY id", (cid,)).fetchall()
         assert [float(a["monto"]) for a in abonos] == [120.0, 80.0], "sólo los de las notas: la anulación no suma otro"
+
+
+# ── El detalle de la venta trae cuánto queda por acreditar (ADR-036) ──
+
+def test_el_detalle_trae_el_saldo_acreditable_y_baja_con_cada_nota(abrir_ventas):
+    vid = _venta(abrir_ventas, pagos=[{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        _factura(conn, vid)
+        v = ventas.obtener_venta(conn, vid)
+        assert (v["factura_total"], v["factura_saldo_acreditable"]) == (200.0, 200.0), "sin notas: todo queda"
+        _nota(conn, total=50, numero=1)
+        assert ventas.obtener_venta(conn, vid)["factura_saldo_acreditable"] == 150.0
+        _nota(conn, total=149.99, numero=2)
+        assert ventas.obtener_venta(conn, vid)["factura_saldo_acreditable"] == 0.01
+        _nota(conn, total=0.01, numero=3)
+        v = ventas.obtener_venta(conn, vid)
+        assert v["factura_saldo_acreditable"] == 0.0 and v["factura_total"] == 200.0
+
+
+def test_una_nota_sin_cae_no_baja_el_saldo_del_detalle(abrir_ventas):
+    vid = _venta(abrir_ventas, pagos=[{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        _factura(conn, vid)
+        _nota(conn, total=100, numero=1, cae="PENDIENTE")
+        assert ventas.obtener_venta(conn, vid)["factura_saldo_acreditable"] == 200.0
+
+
+@pytest.mark.parametrize("cae", ["", None, "PENDIENTE"])
+def test_sin_factura_o_sin_cae_el_detalle_no_trae_saldo(abrir_ventas, cae):
+    sin_factura = _venta(abrir_ventas, pagos=[{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}])
+    con_factura = _venta(abrir_ventas, pagos=[{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        _factura(conn, con_factura, cae=cae)
+        for vid in (sin_factura, con_factura):
+            v = ventas.obtener_venta(conn, vid)
+            assert (v["factura_total"], v["factura_saldo_acreditable"]) == (None, None)

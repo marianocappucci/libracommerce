@@ -1379,3 +1379,11 @@ rechaza después con un mensaje propio de rango se informa (ver `ge=2`); si ese 
 - Sin cambios: venta sin factura, factura sin CAE, `nota_credito_display` (ADR-034) y la venta ya anulada (no-op).
 - El extra `erp` pide `libracore>=1.130`.
 
+
+## ADR-036 — El detalle de la venta trae `factura_total` y `factura_saldo_acreditable` (2026-10-05)
+
+**Contexto:** con las notas parciales del motor (libracore ADR-018) una factura se acredita en varias notas. `nota_credito_display` (ADR-034) dice que *existe* una nota con CAE, y la pantalla lo usaba para dejar de ofrecer la nota: con parciales eso la escondía con la factura casi entera sin acreditar. La pantalla necesita saber **cuánto queda**, para seguir ofreciendo la nota, sugerir el importe y decir cuándo ya se puede anular la venta.
+
+- Decisión 1 — `obtener_venta` trae `factura_total` y `factura_saldo_acreditable` (`float`, como el resto de los importes del detalle). El saldo lo calcula el motor (`saldo_acreditable`, ADR-035): las notas **con CAE** suman y una sin CAE no cuenta.
+- Decisión 2 — ambos son `None` si no hay factura o la factura no tiene CAE: ahí no hay nada que acreditar. `nota_credito_display` no cambia (sigue siendo la primera nota con CAE).
+- Sin cambios de esquema ni de rutas.
