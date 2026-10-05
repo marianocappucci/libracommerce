@@ -79,7 +79,8 @@ def build_reposicion_router(
     (`true` por default: sólo los de `sugerido > 0`) y `descontar_vencido` (`true` por default: lo que está en lotes
     vencidos no cuenta como stock) y `proveedor_id` (sólo los productos de ese proveedor habitual, ADR-021) y `estacionalidad` (`false` por default: ajusta la proyección por lo que
     pasó hace un año, ADR-023) y `descontar_por_vencer` (`false` por default: resta además del stock lo que, de los lotes que vencen dentro del horizonte, no llega a venderse antes, ADR-025;
-    cada fila trae `por_vencer`). `resolver_proveedor(conn, proveedor_id) -> party_id` y
+    cada fila trae `por_vencer`) y `orden` (una de `erp.reposicion.ORDENES`, las columnas de la pantalla) con `sentido` (`asc` por
+    default, o `desc`): la lista y el CSV salen en ese orden, lo que no tiene valor al final (ADR-037); sin `orden`, el de urgencia. `resolver_proveedor(conn, proveedor_id) -> party_id` y
     `proveedor_de(conn, party_id) -> proveedor_id` son los mismos ganchos que `OpcionesCompras`, para un producto cuyos proveedores no son el `party_id`
     del motor (VentaLibra): el `proveedor_id` del filtro y el de cada fila hablan en los ids del producto. Sin ellos, identidad. Un parámetro inválido, o una sucursal que no existe, es 422."""
     abrir, _ = _deps(None, conexion)
@@ -88,7 +89,7 @@ def build_reposicion_router(
     def _reporte(dias_rotacion: int, dias_cobertura: int, plazo_entrega_dias: int, sucursal_id: int | None,
                  categoria: str | None, producto_id: int | None, solo_a_pedir: bool,
                  descontar_vencido: bool, proveedor_id: int | None, estacionalidad: bool,
-                 descontar_por_vencer: bool) -> list[dict]:
+                 descontar_por_vencer: bool, orden: str | None, sentido: str) -> list[dict]:
         try:
             with abrir() as conn:
                 party_id = resolver_proveedor(conn, proveedor_id) if proveedor_id is not None else None
@@ -100,8 +101,9 @@ def build_reposicion_router(
                     descontar_por_vencer=descontar_por_vencer,
                 )
                 # El `proveedor_id` de cada fila, en los ids del producto.
-                return [dict(f, proveedor_id=proveedor_de(conn, f["proveedor_id"]) if f["proveedor_id"] is not None else None)
-                        for f in filas]
+                filas = [dict(f, proveedor_id=proveedor_de(conn, f["proveedor_id"]) if f["proveedor_id"] is not None else None)
+                         for f in filas]
+                return reposicion.ordenar_sugerencia(filas, orden, sentido)
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
 
@@ -112,9 +114,10 @@ def build_reposicion_router(
                                                 le=reposicion.MAX_PLAZO_ENTREGA_DIAS),
                 sucursal_id: int | None = None, categoria: str | None = None, producto_id: int | None = None,
                 solo_a_pedir: bool = True, descontar_vencido: bool = True,
-                proveedor_id: int | None = None, estacionalidad: bool = False, descontar_por_vencer: bool = False):
+                proveedor_id: int | None = None, estacionalidad: bool = False, descontar_por_vencer: bool = False,
+                orden: str | None = None, sentido: str = "asc"):
         productos = _reporte(dias_rotacion, dias_cobertura, plazo_entrega_dias, sucursal_id, categoria, producto_id,
-                             solo_a_pedir, descontar_vencido, proveedor_id, estacionalidad, descontar_por_vencer)
+                             solo_a_pedir, descontar_vencido, proveedor_id, estacionalidad, descontar_por_vencer, orden, sentido)
         return {
             "dias_rotacion": dias_rotacion, "dias_cobertura": dias_cobertura,
             "plazo_entrega_dias": plazo_entrega_dias, "sucursal_id": sucursal_id, "categoria": categoria,
@@ -137,9 +140,10 @@ def build_reposicion_router(
                                                  le=reposicion.MAX_PLAZO_ENTREGA_DIAS),
                  sucursal_id: int | None = None, categoria: str | None = None, producto_id: int | None = None,
                  solo_a_pedir: bool = True, descontar_vencido: bool = True,
-                 proveedor_id: int | None = None, estacionalidad: bool = False, descontar_por_vencer: bool = False):
+                 proveedor_id: int | None = None, estacionalidad: bool = False, descontar_por_vencer: bool = False,
+                 orden: str | None = None, sentido: str = "asc"):
         productos = _reporte(dias_rotacion, dias_cobertura, plazo_entrega_dias, sucursal_id, categoria, producto_id,
-                             solo_a_pedir, descontar_vencido, proveedor_id, estacionalidad, descontar_por_vencer)
+                             solo_a_pedir, descontar_vencido, proveedor_id, estacionalidad, descontar_por_vencer, orden, sentido)
         return _csv(productos, _CAMPOS, f"reposicion_{datetime.date.today().isoformat()}.csv")
 
     return router

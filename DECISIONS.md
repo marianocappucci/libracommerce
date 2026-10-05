@@ -1387,3 +1387,12 @@ rechaza después con un mensaje propio de rango se informa (ver `ge=2`); si ese 
 - Decisión 1 — `obtener_venta` trae `factura_total` y `factura_saldo_acreditable` (`float`, como el resto de los importes del detalle). El saldo lo calcula el motor (`saldo_acreditable`, ADR-035): las notas **con CAE** suman y una sin CAE no cuenta.
 - Decisión 2 — ambos son `None` si no hay factura o la factura no tiene CAE: ahí no hay nada que acreditar. `nota_credito_display` no cambia (sigue siendo la primera nota con CAE).
 - Sin cambios de esquema ni de rutas.
+
+## ADR-037 — La reposición se puede pedir ordenada; el CSV sale en el orden de la tabla (2026-10-05)
+
+**Contexto:** la pantalla de reposición de `libra-ui` ordena la lista en el navegador (una columna y un sentido), pero el CSV lo arma el motor y salía siempre en el orden de urgencia (menor cobertura primero): quien ordenaba por nombre o por sugerido y exportaba recibía otro orden. El margen ya resolvía lo mismo con `orden` y `sentido` (`erp.margen.ORDENES`/`SENTIDOS`); el CSV no se arma en el kit porque ahí viven la neutralización de fórmulas (`csv_seguro`) y los booleanos legibles.
+
+- Decisión 1 — `GET /api/reportes/reposicion` y `/export` aceptan `orden` (una de `erp.reposicion.ORDENES`: las columnas de la pantalla) y `sentido` (`asc` por default, o `desc`). Sin `orden`, nada cambia: el de urgencia. Uno desconocido es 422.
+- Decisión 2 — `erp.reposicion.ordenar_sugerencia` es una función pura sobre las filas. Los textos se comparan sin mayúsculas ni acentos (como `localeCompare(..., 'es', {sensitivity: 'base'})` de la pantalla); `motivo` se ordena como se lee («Bajo el mínimo», «Bajo el mínimo y por rotación», «Por rotación»), no por el código; lo que no tiene valor va siempre al final, sea cual sea el sentido; un empate conserva el orden de urgencia.
+- Decisión 3 — la lista y el CSV comparten el orden: es la misma función en el mismo `_reporte`, así que no pueden divergir.
+- Límite: si la pantalla suma una columna ordenable, hay que sumarla a `ORDENES`; mientras no esté, la pantalla no puede pedirle al motor ese orden para el CSV.
