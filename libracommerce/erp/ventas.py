@@ -795,7 +795,7 @@ def _tiene_cae(cae) -> bool:
 def _factura_de_la_venta(conn, vid: int):
     """La factura vinculada a la venta (`tipo`, `punto_venta`, `numero`, `cae`), o `None`."""
     return conn.execute(
-        """SELECT f.id, f.tipo, f.punto_venta, f.numero, f.cae
+        """SELECT f.id, f.tipo, f.punto_venta, f.numero, f.cae, f.total
            FROM venta_links vl JOIN facturas f ON f.id = vl.factura_id
            WHERE vl.venta_id = ?""",
         (vid,),
@@ -818,9 +818,25 @@ def _nota_de_credito_con_cae_de(conn, factura):
     return None
 
 
-def _nota_con_cae_de(conn, factura) -> bool:
-    """¿La factura ya tiene una nota de crédito **con CAE**? Una nota sin CAE no la revierte ante ARCA."""
-    return _nota_de_credito_con_cae_de(conn, factura) is not None
+def _saldo_sin_acreditar(conn, factura):
+    """`(saldo, previas)`: cuánto de la factura **no acreditan** todavía sus notas con CAE, y esas notas.
+
+    La cuenta es del motor (`libracore.notas_de_credito.saldo_acreditable`): las notas de una factura SUMAN, así que
+    una factura puede estar acreditada en varias parciales. Una nota sin CAE no cuenta: ARCA no la conoce.
+    """
+    from libracore import tipos_comprobante as tipos
+    from libracore.notas_de_credito import saldo_acreditable
+
+    marcas = ",".join("?" for _ in tipos.NC)
+    previas = [
+        dict(n) for n in conn.execute(
+            f"""SELECT tipo, punto_venta, numero, cae, total FROM facturas
+                WHERE tipo IN ({marcas}) AND cbte_asoc_tipo=? AND cbte_asoc_pv=? AND cbte_asoc_nro=?
+                ORDER BY id""",
+            (*tipos.NC, factura["tipo"], factura["punto_venta"], factura["numero"]),
+        ).fetchall()
+    ]
+    return saldo_acreditable({"total": factura["total"]}, previas), previas
 
 
 def anular_venta(conn, vid: int, usuario_id: int | None = None,
@@ -873,9 +889,10 @@ def anular_venta(conn, vid: int, usuario_id: int | None = None,
     (merma) después de la venta: el lote reaparece con esa cantidad, que es lo que dice el ledger (la merma ya descontó
     lo que tenía entonces). No bloquea: suma stock.
 
-    🔴 **Una venta con factura CON CAE y sin nota de crédito no se anula** — levanta `VentaConFacturaCAE`
-    (ver esa clase), también ANTES de tocar nada. Con la nota ya emitida sí se anula, y **la cuenta corriente
-    no se acredita otra vez** si la nota ya abonó la deuda (`libracore.notas_de_credito.cc_acreditada_por_nota`):
+    🔴 **Una venta con factura CON CAE que sus notas de crédito no acreditan por completo no se anula** — levanta
+    `VentaConFacturaCAE` (ver esa clase), también ANTES de tocar nada. Las notas **suman** (una nota total, o varias
+    parciales que cubran el total): con la factura acreditada por completo sí se anula, y **la cuenta corriente
+    no se acredita otra vez** si las notas ya abonaron la deuda (`libracore.notas_de_credito.cc_acreditada_por_nota`):
     sin eso, el saldo del cliente quedaba en −total. Una factura sin CAE (sin ARCA, o que ARCA no autorizó)
     se anula como siempre.
 
@@ -906,10 +923,15 @@ def anular_venta(conn, vid: int, usuario_id: int | None = None,
     cc_ya_acreditada = False
     factura = _factura_de_la_venta(conn, vid)
     if factura is not None and _tiene_cae(factura["cae"]):
-        if not _nota_con_cae_de(conn, factura):
+        saldo, previas = _saldo_sin_acreditar(conn, factura)
+        if saldo > 0:
+            con_cae = [n for n in previas if _tiene_cae(n["cae"])]
             raise VentaConFacturaCAE(
-                f"La venta tiene la factura #{factura['id']} emitida por ARCA (con CAE): ARCA la tiene vigente. "
-                "Emití primero la nota de crédito de esa factura y después anulá la venta.",
+                (f"La venta tiene la factura #{factura['id']} emitida por ARCA (con CAE): ARCA la tiene vigente. "
+                 "Emití primero la nota de crédito de esa factura y después anulá la venta.")
+                if not con_cae else
+                (f"La factura #{factura['id']} de la venta está acreditada sólo en parte por sus notas: faltan "
+                 f"{saldo} por acreditar. Emití una nota de crédito por ese saldo y después anulá la venta."),
                 factura["id"],
             )
         from libracore.notas_de_credito import cc_acreditada_por_nota

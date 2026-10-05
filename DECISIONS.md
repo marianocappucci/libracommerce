@@ -1369,3 +1369,13 @@ rechaza después con un mensaje propio de rango se informa (ver `ge=2`); si ese 
 **Decisión (arreglo de fondo en el motor).** `obtener_venta` agrega `nota_credito_display`: el comprobante de la nota de crédito **con CAE** de la factura de la venta, como lo lee una persona (`NOTA CREDITO C 0005-00000001`, mismo `factura_display`), o `None` si no hay factura, la factura no tiene CAE o no tiene nota. Una nota sin CAE (`PENDIENTE`) no cuenta, el mismo criterio con el que `anular_venta` exige la nota (ADR-032): `_nota_con_cae_de` pasa a apoyarse en `_nota_de_credito_con_cae_de`, que devuelve la nota. Campo aditivo: ningún consumidor existente cambia. Sin migración.
 
 **Límites.** Es la nota **total** de la factura (la única que el motor emite hoy). Si hubiera más de una nota con CAE para la misma factura se informa la primera por `id`.
+
+## ADR-035 — Anular una venta exige que las notas de crédito SUMEN el total de la factura (2026-10-04)
+
+**Contexto:** `libracore` v1.130.0 (ADR-018) permite acreditar una factura en varias notas parciales. El ADR-032 pedía *una* nota con CAE para anular: con parciales eso dejaba anular una venta cuya factura seguía vigente casi entera.
+
+- Decisión 1 — `anular_venta` levanta `VentaConFacturaCAE` si **lo que acreditan las notas con CAE** de la factura **no llega a su total**. La cuenta es del motor (`libracore.notas_de_credito.saldo_acreditable`), no se reescribe acá. Una nota sin CAE no suma. El mensaje dice cuánto falta cuando ya hay notas.
+- Decisión 2 — con la factura acreditada por completo se anula como siempre, y la cuenta corriente no se acredita otra vez si las notas ya la abonaron (`cc_acreditada_por_nota`, que ahora reconoce el abono de cada nota).
+- Sin cambios: venta sin factura, factura sin CAE, `nota_credito_display` (ADR-034) y la venta ya anulada (no-op).
+- El extra `erp` pide `libracore>=1.130`.
+

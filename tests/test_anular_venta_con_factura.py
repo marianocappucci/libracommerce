@@ -42,12 +42,12 @@ def _factura(conn, vid, *, cae=CAE, tipo=11, numero=11):
     return fid
 
 
-def _nota(conn, *, tipo_original=11, numero_original=11, cae=CAE, tipo_nota=13, numero=1):
+def _nota(conn, *, tipo_original=11, numero_original=11, cae=CAE, tipo_nota=13, numero=1, total=200):
     conn.execute(
         "INSERT INTO facturas (tipo, punto_venta, numero, fecha, cliente_cuit, cliente_razon, cliente_iva_cond, "
         "items, subtotal, iva_amount, total, ambiente, cae, cbte_asoc_tipo, cbte_asoc_pv, cbte_asoc_nro) "
-        "VALUES (?, 5, ?, ?, '', 'CF', 5, '[]', 200, 0, 200, 'homologacion', ?, ?, 5, ?)",
-        (tipo_nota, numero, HOY, cae, tipo_original, numero_original))
+        "VALUES (?, 5, ?, ?, '', 'CF', 5, '[]', ?, 0, ?, 'homologacion', ?, ?, 5, ?)",
+        (tipo_nota, numero, HOY, total, total, cae, tipo_original, numero_original))
     conn.commit()
 
 
@@ -235,3 +235,64 @@ def test_el_detalle_de_la_venta_dice_si_la_factura_ya_tiene_su_nota(abrir_ventas
         _nota(conn, numero=2)
         d = ventas.obtener_venta(conn, vid)
         assert d["nota_credito_display"] == "NOTA CREDITO C 0005-00000002", d["nota_credito_display"]
+
+
+# ── Las notas SUMAN: una factura puede estar acreditada en varias parciales (libracore ADR-018) ──
+
+def test_una_nota_parcial_no_alcanza_y_dice_cuanto_falta(abrir_ventas):
+    vid = _venta(abrir_ventas, pagos=[{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        _factura(conn, vid)
+        _nota(conn, total=50)
+        antes = _estado(conn, vid)
+        with pytest.raises(ventas.VentaConFacturaCAE) as e:
+            ventas.anular_venta(conn, vid, usuario_id=USUARIO["id"])
+        assert "150" in str(e.value) and "saldo" in str(e.value), "dice cuánto falta acreditar"
+        conn.rollback()
+        assert _estado(conn, vid) == antes, "no se movió nada"
+
+
+def test_varias_notas_parciales_que_cubren_la_factura_dejan_anularla(abrir_ventas):
+    vid = _venta(abrir_ventas, pagos=[{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        _factura(conn, vid)
+        _nota(conn, total=50, numero=1)
+        _nota(conn, total=149.99, numero=2)
+        with pytest.raises(ventas.VentaConFacturaCAE):
+            ventas.anular_venta(conn, vid)                       # 199.99: falta un centavo
+        conn.rollback()
+        _nota(conn, total=0.01, numero=3)
+        assert ventas.anular_venta(conn, vid) is True
+
+
+def test_una_nota_parcial_sin_cae_no_suma(abrir_ventas):
+    vid = _venta(abrir_ventas, pagos=[{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        _factura(conn, vid)
+        _nota(conn, total=100, numero=1)
+        _nota(conn, total=100, numero=2, cae="PENDIENTE")
+        with pytest.raises(ventas.VentaConFacturaCAE):
+            ventas.anular_venta(conn, vid)
+
+
+def test_con_notas_parciales_la_cuenta_corriente_no_se_acredita_otra_vez(abrir_ventas):
+    from libracore.db.cuenta_corriente import create_cc_pago
+    from libracore.notas_de_credito import referencia_cc_de_nota
+
+    with abrir_ventas() as conn:
+        cid = _cliente(conn)
+    vid = _venta(abrir_ventas, cliente_id=cid,
+                 pagos=[{"medio": "cuenta_corriente", "monto": 200.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        fid = _factura(conn, vid)
+        for numero, monto in ((1, 120), (2, 80)):
+            _nota(conn, total=monto, numero=numero)
+            # El abono tal como lo deja ahora `POST /api/facturas/{id}/nota-credito`: uno por nota, con su marca.
+            create_cc_pago(cliente_id=cid, monto=monto, fecha=HOY, concepto="NC", usuario_id=USUARIO["id"],
+                           referencia=referencia_cc_de_nota(fid, 100 + numero), medio_pago="Cuenta Corriente",
+                           caja_id=None, conn=conn)
+        conn.commit()
+        assert ventas.anular_venta(conn, vid, usuario_id=USUARIO["id"]) is True
+        conn.commit()
+        abonos = conn.execute("SELECT monto FROM cc_pagos WHERE cliente_id=? ORDER BY id", (cid,)).fetchall()
+        assert [float(a["monto"]) for a in abonos] == [120.0, 80.0], "sólo los de las notas: la anulación no suma otro"
