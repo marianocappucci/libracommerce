@@ -269,22 +269,26 @@ def agregar_pago(conn, venta_id: int, medio: str, monto: float, referencia: str 
     diferencia.
     """
     from libracore import pagos as acreditacion
+    from libracore.db import libro_de_clientes
 
     # Valida contra el vocabulario del motor antes de tocar la base: el error
     # dice qué estado se intentó poner, en vez del `CheckViolation` de psycopg.
     estado = acreditacion.estado_de({"estado": estado}).value
     if recibido is None:
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO ventas_pagos (venta_id, medio, monto, referencia, estado) "
             "VALUES (?,?,?,?,?)",
             (venta_id, medio, monto, referencia, estado),
         )
     else:
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO ventas_pagos (venta_id, medio, monto, referencia, estado, recibido) "
             "VALUES (?,?,?,?,?,?)",
             (venta_id, medio, monto, referencia, estado, recibido),
         )
+    # La venta fiada va también al libro de clientes del motor, en esta transacción
+    # (ADR-027 de LibraCore, en sombra: el saldo se sigue leyendo calculado).
+    libro_de_clientes.al_libro_venta_pago(conn, cur.lastrowid, medio)
 
 
 def vincular_venta_turno(conn, venta_id: int, turno_id: int) -> None:
@@ -1312,11 +1316,20 @@ def vincular_cobros_de_venta(conn, numero: str, factura_id: int) -> int:
     resultado válido (venta en cuenta corriente, o cobrada por QR y todavía sin
     acreditar).
     """
+    from libracore.db.caja import al_libro_de_clientes
+
+    patron = PATRON_COBROS_DE_VENTA.format(numero=numero)
+    ids = [f[0] for f in conn.execute(
+        "SELECT id FROM caja_movimientos WHERE factura_id IS NULL AND tipo='ingreso' AND concepto LIKE ?",
+        (patron,),
+    ).fetchall()]
     cur = conn.execute(
         "UPDATE caja_movimientos SET factura_id=? "
         "WHERE factura_id IS NULL AND tipo='ingreso' AND concepto LIKE ?",
-        (factura_id, PATRON_COBROS_DE_VENTA.format(numero=numero)),
+        (factura_id, patron),
     )
+    # Un ingreso a cuenta corriente con factura es deuda: va al libro de clientes (ADR-027).
+    al_libro_de_clientes(conn, ids)
     return cur.rowcount
 
 

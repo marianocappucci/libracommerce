@@ -325,6 +325,36 @@ def test_anular_una_venta_fiada_acredita_la_cuenta_corriente(abrir_ventas):
         assert [float(r["monto"]) for r in cc] == [100.0]
 
 
+def test_la_venta_fiada_y_su_anulacion_van_al_libro_de_clientes(abrir_ventas):
+    """ADR-027 de LibraCore: el libro de clientes, en sombra, da lo mismo que el cálculo."""
+    from libracore.db import libro_de_clientes
+    from libracore.db.cuenta_corriente import VENTAS_LIBRACOMMERCE, VENTAS_LIBRACORE
+
+    libro_de_clientes.registrar_origen_de_ventas(VENTAS_LIBRACOMMERCE)
+    try:
+        with abrir_ventas() as conn:
+            conn.execute("INSERT INTO clients (id, name, cuit_dni) VALUES (5, 'Cliente', '20111111112')")
+            conn.execute("INSERT INTO parties (id, party_type, display_name) VALUES (5, 'customer', 'Cliente')")
+            conn.commit()
+        vid = ventas.crear_venta_directa(
+            abrir_ventas, fecha=HOY, items=[{"nombre": "X", "qty": 1, "precio": 100.0, "subtotal": 100.0}],
+            subtotal=100.0, descuento=0.0, total=100.0, cliente_id=5, cliente_nombre="Cliente",
+            usuario_id=USUARIO["id"], observaciones="", estado="cobrada",
+            pagos=[{"medio": "cuenta_corriente", "monto": 60.0, "estado": "aprobado"},
+                   {"medio": "efectivo", "monto": 40.0, "estado": "aprobado"}],
+            stock_habilitado=False)
+        assert libro_de_clientes.saldos_del_libro() == {5: 60.0}
+        assert libro_de_clientes.comparar() == []
+
+        with abrir_ventas() as conn:
+            ventas.anular_venta(conn, vid)
+            conn.commit()
+        assert libro_de_clientes.saldos_del_libro() == {5: 0.0}
+        assert libro_de_clientes.comparar() == []
+    finally:
+        libro_de_clientes.registrar_origen_de_ventas(VENTAS_LIBRACORE)
+
+
 # ── Turnos ───────────────────────────────────────────────────────────────
 
 
