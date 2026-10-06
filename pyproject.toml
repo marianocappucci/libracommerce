@@ -50,7 +50,9 @@ erp = [
     # >=1.128 (ADR-032, 2026-10-04): `anular_venta` pregunta `libracore.notas_de_credito.cc_acreditada_por_nota`
     # para no acreditar la cuenta corriente dos veces cuando la nota de la factura ya la abonó.
     # >=1.130 (ADR-035): las notas SUMAN (`saldo_acreditable`) y el abono de cada nota lleva su marca (`nc:factura:<id>:<nota>`).
-    "libracore>=1.130,<2",
+    # >=1.137 (ADR-027 de LibraCore): `agregar_pago` y `vincular_cobros_de_venta` llevan la venta
+    # fiada y el cobro a cuenta al libro de clientes del motor (`libro_de_clientes`).
+    "libracore>=1.137,<2",
 ]
 web = [
     "fastapi>=0.115,<1",
@@ -126,7 +128,8 @@ dev = [
     # v1.125.0 -> v1.128.0 (2026-10-04, ADR-032): `anular_venta` usa `notas_de_credito.cc_acreditada_por_nota`
     # (v1.128.0), que es ademas el piso del extra `erp`.
     # v1.128.0 -> v1.130.0 (2026-10-05, ADR-035): `anular_venta` usa `saldo_acreditable` (las notas suman) y el abono por nota.
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.130.0",
+    # v1.130.0 -> v1.137.0 (2026-10-06, ADR-027): el libro de clientes, piso del extra `erp`.
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.137.0",
 ]
 offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@develop"]
 offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@develop"]
