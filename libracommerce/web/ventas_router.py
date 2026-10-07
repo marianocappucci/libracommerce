@@ -40,10 +40,10 @@ from ..erp import catalogo, lotes, ventas
 from ..erp.hooks import SIN_GANCHOS, Hooks
 from . import fastapi as _fastapi
 from ._validacion import sin_booleanos
-from .catalogo_router import Conexion, _deps
+from .catalogo_router import Conexion, _deps, _nadie
 
 _fastapi()
-from fastapi import APIRouter, Depends, HTTPException  # noqa: E402
+from fastapi import APIRouter, Depends, HTTPException, Request  # noqa: E402
 from libracore import medios_pago  # noqa: E402
 from libracore import pagos as acreditacion  # noqa: E402
 from libracore.db.caja import MEDIO_CUENTA_CORRIENTE  # noqa: E402
@@ -235,6 +235,46 @@ class OpcionesVentas:
     #: son byte a byte las de hoy, la ruta no existe (404) y no figura en `/openapi.json` (Contalibra y Restolibra no
     #: cambian). Sin gate de plan ni permisos propios: el producto monta el router con sus dependencias.
     con_avisos_de_vencimiento: bool = False
+    #: A quién se le limitan las ventas a las de **sus turnos** de caja (ADR-038): recibe el usuario de la sesión y dice si
+    #: es uno de ésos. Para ellos `GET ""` lista sólo las ventas ligadas a un turno que abrieron, y el detalle, la anulación
+    #: y la devolución de una venta ajena dan 404, como una que no existe. `None` (el default): todos ven todas, como hoy, y
+    #: el listado ni resuelve la sesión. Las rutas con id de venta de OTROS routers se cubren con `build_guarda_de_venta`.
+    solo_sus_turnos: Callable[[dict], bool] | None = None
+
+
+def build_guarda_de_venta(
+    *,
+    solo_sus_turnos: Callable[[dict], bool],
+    conexion: Conexion | None = None,
+    usuario_actual: Callable[..., Any] | None = None,
+    parametro: str = "vid",
+):
+    """La dependencia que corta una ruta con un id de venta en el path para quien sólo ve sus turnos (ADR-038): 404 si la
+    venta no es de un turno suyo. Es la misma regla que `OpcionesVentas.solo_sus_turnos` aplica a este router, para colgarla
+    de los otros que reciben una venta (el cobro y la factura de LibraCore, el ticket del producto):
+
+    ```python
+    app.include_router(otro_router, dependencies=[Depends(build_guarda_de_venta(
+        solo_sus_turnos=..., conexion=..., usuario_actual=..., parametro="sale_id"))])
+    ```
+
+    Una ruta sin ese parámetro pasa sin consultar nada; un valor que no es un número también pasa, y es la validación de la
+    ruta la que lo rechaza (422), igual que sin la guarda."""
+    abrir, usuario = _deps(usuario_actual, conexion)
+
+    def guarda(request: Request, user: dict = Depends(usuario)) -> None:
+        crudo = request.path_params.get(parametro)
+        if crudo is None or not solo_sus_turnos(user):
+            return
+        try:
+            venta_id = int(crudo)
+        except (TypeError, ValueError):
+            return
+        with abrir() as conn:
+            if not ventas.es_de_sus_turnos(conn, venta_id, user.get("id")):
+                raise HTTPException(404, "Venta no encontrada")
+
+    return guarda
 
 
 def _agregar_avisos(conn, venta: dict | None, venta_id: int) -> None:
@@ -272,17 +312,26 @@ def build_ventas_router(
     opciones = opciones or OpcionesVentas()
     router = APIRouter(prefix=prefix, tags=["ventas"])
     gate_anular = [Depends(solo_admin)] if solo_admin else []
+    # ADR-038: sin la opción no hay guarda ni se resuelve la sesión en el listado (las rutas son las de siempre).
+    restringe = opciones.solo_sus_turnos
+    guarda_venta = ([Depends(build_guarda_de_venta(solo_sus_turnos=restringe, conexion=abrir, usuario_actual=usuario))]
+                    if restringe else [])
+    usuario_del_listado = usuario if restringe else _nadie
 
     @router.get("/medios-pago")
     def listar_medios_pago():
         return medios_pago.para_selector()
 
     @router.get("")
-    def listar(desde: str = "", hasta: str = "", q: str = "", tab: str = "todas"):
+    def listar(desde: str = "", hasta: str = "", q: str = "", tab: str = "todas",
+               user: dict | None = Depends(usuario_del_listado)):
         if tab not in ("todas", "sin_facturar", "facturadas"):
             tab = "todas"
+        # ADR-038: quien sólo ve sus turnos lista las ventas de los turnos que abrió (un usuario sin id, ninguna: -1 no
+        # es el id de ningún usuario).
+        de_turnos_de = ((user or {}).get("id", -1) if restringe and restringe(user or {}) else None)
         with abrir() as conn:
-            return ventas.listar_ventas(conn, desde=desde, hasta=hasta, q=q, tab=tab)
+            return ventas.listar_ventas(conn, desde=desde, hasta=hasta, q=q, tab=tab, de_turnos_de=de_turnos_de)
 
     @router.post("")
     def crear(payload: VentaPayload, user: dict = Depends(usuario)):
@@ -392,7 +441,7 @@ def build_ventas_router(
                 _agregar_avisos(conn, venta, venta_id)
             return venta
 
-    @router.get("/{vid}")
+    @router.get("/{vid}", dependencies=guarda_venta)
     def detalle(vid: int):
         with abrir() as conn:
             venta = ventas.obtener_venta(conn, vid)
@@ -436,7 +485,7 @@ def build_ventas_router(
                 except ValueError as exc:
                     raise HTTPException(422, str(exc)) from None
 
-    @router.post("/{vid}/anular", dependencies=gate_anular)
+    @router.post("/{vid}/anular", dependencies=gate_anular + guarda_venta)
     def anular(vid: int, user: dict = Depends(usuario)):
         with abrir() as conn:
             if not ventas.obtener_venta(conn, vid):
@@ -457,7 +506,7 @@ def build_ventas_router(
                 raise
             return ventas.obtener_venta(conn, vid)
 
-    @router.post("/{vid}/devolver", dependencies=gate_anular)
+    @router.post("/{vid}/devolver", dependencies=gate_anular + guarda_venta)
     def devolver(vid: int, payload: DevolucionPayload, user: dict = Depends(usuario)):
         """Devuelve algunas líneas de una venta y reintegra su importe. Mismo
         gate que `anular`: es plata que sale, no una consulta."""
