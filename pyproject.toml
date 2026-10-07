@@ -119,7 +119,7 @@ dev = [
     # productos es el piso del extra `web` (`libracore>=1.125`, ADR-030). v1.125.0 trae
     # `libracore.validacion` y `libracore.testing.booleanos`, que `web/_validacion.py` y `testing.py`
     # reexportan: la suite tiene que correr contra esa version.
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.125.0",
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.142.0",
 ]
 offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@develop"]
 offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@develop"]
