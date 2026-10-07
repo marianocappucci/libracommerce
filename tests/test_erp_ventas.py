@@ -326,7 +326,8 @@ def test_anular_una_venta_fiada_acredita_la_cuenta_corriente(abrir_ventas):
 
 
 def test_la_venta_fiada_y_su_anulacion_van_al_libro_de_clientes(abrir_ventas):
-    """ADR-027 de LibraCore: el libro de clientes, en sombra, da lo mismo que el cálculo."""
+    """ADR-029 de LibraCore: el libro de clientes es la única lectura de la cuenta, y la venta fiada y su anulación
+    van a él. (`libro_de_clientes.comparar()`, el control contra el cálculo de la sombra, se retiró con el ADR-029.)"""
     from libracore.db import libro_de_clientes
     from libracore.db.cuenta_corriente import VENTAS_LIBRACOMMERCE, VENTAS_LIBRACORE
 
@@ -344,13 +345,11 @@ def test_la_venta_fiada_y_su_anulacion_van_al_libro_de_clientes(abrir_ventas):
                    {"medio": "efectivo", "monto": 40.0, "estado": "aprobado"}],
             stock_habilitado=False)
         assert libro_de_clientes.saldos_del_libro() == {5: 60.0}
-        assert libro_de_clientes.comparar() == []
 
         with abrir_ventas() as conn:
             ventas.anular_venta(conn, vid)
             conn.commit()
         assert libro_de_clientes.saldos_del_libro() == {5: 0.0}
-        assert libro_de_clientes.comparar() == []
     finally:
         libro_de_clientes.registrar_origen_de_ventas(VENTAS_LIBRACORE)
 
