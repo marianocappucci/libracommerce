@@ -582,9 +582,29 @@ def _items_de(conn, venta_id: int) -> list[dict]:
     ]
 
 
+#: Las ventas «de sus turnos» (ADR-038): las ligadas (`venta_links.turno_id`) a un turno de caja que abrió ese usuario. El
+#: turno de una venta es el que `hooks.turno_para` le dio a quien la registró, así que una venta sin turno no es de nadie.
+_DE_SUS_TURNOS = "vl.turno_id IN (SELECT t.id FROM turnos_caja t WHERE t.usuario_id = ?)"
+
+
+def es_de_sus_turnos(conn, venta_id: int, usuario_id: int | None) -> bool:
+    """Si la venta está ligada a un turno de caja que abrió `usuario_id` (ADR-038). `False` si no existe, si no tiene
+    turno o si `usuario_id` es `None`: quien sólo ve sus turnos no distingue «no existe» de «no es suya»."""
+    if usuario_id is None:
+        return False
+    fila = conn.execute(
+        "SELECT 1 FROM venta_links vl WHERE vl.venta_id = ? AND " + _DE_SUS_TURNOS, (venta_id, usuario_id)
+    ).fetchone()
+    return fila is not None
+
+
 def listar_ventas(conn, *, desde: str = "", hasta: str = "", q: str = "",
-                  tab: str = "todas", limit: int = 100, offset: int = 0) -> list[dict]:
+                  tab: str = "todas", limit: int = 100, offset: int = 0,
+                  de_turnos_de: int | None = None) -> list[dict]:
     """El listado del POS. `tab` es `todas`, `sin_facturar` o `facturadas`.
+
+    `de_turnos_de` (ADR-038): sólo las ventas de los turnos de caja que abrió ese usuario. `None` (el default) es el
+    listado de siempre, de todas.
 
     La búsqueda no distingue mayúsculas en ningún motor: con `LIKE` a secas
     PostgreSQL sí las distingue y `v-0001` no encontraba `V-00001` (hallazgo
@@ -604,6 +624,9 @@ def listar_ventas(conn, *, desde: str = "", hasta: str = "", q: str = "",
         where.append("vl.factura_id IS NULL AND s.status != 'cancelled'")
     elif tab == "facturadas":
         where.append("vl.factura_id IS NOT NULL")
+    if de_turnos_de is not None:
+        where.append(_DE_SUS_TURNOS)
+        params.append(de_turnos_de)
     sql = (
         "SELECT " + _VENTA_COLUMNAS
         + ", f.tipo AS fac_tipo, f.punto_venta AS fac_pv, f.numero AS fac_numero"
