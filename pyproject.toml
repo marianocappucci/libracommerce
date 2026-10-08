@@ -130,7 +130,8 @@ dev = [
     # v1.128.0 -> v1.130.0 (2026-10-05, ADR-035): `anular_venta` usa `saldo_acreditable` (las notas suman) y el abono por nota.
     # v1.130.0 -> v1.137.0 (2026-10-06, ADR-027): el libro de clientes, piso del extra `erp`.
     # v1.137.0 -> v1.143.0 (2026-10-07): suma libracore.arca_wscpe (lectura de la Carta de Porte de ARCA, ADR-034); este producto no lo usa. Sin migracion.
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.143.0",
+    # v1.143.0 -> v1.144.0 (2026-10-08): suma la emision de la Carta de Porte (libracore.arca_wscpe, ADR-035); este producto no la usa. Sin migracion.
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.144.0",
 ]
 offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@develop"]
 offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@develop"]
