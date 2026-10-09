@@ -34,7 +34,7 @@ jobs:
     # viene de la imagen y tiene que ser el de produccion.
     services:
       postgres:
-        image: postgres:16
+        image: public.ecr.aws/docker/library/postgres:16
         env:
           POSTGRES_DB: libracommerce
           POSTGRES_USER: libracommerce
