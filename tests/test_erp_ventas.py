@@ -24,11 +24,12 @@ def _producto(conn, nombre="Yerba", precio=100.0, existencia=10.0):
 
 
 def _venta(abrir, *, pagos=None, items=None, stock_habilitado=True, hooks=None,
-          usuario_id=USUARIO["id"], **opciones):
+          usuario_id=USUARIO["id"], descuento=0.0, **opciones):
     items = items or [{"nombre": "Suelto", "qty": 2, "precio": 100.0, "subtotal": 200.0, "producto_id": None}]
     pagos = pagos or [{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}]
-    total = round(sum(i["subtotal"] for i in items), 2)
-    kw = dict(fecha=HOY, items=items, subtotal=total, descuento=0.0, total=total,
+    subtotal = round(sum(i["subtotal"] for i in items), 2)
+    total = round(subtotal - descuento, 2)
+    kw = dict(fecha=HOY, items=items, subtotal=subtotal, descuento=descuento, total=total,
               cliente_id=None, cliente_nombre="", usuario_id=usuario_id, observaciones="",
               estado=ventas.estado_segun_pagos(total, pagos), pagos=pagos,
               stock_habilitado=stock_habilitado, **opciones)
@@ -1341,6 +1342,175 @@ def test_devolver_a_cuenta_corriente_exige_cliente(abrir_ventas):
             ventas.devolver_items(
                 conn, vid, {item_id_linea: 1.0}, deposito_id, medio_pago="cuenta_corriente"
             )
+
+
+# ── ADR-040: el reintegro de una devolución es PRORRATEADO ───────────────
+#
+# Hasta acá todos los tests de devolución usaban `descuento=0`, y el reintegro era `cantidad * unit_price`: con una
+# promoción (2x1) o un descuento general el cliente recibía el precio de lista de lo que devolvía y se quedaba el resto
+# gratis. Caso medido en la demo de VentaLibra: 2 × $1.600 con 2x1 cobraron $1.600 y devolver 1 reintegró $1.600.
+
+
+def _devoluciones_sucesivas(abrir, vid, pedidos):
+    """Devuelve de a una (`pedidos`: `[(posición de la línea, cantidad), ...]`, cada una en su propia llamada y
+    commit) y trae los importes reintegrados."""
+    importes = []
+    with abrir() as conn:
+        ids = [r["id"] for r in conn.execute("SELECT id FROM sale_items WHERE sale_id=? ORDER BY id", (vid,)).fetchall()]
+        deposito_id = conn.execute(
+            "SELECT location_id FROM stock_movements WHERE source_id=? LIMIT 1", (vid,)
+        ).fetchone()["location_id"]
+        for posicion, cantidad in pedidos:
+            importes.append(ventas.devolver_items(conn, vid, {ids[posicion]: cantidad}, deposito_id)["importe"])
+            conn.commit()
+    return importes
+
+
+def _reintegrado_en_caja(abrir) -> float:
+    with abrir() as conn:
+        return round(sum(float(f["monto"]) for f in _caja(conn) if f["tipo"] == "egreso"), 2)
+
+
+def test_promocion_2x1_reintegra_lo_pagado_por_la_unidad_devuelta(abrir_ventas):
+    """🔴 El caso medido: 2 × $1.600 con 2x1 (descuento $1.600) cobran $1.600. Devolver 1 reintegra $800, devolver la
+    otra otros $800, y el total reintegrado es lo cobrado: ni un peso de más."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, "Lavandina", 1600.0, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Lavandina", "qty": 2, "precio": 1600.0, "subtotal": 3200.0, "producto_id": pid},
+    ], descuento=1600.0, pagos=[{"medio": "efectivo", "monto": 1600.0, "estado": "aprobado"}])
+    primera = _devoluciones_sucesivas(abrir_ventas, vid, [(0, 1.0)])
+    assert primera == [800.0]
+    with abrir_ventas() as conn:
+        assert ventas.obtener_venta(conn, vid)["estado"] == "devuelta_parcial"
+    segunda = _devoluciones_sucesivas(abrir_ventas, vid, [(0, 1.0)])
+    assert segunda == [800.0]
+    assert sum(primera + segunda) == 1600.0  # lo cobrado, ni un peso más
+    with abrir_ventas() as conn:
+        assert ventas.obtener_venta(conn, vid)["estado"] == "devuelta"
+
+
+def test_dos_devoluciones_sucesivas_iguales_escriben_los_dos_egresos_de_caja(abrir_ventas):
+    """🔴 Devolver 1 y después otra 1 de la misma línea armaba la MISMA referencia de caja: la segunda reponía el stock
+    pero `create_caja_movimiento` descartaba su egreso por repetido, y el arqueo no veía la plata que salió. La
+    referencia lleva ahora lo ya devuelto de la venta (ADR-040)."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, "Lavandina", 1600.0, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Lavandina", "qty": 2, "precio": 1600.0, "subtotal": 3200.0, "producto_id": pid},
+    ], descuento=1600.0, pagos=[{"medio": "efectivo", "monto": 1600.0, "estado": "aprobado"}])
+    _devoluciones_sucesivas(abrir_ventas, vid, [(0, 1.0)])
+    _devoluciones_sucesivas(abrir_ventas, vid, [(0, 1.0)])
+    assert _reintegrado_en_caja(abrir_ventas) == 1600.0
+
+
+def test_descuento_general_se_reparte_entre_lineas_distintas(abrir_ventas):
+    """10% sobre dos líneas ($1.000 y $500, total $1.350): cada una vuelve con su 10% menos, devueltas por separado."""
+    with abrir_ventas() as conn:
+        a = _producto(conn, "Yerba", 1000.0, existencia=10.0)
+        b = _producto(conn, "Azúcar", 500.0, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 1, "precio": 1000.0, "subtotal": 1000.0, "producto_id": a},
+        {"nombre": "Azúcar", "qty": 1, "precio": 500.0, "subtotal": 500.0, "producto_id": b},
+    ], descuento=150.0, pagos=[{"medio": "efectivo", "monto": 1350.0, "estado": "aprobado"}])
+    assert _devoluciones_sucesivas(abrir_ventas, vid, [(0, 1.0), (1, 1.0)]) == [900.0, 450.0]
+    assert _reintegrado_en_caja(abrir_ventas) == 1350.0
+    with abrir_ventas() as conn:
+        assert ventas.obtener_venta(conn, vid)["estado"] == "devuelta"
+
+
+def test_devolver_todo_en_una_llamada_reintegra_el_total_cobrado(abrir_ventas):
+    with abrir_ventas() as conn:
+        a = _producto(conn, "Yerba", 1000.0, existencia=10.0)
+        b = _producto(conn, "Azúcar", 500.0, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 1, "precio": 1000.0, "subtotal": 1000.0, "producto_id": a},
+        {"nombre": "Azúcar", "qty": 1, "precio": 500.0, "subtotal": 500.0, "producto_id": b},
+    ], descuento=150.0, pagos=[{"medio": "efectivo", "monto": 1350.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        ids = [r["id"] for r in conn.execute("SELECT id FROM sale_items WHERE sale_id=? ORDER BY id", (vid,)).fetchall()]
+        deposito_id = conn.execute(
+            "SELECT location_id FROM stock_movements WHERE source_id=? LIMIT 1", (vid,)
+        ).fetchone()["location_id"]
+        r = ventas.devolver_items(conn, vid, {ids[0]: 1.0, ids[1]: 1.0}, deposito_id)
+        assert r["importe"] == 1350.0 and r["venta"]["estado"] == "devuelta"
+
+
+def test_los_centavos_que_no_dividen_exacto_suman_el_total_sin_deriva(abrir_ventas):
+    """3 × $100 con $10 de descuento cobran $290. Redondeando cada devolución por separado serían 96,67 × 3 = 290,01
+    (un centavo de más); por diferencia de acumulados da 96,67 + 96,66 + 96,67 = 290,00 exacto."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 3, "precio": 100.0, "subtotal": 300.0, "producto_id": pid},
+    ], descuento=10.0, pagos=[{"medio": "efectivo", "monto": 290.0, "estado": "aprobado"}])
+    importes = _devoluciones_sucesivas(abrir_ventas, vid, [(0, 1.0), (0, 1.0), (0, 1.0)])
+    assert importes == [96.67, 96.66, 96.67]
+    assert round(sum(importes), 2) == 290.0
+    with abrir_ventas() as conn:
+        assert ventas.obtener_venta(conn, vid)["estado"] == "devuelta"
+
+
+def test_sin_descuento_el_reintegro_es_cantidad_por_precio_como_siempre(abrir_ventas):
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 3, "precio": 33.33, "subtotal": 99.99, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 99.99, "estado": "aprobado"}])
+    assert _devoluciones_sucesivas(abrir_ventas, vid, [(0, 2.0), (0, 1.0)]) == [66.66, 33.33]
+    assert _reintegrado_en_caja(abrir_ventas) == 99.99
+
+
+def test_el_descuento_de_linea_tambien_se_prorratea(abrir_ventas):
+    """`crear_venta` no escribe `discount_amount`, pero el dominio (`save_sale`, la migración) sí, y a veces repite ese
+    dinero en `discount_total` (margen). 2 × $100 con $10 en la línea y los mismos $10 en la venta cobran $190: cada
+    unidad vuelve con $95, no $90 ($10 restados dos veces) ni $100."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 2, "precio": 100.0, "subtotal": 200.0, "producto_id": pid},
+    ], descuento=10.0, pagos=[{"medio": "efectivo", "monto": 190.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        conn.execute("UPDATE sale_items SET discount_amount=10 WHERE sale_id=?", (vid,))
+        conn.commit()
+    assert _devoluciones_sucesivas(abrir_ventas, vid, [(0, 1.0), (0, 1.0)]) == [95.0, 95.0]
+
+
+def test_descuento_de_linea_mas_descuento_general_encima(abrir_ventas):
+    """Línea con $10 de descuento y la venta con $15 en total: $5 son generales, se reparten sobre lo ya neto de la
+    línea. Se cobran $185; cada una de las 2 unidades vuelve con $92,50."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 2, "precio": 100.0, "subtotal": 200.0, "producto_id": pid},
+    ], descuento=15.0, pagos=[{"medio": "efectivo", "monto": 185.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        conn.execute("UPDATE sale_items SET discount_amount=10 WHERE sale_id=?", (vid,))
+        conn.commit()
+    assert _devoluciones_sucesivas(abrir_ventas, vid, [(0, 1.0), (0, 1.0)]) == [92.5, 92.5]
+
+
+def test_una_linea_de_servicio_entra_en_el_factor_pero_no_se_devuelve(abrir_ventas):
+    """Un producto 2 × $100 y un «Envío» de $100, con $30 de descuento: se cobran $270 y el descuento se reparte también
+    sobre el envío ($10 de cada $100). Devolver las 2 unidades reintegra $180; los $90 del envío no vuelven."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 2, "precio": 100.0, "subtotal": 200.0, "producto_id": pid},
+        {"nombre": "Envío", "qty": 1, "precio": 100.0, "subtotal": 100.0, "producto_id": None},
+    ], descuento=30.0, pagos=[{"medio": "efectivo", "monto": 270.0, "estado": "aprobado"}])
+    assert _devoluciones_sucesivas(abrir_ventas, vid, [(0, 1.0), (0, 1.0)]) == [90.0, 90.0]
+
+
+def test_el_reintegro_acumulado_nunca_supera_lo_cobrado():
+    """La guarda de `_reintegro_prorrateado`: un acumulado (lo ya devuelto + lo pedido) por encima de lo vendido no se
+    paga, aunque el tope por cantidad de `devolver_items` ya lo frene antes."""
+    linea = {"id": 1, "kind": "product", "item_id": 7, "variant_id": None, "quantity": 2, "unit_price": 1600,
+             "discount_amount": 0}
+    clave = (7, None)
+    assert ventas._reintegro_prorrateado([linea], 1600, {}, {clave: 2.0}) == Decimal("1600.00")
+    with pytest.raises(ValueError, match="superaría lo cobrado"):
+        ventas._reintegro_prorrateado([linea], 1600, {clave: 2.0}, {clave: 1.0})
 
 
 # ── F4 (correcciones sobre la revisión): deposito_id también en devolver_items ──

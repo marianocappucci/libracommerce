@@ -1422,3 +1422,40 @@ propio del margen. El piso de `libracore` sube a `>=1.148`. Para una fecha sin h
 **Tests.** `test_erp_ventas.py`: ventas del día con y sin hora, con espacio y con `T`, y los vecinos del día anterior y siguiente, en el
 listado y en `reporte_ventas` (falla sin el arreglo); y un rango de varios días sin hora que no cambia.
 
+## ADR-040 — La devolución reintegra lo efectivamente pagado: el descuento se prorratea (2026-10-09)
+
+**Contexto.** `erp.ventas.devolver_items` reintegraba `cantidad * unit_price` y no miraba ningún descuento: ni el de la venta
+(`sales.discount_total`, donde caen el descuento manual y el ahorro de las promociones) ni el de la línea (`sale_items.discount_amount`).
+Medido en la demo real de VentaLibra (POS-000008): 2 × Lavandina a $1.600 con promoción 2x1 (subtotal 3.200, descuento 1.600, cobrado
+1.600); se devolvió 1 unidad y el sistema reintegró $1.600, todo lo cobrado, y el cliente se quedó con la otra gratis. Pasa igual con
+cualquier descuento general. Todos los tests de devolución usaban `descuento=0`.
+
+**Decisión (del humano, 2026-10-09): reintegro PRORRATEADO.** Se devuelve lo efectivamente pagado por lo que vuelve; el descuento se
+reparte en proporción. En el caso medido, $800 por unidad.
+- La semántica de los totales es la de `erp.margen` (ADR-015): `crear_venta` no escribe `discount_amount` ni `tax_total`, y el dominio puede
+  dejar el descuento en la línea Y en `discount_total` (el mismo dinero). Neto de línea = `quantity*unit_price - discount_amount`; del descuento de
+  la venta sólo cuenta lo que las líneas no explican (`max(discount_total - Σ discount_amount, 0)`, con tope en lo que vale la venta); lo
+  cobrable = `Σ netos - ese descuento`. Cada unidad vale `neto de su (ítem, variante) / unidades` por `cobrable / Σ netos`. Las líneas de
+  servicio entran en la suma —cargan descuento— y nunca se devuelven.
+- **Exactitud acumulada.** El importe es una diferencia de acumulados, `redondeo(prorrateo(ya devuelto + esto)) - redondeo(prorrateo(ya
+  devuelto))`, con `Decimal` y redondeo al centavo hacia arriba en el empate. Redondear cada devolución por separado dejaba un centavo de más
+  (3 × $100 con $10 de descuento: 96,67 × 3 = 290,01); así dan 96,67 + 96,66 + 96,67 = 290,00. Con la venta devuelta entera el total es
+  exactamente lo cobrable.
+- **Nunca más de lo cobrado.** Si el acumulado superara el cobrable, `_reintegro_prorrateado` levanta `ValueError` (defensa: el tope por
+  cantidad de `devolver_items` ya lo frena antes).
+- Sin descuentos el factor es 1 y el importe es `cantidad * unit_price`, como siempre. La función devuelve el mismo `float` y la misma forma.
+
+**Tests.** `test_erp_ventas.py` (sección ADR-040): 2x1 (800 + 800 = 1.600), descuento general del 10% sobre dos líneas (900 y 450), devolución
+total en una llamada, centavos que no dividen exacto (96,67 / 96,66 / 96,67), sin descuento (idéntico), descuento de línea y de línea más
+general, línea de servicio en el factor, y la guarda. Fallan con la cuenta vieja.
+
+**No cubre.**
+- **Reintegros hechos antes de este cambio**: pagaron de más y no se corrigen. Una venta ya devuelta en parte con el cálculo viejo seguirá
+  pagando su resto según este (la suma puede pasar lo cobrado: la guarda mira lo prorrateado, no lo que ya salió de la caja).
+- **IVA**: `tax_total`/`tax_amount` no entran (0 en el mostrador).
+- **Dos líneas del mismo (ítem, variante) a precios distintos**: el ledger no dice de qué línea volvió lo ya devuelto, así que las unidades
+  se valúan al promedio de la clave (con el mismo precio, lo de siempre).
+- **La nota de crédito** de una factura ya emitida: sigue siendo un acto aparte (ADR-032/035); esto sólo cambia el importe de caja o cuenta
+  corriente.
+
+**La referencia de caja de cada devolución lleva lo ya devuelto (mismo día, mismo PR).** `_referencia_devolucion` armaba `devolucion:venta:{id}:{línea}x{cantidad}` y `create_caja_movimiento` no repite una referencia: dos devoluciones sucesivas iguales (1 y después la otra de un 2x1) reponían el stock las dos veces pero escribían un solo egreso, y el arqueo no veía la plata que salió. Ahora termina en `@{ya_devuelto}`: cada devolución sucesiva es otra referencia, coherente con el stock. Test: `test_dos_devoluciones_sucesivas_iguales_escriben_los_dos_egresos_de_caja` (falla sin el cambio: caja 800 en vez de 1600). Queda pendiente una clave de operación del cliente para distinguir un reintento de doble clic de una segunda devolución legítima (hoy, como antes, ese reintento repone stock de nuevo si hay disponible).
