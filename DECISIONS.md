@@ -864,7 +864,7 @@ marquen productos. Margen y reposición leen lo mismo (un test compara un marcad
   «sin lote» en negativo aunque otro depósito tenga lotes. Quien ajusta un producto con varios depósitos tiene que pasar
   `deposito_id`; no se cambió porque alteraría el camino de los productos sin marcar. Un test lo fija.
 - 🔵 `listar_ventas` y `erp.reportes._rango` filtran `sales.occurred_on <= hasta` sobre texto libre: una venta con hora del día `hasta`
-  queda afuera (el margen lo evita con `_filtro_de_ventas`). Preexistente, no se tocó.
+  queda afuera (el margen lo evita con `_filtro_de_ventas`). Preexistente, no se tocó. ✅ **Arreglado el 2026-10-09** (ADR-039).
 - 🔵 La edición de un producto no es atómica respecto de un código duplicado (ver la nota de la carga). Preexistente, no se tocó.
 - **Variantes en el ajuste y la salida manual (revisión de Codex).** `ajustar_stock` compara el total del depósito, variantes incluidas,
   pero el FEFO sólo planifica la variante del movimiento: sin `variant_id`, la NULL. Un ajuste «a 5» de un producto con 10 en un lote de
@@ -1407,3 +1407,18 @@ rechaza después con un mensaje propio de rango se informa (ver `ge=2`); si ese 
 - Decisión 4 — el filtro vive en el dominio: `erp.ventas.listar_ventas(..., de_turnos_de=usuario_id)` y `erp.ventas.es_de_sus_turnos(conn, venta_id, usuario_id)`.
 - Sin la opción, nada cambia: las rutas, las dependencias y las respuestas son las de siempre, y el listado ni resuelve la sesión (Contalibra y Restolibra no la prenden). Sin cambios de esquema.
 - Límite: el criterio es el turno de caja de LibraCore (`turnos_caja.usuario_id`); un producto que venda sin turnos y prenda la opción deja a sus usuarios limitados sin ninguna venta visible.
+
+## ADR-039 — Los rangos de fecha de las ventas son por día completo, con la función del motor (2026-10-09)
+
+**Contexto.** `sales.occurred_on` es texto libre y `POST /api/ventas` acepta `fecha` con hora. `listar_ventas` y `erp.reportes._rango`
+filtraban `occurred_on <= hasta`, así que una venta con hora del último día del rango quedaba afuera del listado y de los reportes de
+ventas, medios de pago, productos y resumen. El margen ya lo evitaba con su propio `_filtro_de_ventas`. El mismo defecto estaba en
+quince filtros de libracore (y su tesorería lo parcheaba con `23:59:59`, que fallaba con la `T`).
+
+**Decisión.** El criterio vive en el motor: `libracore.fechas.rango_por_dia` (libracore v1.148.0, ADR-037 del motor): `desde` por su día
+y `hasta` como cota exclusiva del día siguiente. `listar_ventas`, `_rango` y `margen._filtro_de_ventas` la usan; se borró el `_dia`
+propio del margen. El piso de `libracore` sube a `>=1.148`. Para una fecha sin hora, el rango es el de siempre.
+
+**Tests.** `test_erp_ventas.py`: ventas del día con y sin hora, con espacio y con `T`, y los vecinos del día anterior y siguiente, en el
+listado y en `reporte_ventas` (falla sin el arreglo); y un rango de varios días sin hora que no cambia.
+

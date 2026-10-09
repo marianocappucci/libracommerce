@@ -42,7 +42,8 @@ migrations = [
     # git distintas para el mismo paquete no resuelven (Contalibra en v1.83.0 contra
     # un extra que pidiera v1.84.0). El piso es lo que la cadena usa de verdad:
     # `conexion_libracore` (v1.53.0) y `url_de_instancia`.
-    "libracore[migrations]>=1.53,<2",
+    # >=1.148: `erp/ventas`, `erp/reportes` y `erp/margen` importan `libracore.fechas` (ADR-037 del motor).
+    "libracore[migrations]>=1.148,<2",
 ]
 erp = [
     # >=1.87: `libracore.db.logs` con partes componibles y `libracore.reportes`
@@ -134,7 +135,8 @@ dev = [
     # v1.144.0 -> v1.145.0 (2026-10-08): suma geografia.localidad(id) y GET /api/geo/localidades/{id}; este producto no los usa. Sin migracion.
     # v1.145.0 -> v1.146.0 (2026-10-08): el catalogo geografico suma el resto del Mercosur (geografia.paises, parametro pais; por omision Argentina). Sin migracion.
     # v1.146.0 -> v1.147.0 (2026-10-08): «Generar pedido de certificado» de ARCA (clave en el servidor, sólo se descarga el CSR). Sin migracion.
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.147.0",
+    # v1.147.0 -> v1.148.0 (2026-10-09): filtros de fecha por dia completo (`libracore.fechas`, ADR-037). Sin migracion.
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.148.0",
 ]
 offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@develop"]
 offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@develop"]

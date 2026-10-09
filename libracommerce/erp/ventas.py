@@ -57,6 +57,8 @@ from contextlib import AbstractContextManager
 from decimal import Decimal
 from typing import Any
 
+from libracore.fechas import rango_por_dia
+
 from . import lotes
 from .catalogo import DepositoInexistente, validar_deposito
 from .hooks import SIN_GANCHOS, Hooks
@@ -610,13 +612,8 @@ def listar_ventas(conn, *, desde: str = "", hasta: str = "", q: str = "",
     PostgreSQL sí las distingue y `v-0001` no encontraba `V-00001` (hallazgo
     de M2 sobre el autocompletado, cerrado acá para todo el módulo).
     """
-    where, params = [], []
-    if desde:
-        where.append("s.occurred_on >= ?")
-        params.append(desde)
-    if hasta:
-        where.append("s.occurred_on <= ?")
-        params.append(hasta)
+    # Por día completo (libracore ADR-037): una venta con hora del último día entra en el listado.
+    where, params = rango_por_dia("s.occurred_on", desde, hasta)
     if q:
         where.append("(LOWER(s.number) LIKE ? OR LOWER(s.customer_name_snapshot) LIKE ?)")
         params += [f"%{q.lower()}%", f"%{q.lower()}%"]

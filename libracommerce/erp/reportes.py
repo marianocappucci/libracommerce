@@ -21,6 +21,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from libracore.fechas import rango_por_dia
+
 
 def _rango(desde: str, hasta: str, columna: str, solo_confirmadas: bool = False,
            estado: str = "status") -> tuple[str, list]:
@@ -29,12 +31,11 @@ def _rango(desde: str, hasta: str, columna: str, solo_confirmadas: bool = False,
     where, params = [], []
     if solo_confirmadas:
         where.append(f"{estado} = 'confirmed'")
-    if desde:
-        where.append(f"{columna} >= ?")
-        params.append(desde)
-    if hasta:
-        where.append(f"{columna} <= ?")
-        params.append(hasta)
+    # Por día completo (libracore ADR-037): `sales.occurred_on` es texto libre y `POST /api/ventas` acepta hora;
+    # un `<= 'AAAA-MM-DD'` dejaba afuera las ventas con hora del último día del rango.
+    c_fecha, p_fecha = rango_por_dia(columna, desde, hasta)
+    where += c_fecha
+    params += p_fecha
     return (("WHERE " + " AND ".join(where)) if where else ""), params
 
 
