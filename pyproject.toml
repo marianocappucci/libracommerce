@@ -133,7 +133,8 @@ dev = [
     # v1.143.0 -> v1.144.0 (2026-10-08): suma la emision de la Carta de Porte (libracore.arca_wscpe, ADR-035); este producto no la usa. Sin migracion.
     # v1.144.0 -> v1.145.0 (2026-10-08): suma geografia.localidad(id) y GET /api/geo/localidades/{id}; este producto no los usa. Sin migracion.
     # v1.145.0 -> v1.146.0 (2026-10-08): el catalogo geografico suma el resto del Mercosur (geografia.paises, parametro pais; por omision Argentina). Sin migracion.
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.146.0",
+    # v1.146.0 -> v1.147.0 (2026-10-08): «Generar pedido de certificado» de ARCA (clave en el servidor, sólo se descarga el CSR). Sin migracion.
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.147.0",
 ]
 offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@develop"]
 offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@develop"]
