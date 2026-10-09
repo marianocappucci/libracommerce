@@ -60,6 +60,8 @@ import datetime
 from dataclasses import dataclass
 from decimal import Decimal
 
+from libracore.fechas import rango_por_dia
+
 #: Los `sales.status` que son una venta. Ver el docstring del módulo.
 _STATUS_DE_VENTA = ("confirmed", "partially_returned", "returned")
 
@@ -114,13 +116,6 @@ def _periodo(occurred_on, agrupacion: str) -> str:
     return texto or SIN_FECHA
 
 
-def _dia(texto: str) -> datetime.date | None:
-    """La parte fecha de `texto` (`2026-09-29` o `2026-09-29 13:00:00`), o `None` si no es una fecha."""
-    try:
-        return datetime.date.fromisoformat(texto[:10])
-    except ValueError:
-        return None
-
 
 def _dias(desde: str, hasta: str) -> int | None:
     """Cuántos días abarca el rango, ambos extremos incluidos; `None` si alguno falta o no es
@@ -139,19 +134,13 @@ def _filtro_de_ventas(desde: str, hasta: str) -> tuple[str, list]:
     del 29 que traiga hora. Por eso `desde` se compara por su parte fecha y `hasta` como cota exclusiva del día
     siguiente (`< '2026-09-30'`): sólo comparaciones de texto, el mismo SQL en SQLite y en PostgreSQL. Un extremo
     que no es una fecha se usa tal cual, como antes. Lo usan las ventas y el ledger de devoluciones
-    (`_devuelto_por_clave`), así que las dos miran el mismo rango."""
+    (`_devuelto_por_clave`), así que las dos miran el mismo rango. Desde libracore v1.148.0 el criterio vive en el
+    motor (`libracore.fechas.rango_por_dia`, ADR-037) y lo comparten los reportes y el listado de ventas."""
     donde = ["s.status IN (" + ",".join("?" for _ in _STATUS_DE_VENTA) + ")"]
     params: list = list(_STATUS_DE_VENTA)
-    if desde:
-        donde.append("s.occurred_on >= ?")
-        params.append(dia.isoformat() if (dia := _dia(desde)) else desde)
-    if hasta:
-        if dia := _dia(hasta):
-            donde.append("s.occurred_on < ?")
-            params.append((dia + datetime.timedelta(days=1)).isoformat())
-        else:
-            donde.append("s.occurred_on <= ?")
-            params.append(hasta)
+    c_fecha, p_fecha = rango_por_dia("s.occurred_on", desde, hasta)
+    donde += c_fecha
+    params += p_fecha
     return " AND ".join(donde), params
 
 

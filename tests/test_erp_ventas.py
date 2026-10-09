@@ -11,7 +11,7 @@ from decimal import Decimal
 import pytest
 from conftest import USUARIO
 
-from libracommerce.erp import SIN_GANCHOS, Hooks, Insumo, catalogo, stock, ventas
+from libracommerce.erp import SIN_GANCHOS, Hooks, Insumo, catalogo, reportes, stock, ventas
 
 HOY = datetime.date.today().isoformat()
 
@@ -1723,3 +1723,32 @@ def test_validar_deposito_rechaza_devolucion_no_deja_nada(abrir_ventas):
         assert len(_caja(conn, "V-00001")) == n_caja_antes
         assert ventas.obtener_venta(conn, vid)["estado"] == "cobrada"
         assert stock.get_stock_actual(conn, pid) == 6.0
+
+
+def _venta_con_fecha(abrir, fecha: str):
+    """Una venta de $100 con `fecha` tal cual (`POST /api/ventas` acepta hora)."""
+    pagos = [{"medio": "efectivo", "monto": 100.0, "estado": "aprobado"}]
+    return ventas.crear_venta_directa(
+        abrir, fecha=fecha, items=[{"nombre": "X", "qty": 1, "precio": 100.0, "subtotal": 100.0, "producto_id": None}],
+        subtotal=100.0, descuento=0.0, total=100.0, cliente_id=None, cliente_nombre="", usuario_id=USUARIO["id"],
+        observaciones="", estado=ventas.estado_segun_pagos(100.0, pagos), pagos=pagos, stock_habilitado=False)
+
+
+def test_el_ultimo_dia_del_rango_incluye_las_ventas_con_hora(abrir_ventas):
+    """🔴 libracore ADR-037: `occurred_on` es texto libre y un `<= '2026-10-09'` dejaba afuera las ventas del 9 con
+    hora, en el listado y en los reportes. Los vecinos (el 8 a las 23:59:59 y el 10 a las 00:00) quedan afuera."""
+    for fecha in ("2026-10-08 23:59:59", "2026-10-09", "2026-10-09 13:00:00", "2026-10-09T18:30", "2026-10-10 00:00:00"):
+        _venta_con_fecha(abrir_ventas, fecha)
+    with abrir_ventas() as conn:
+        listadas = ventas.listar_ventas(conn, desde="2026-10-09", hasta="2026-10-09")
+        assert sorted(v["fecha"] for v in listadas) == ["2026-10-09", "2026-10-09 13:00:00", "2026-10-09T18:30"]
+        por_dia = reportes.reporte_ventas(conn, desde="2026-10-09", hasta="2026-10-09")
+        assert [(f["periodo"], f["cantidad"], f["total"]) for f in por_dia] == [("2026-10-09", 3, 300.0)]
+
+
+def test_un_rango_de_varios_dias_sin_hora_es_el_de_siempre(abrir_ventas):
+    for fecha in ("2026-10-07", "2026-10-08", "2026-10-09", "2026-10-10"):
+        _venta_con_fecha(abrir_ventas, fecha)
+    with abrir_ventas() as conn:
+        assert sorted(v["fecha"] for v in ventas.listar_ventas(conn, desde="2026-10-08", hasta="2026-10-09")) == [
+            "2026-10-08", "2026-10-09"]
