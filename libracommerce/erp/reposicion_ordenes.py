@@ -37,14 +37,13 @@ import sqlite3
 from decimal import Decimal
 
 from ..domain.purchasing import PurchaseOrder, PurchaseOrderItem, PurchaseOrderStatus
-from . import compras, reposicion
+from . import claves, compras, reposicion
 
-MAX_LARGO_CLAVE = 64
+MAX_LARGO_CLAVE = claves.MAX_LARGO_CLAVE
 _CERO = Decimal("0")
 
-
-class ClaveReusada(ValueError):
-    """La `clave_operacion` ya generó órdenes con OTROS datos: es un pedido distinto y la clave identifica uno solo. El router la contesta 409."""
+#: La excepción de «misma clave, otros datos» es la de `claves` (la comparten las operaciones idempotentes); acá sigue accesible por su nombre de siempre.
+ClaveReusada = claves.ClaveReusada
 
 
 _CLAVE_VALIDA = re.compile(rf"[A-Za-z0-9._:-]{{1,{MAX_LARGO_CLAVE}}}")
@@ -59,7 +58,7 @@ def _clave(clave) -> str:
 
 
 def _marca(clave: str) -> str:
-    return f"[op:{clave}]"
+    return claves.marca(clave)
 
 
 def _huella(datos: dict) -> str:

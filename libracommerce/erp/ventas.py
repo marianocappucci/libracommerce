@@ -59,8 +59,9 @@ from typing import Any
 
 from libracore.fechas import rango_por_dia
 
-from . import lotes
+from . import claves, lotes
 from .catalogo import DepositoInexistente, validar_deposito
+from .claves import ClaveReusada
 from .hooks import SIN_GANCHOS, Hooks
 from .stock import add_movimiento_stock, descontar_stock_venta
 
@@ -1016,6 +1017,57 @@ def anular_venta(conn, vid: int, usuario_id: int | None = None,
     return True
 
 
+def _referencia_de_la_operacion(vid: int, clave_op: str) -> str:
+    """La referencia del reintegro cuando la devolución viene con `clave_operacion`: la clave reemplaza a «lo ya devuelto» (que
+    distingue una devolución sucesiva de otra), así que `create_caja_movimiento` también descarta por repetido el egreso de un
+    reintento que llegara a escribir otra vez, y el reintegro se encuentra por esta referencia."""
+    return f"devolucion:venta:{vid}:op:{clave_op}"
+
+
+def _devolucion_de_la_clave(conn, vid: int, clave_op: str) -> dict[tuple, float]:
+    """Lo que ya repuso, en el stock de la venta, una devolución con esta clave: `{(ítem, variante, depósito): cantidad}`; vacío si
+    la clave es nueva para esta venta. La marca `[op:<clave>]` va al final de la nota de cada fila `devolucion` que escribe
+    `devolver_items`; se compara **literal** al final de la nota (un texto libre no la imita) y sólo entre las filas de ESTA venta: la
+    clave es única por venta, y la misma clave sobre otra venta es otra operación. Las filas `merma` del par de un perecedero también
+    la llevan, pero no se cuentan: la reposición ya está en la `devolucion` de cada tramo."""
+    marca = claves.marca(clave_op)
+    repuesto: dict[tuple, float] = {}
+    for f in conn.execute(
+        "SELECT item_id, variant_id, location_id, quantity_delta, note FROM stock_movements "
+        "WHERE source_id=? AND reason_code='devolucion' ORDER BY id", (vid,),
+    ).fetchall():
+        if str(f["note"] or "").endswith(marca):
+            k = (f["item_id"], f["variant_id"], f["location_id"])
+            repuesto[k] = repuesto.get(k, 0.0) + float(f["quantity_delta"])
+    return {k: round(v, 6) for k, v in repuesto.items()}
+
+
+def _reintegro_de_la_clave(conn, vid: int, clave_op: str) -> tuple[float, str] | None:
+    """`(importe, medio de pago)` del reintegro que escribió una devolución con esta clave, o `None` si no se encuentra. Está en la
+    caja (`caja_movimientos`) o, si fue a cuenta corriente, en `cc_pagos`, los dos por la referencia de la operación."""
+    referencia = _referencia_de_la_operacion(vid, clave_op)
+    fila = conn.execute(
+        "SELECT monto, medio_pago FROM caja_movimientos WHERE referencia=? AND factura_id IS NULL ORDER BY id LIMIT 1", (referencia,),
+    ).fetchone()
+    if fila is None:
+        fila = conn.execute("SELECT monto, medio_pago FROM cc_pagos WHERE referencia=? ORDER BY id LIMIT 1", (referencia,)).fetchone()
+    return (float(fila["monto"]), fila["medio_pago"]) if fila is not None else None
+
+
+def _pedido_por_stock(lineas, devoluciones: dict[int, float], deposito_id: int) -> dict[tuple, float] | None:
+    """Lo que pide `devoluciones`, en la forma del ledger (`{(ítem, variante, depósito): cantidad}`), para compararlo con lo que ya
+    repuso una clave. Dos líneas del mismo (ítem, variante) suman: es lo que `devolver_items` reintegra y repone. `None` si alguna
+    línea no existe o no es un producto: no puede ser el mismo pedido que uno que ya se aplicó."""
+    pedido: dict[tuple, float] = {}
+    for sale_item_id, cantidad in devoluciones.items():
+        li = lineas.get(sale_item_id)
+        if li is None or li["kind"] != "product" or li["item_id"] is None:
+            return None
+        k = (li["item_id"], li["variant_id"], deposito_id)
+        pedido[k] = pedido.get(k, 0.0) + float(cantidad)
+    return {k: round(v, 6) for k, v in pedido.items()}
+
+
 def _referencia_devolucion(vid: int, devoluciones: dict[int, float], ya_devuelto: float = 0.0) -> str:
     """La referencia del reintegro en la caja, que `create_caja_movimiento` usa para no repetir un movimiento.
 
@@ -1102,8 +1154,23 @@ def _reintegro_prorrateado(lineas, descuento_venta, ya_devuelto: dict[tuple, flo
 
 def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: int,
                    medio_pago: str = "efectivo", usuario_id: int | None = None,
-                   hooks: Hooks = SIN_GANCHOS, *, caja_con_turno: bool = False) -> dict:
+                   hooks: Hooks = SIN_GANCHOS, *, caja_con_turno: bool = False,
+                   clave_operacion: str | None = None) -> dict:
     """Devuelve algunas líneas de una venta confirmada y reintegra su importe.
+
+    🔑 **`clave_operacion` (opcional, ADR-041) distingue un REINTENTO de una segunda devolución.** Una devolución que el cliente
+    reenvía (doble clic, timeout y el usuario aprieta de nuevo) pide lo mismo que la primera y, si quedaba disponible, repondría el
+    stock y escribiría el egreso otra vez. Con la clave —una por intento, p. ej. un UUID— `devolver_items` la valida (la misma regla
+    que `vencimientos`), toma la venta, y **antes de escribir** busca si esa clave ya se aplicó a esta venta: la marca `[op:<clave>]`
+    va al final de la nota de cada fila de stock que escribe, y esas filas son la fuente de «ya se aplicó» (siempre se escriben, en la
+    misma transacción; la caja no, si el reintegro fue a cuenta corriente). Si se aplicó con las mismas cantidades por (ítem, variante),
+    el mismo depósito y el mismo medio de pago, devuelve el resultado anterior —el `importe` que se reintegró, leído de la caja o de
+    `cc_pagos`, y la venta tal como está— con `repetida: True`, sin escribir nada y **antes de mirar el estado de la venta** (el
+    reintento de la última devolución llega con la venta ya `devuelta`). Si se aplicó con otros datos, `ClaveReusada` (un `ValueError`;
+    el router la contesta 409). La referencia de caja de una devolución con clave es `devolucion:venta:{vid}:op:{clave}`, así que la
+    idempotencia de `create_caja_movimiento` también protege la plata. **Sin clave todo es idéntico a antes**, y `repetida` es `False`.
+    Dos pedidos simultáneos con la misma clave se serializan: la venta se toma con un `UPDATE` de sí misma (fila en PostgreSQL, base
+    en SQLite) antes de buscar la clave, así que el segundo ve la marca del primero.
 
     🔴 **`deposito_id` se valida con `catalogo.validar_deposito` ANTES de tocar
     nada** (F4, VentaLibra multisucursal — mismo criterio y misma función que
@@ -1202,10 +1269,20 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
     from libracore.db.reversiones import reintegrar_devolucion
 
     validar_deposito(conn, deposito_id)
+    clave_op = claves.normalizar_clave(clave_operacion) if clave_operacion is not None else None
+    if clave_op is not None:
+        # 🔒 Antes de mirar la clave: dos pedidos con la misma clave (doble clic que salió dos veces) no pueden leer «no se aplicó» a la vez.
+        # El `UPDATE` de la venta sobre sí misma la bloquea hasta el commit (fila en PostgreSQL, base en SQLite): el segundo espera y ve la
+        # marca del primero. También serializa a dos devoluciones de la MISMA venta con claves distintas, que es lo que debe pasar.
+        conn.execute("UPDATE sales SET status_detail = status_detail WHERE id=?", (vid,))
 
     venta = obtener_venta(conn, vid)
     if not venta:
         raise ValueError("Venta inexistente")
+    if clave_op is not None:
+        previa = _devolucion_de_la_clave(conn, vid, clave_op)
+        if previa:
+            return _devolucion_repetida(conn, vid, clave_op, previa, devoluciones, deposito_id, medio_pago)
     if venta["status"] == "cancelled":
         raise ValueError("La venta está anulada: no se le puede devolver nada")
     if not (
@@ -1219,12 +1296,7 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
     if not devoluciones:
         raise ValueError("No se indicó ninguna línea a devolver")
 
-    lineas = {
-        r["id"]: r for r in conn.execute(
-            "SELECT id, kind, item_id, variant_id, quantity, unit_price, discount_amount "
-            "FROM sale_items WHERE sale_id=?", (vid,),
-        ).fetchall()
-    }
+    lineas = _lineas_de_la_venta(conn, vid)
     # Vendido por clave: la SUMA de todas las líneas con ese (ítem, variante),
     # no la de una sola — dos líneas del mismo producto comparten el pozo.
     vendido_por_clave: dict[tuple, float] = {}
@@ -1262,6 +1334,8 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
         ) if con_lote_en_la_venta else {}
     )
     fecha = _ar_now().split(" ")[0]
+    # La marca de la clave va AL FINAL de la nota de cada fila que se escribe (sólo con clave): ahí la busca el reintento.
+    sello = f" {claves.marca(clave_op)}" if clave_op is not None else ""
 
     # `turno_para` no se resolvía acá hasta este gancho: `caja_con_turno`
     # gatillaba la única llamada, más abajo, DESPUÉS del loop que ya había
@@ -1310,7 +1384,7 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
             # Sin marcar, o marcado sin lote al que volver: la fila suelta de siempre, idéntica.
             add_movimiento_stock(
                 conn, producto_id=linea["item_id"], tipo="devolucion", cantidad=cantidad,
-                referencia=f"Devolución venta ID {vid}", venta_id=vid, usuario_id=usuario_id,
+                referencia=f"Devolución venta ID {vid}{sello}", venta_id=vid, usuario_id=usuario_id,
                 fecha=fecha, deposito_id=deposito_id, variant_id=linea["variant_id"],
             )
         for lote, vence, tramo in (tramos if con_lote else ()):
@@ -1318,7 +1392,7 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
                 # Lo que ningún lote pudo recibir: «sin lote», sin par (como siempre).
                 add_movimiento_stock(
                     conn, producto_id=linea["item_id"], tipo="devolucion", cantidad=float(tramo),
-                    referencia=f"Devolución venta ID {vid}", venta_id=vid, usuario_id=usuario_id,
+                    referencia=f"Devolución venta ID {vid}{sello}", venta_id=vid, usuario_id=usuario_id,
                     fecha=fecha, deposito_id=deposito_id, variant_id=linea["variant_id"],
                 )
                 continue
@@ -1326,13 +1400,13 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
             # merma; neto 0 en el stock.
             add_movimiento_stock(
                 conn, producto_id=linea["item_id"], tipo="devolucion", cantidad=float(tramo),
-                referencia=f"Devolución venta ID {vid}", venta_id=vid, usuario_id=usuario_id,
+                referencia=f"Devolución venta ID {vid}{sello}", venta_id=vid, usuario_id=usuario_id,
                 fecha=fecha, deposito_id=deposito_id, variant_id=linea["variant_id"],
                 lot_code=lote, expires_at=vence,
             )
             add_movimiento_stock(
                 conn, producto_id=linea["item_id"], tipo="merma", cantidad=-float(tramo),
-                referencia=f"Merma: devolución venta ID {vid} — lote {lote or '(sin código)'}",
+                referencia=f"Merma: devolución venta ID {vid} — lote {lote or '(sin código)'}{sello}",
                 venta_id=vid, usuario_id=usuario_id, fecha=fecha, deposito_id=deposito_id,
                 variant_id=linea["variant_id"], lot_code=lote, expires_at=vence,
             )
@@ -1352,7 +1426,9 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
     turno_id = turno["id"] if (caja_con_turno and turno) else None
     reintegrar_devolucion(
         venta_id=vid, numero=venta["numero"], fecha=fecha, monto=importe,
-        medio_pago=medio_pago, referencia=_referencia_devolucion(vid, devoluciones, sum(ya_devuelto.values())),
+        medio_pago=medio_pago,
+        referencia=(_referencia_de_la_operacion(vid, clave_op) if clave_op is not None
+                    else _referencia_devolucion(vid, devoluciones, sum(ya_devuelto.values()))),
         cliente_id=cliente_id, usuario_id=usuario_id,
         turno_id=turno_id, conn=conn,
     )
@@ -1362,7 +1438,34 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
     status_detail = "devuelta" if devuelto_total >= vendido_total else "devuelta_parcial"
     conn.execute("UPDATE sales SET status_detail=? WHERE id=?", (status_detail, vid))
 
-    return {"importe": importe, "venta": obtener_venta(conn, vid)}
+    return {"importe": importe, "venta": obtener_venta(conn, vid), "repetida": False}
+
+
+def _lineas_de_la_venta(conn, vid: int) -> dict:
+    return {
+        r["id"]: r for r in conn.execute(
+            "SELECT id, kind, item_id, variant_id, quantity, unit_price, discount_amount "
+            "FROM sale_items WHERE sale_id=?", (vid,),
+        ).fetchall()
+    }
+
+
+def _devolucion_repetida(conn, vid: int, clave_op: str, previa: dict[tuple, float], devoluciones: dict[int, float],
+                         deposito_id: int, medio_pago: str) -> dict:
+    """El resultado de una devolución que ya se aplicó con esta clave, o `ClaveReusada` si lo pedido ahora no es lo mismo (otras
+    cantidades por (ítem, variante), otro depósito u otro medio de pago). No escribe nada."""
+    reintegro = _reintegro_de_la_clave(conn, vid, clave_op)
+    if reintegro is None:
+        # La clave dejó stock pero no su reintegro: no debería pasar (van en la misma transacción). No se adivina: ni se repite ni se da por buena.
+        raise ValueError("la clave_operacion ya repuso stock de esta venta pero no se encuentra su reintegro: revisá la caja antes de reintentar")
+    importe, medio_previo = reintegro
+    pedido = _pedido_por_stock(_lineas_de_la_venta(conn, vid), devoluciones, deposito_id)
+    if pedido != previa or medio_previo != medio_pago:
+        raise ClaveReusada(
+            "la clave_operacion ya se usó en esta venta con otras cantidades, otro depósito u otro medio de pago: "
+            "es otra devolución y necesita otra clave"
+        )
+    return {"importe": importe, "venta": obtener_venta(conn, vid), "repetida": True}
 
 
 # ── Links a otros contextos (facturación, remitos, MercadoPago) ───────────
