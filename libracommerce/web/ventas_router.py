@@ -36,7 +36,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..erp import catalogo, lotes, ventas
+from ..erp import catalogo, claves, lotes, ventas
 from ..erp.hooks import SIN_GANCHOS, Hooks
 from . import fastapi as _fastapi
 from ._validacion import sin_booleanos
@@ -47,7 +47,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request  # noqa: E402
 from libracore import medios_pago  # noqa: E402
 from libracore import pagos as acreditacion  # noqa: E402
 from libracore.db.caja import MEDIO_CUENTA_CORRIENTE  # noqa: E402
-from pydantic import BaseModel, field_validator, model_validator  # noqa: E402
+from pydantic import BaseModel, Field, field_validator, model_validator  # noqa: E402
 
 #: El medio con el que cobra el QR de caja. Pasa por `medios_pago.validar` y no
 #: es un literal suelto: la grafía se normalizó a `mercadopago` el 2026-08-25.
@@ -151,6 +151,9 @@ class DevolucionPayload(BaseModel):
     deposito_id: int
     #: Por dónde vuelve la plata; no tiene por qué ser el medio que cobró.
     medio_pago: str = "efectivo"
+    #: Una por INTENTO (p. ej. un UUID): un reintento con la misma clave (doble clic, timeout) no repone stock ni escribe otro egreso, y
+    #: contesta lo mismo con `repetida: true`. Opcional para no romper a quien no la manda; la misma clave con otros datos es 409.
+    clave_operacion: str | None = Field(default=None, min_length=1, max_length=claves.MAX_LARGO_CLAVE)
 
     _no_son_booleanos = sin_booleanos("deposito_id")
 
@@ -520,8 +523,13 @@ def build_ventas_router(
                     deposito_id=payload.deposito_id, medio_pago=payload.medio_pago,
                     usuario_id=user.get("id"), hooks=opciones.hooks,
                     caja_con_turno=opciones.caja_con_turno,
+                    clave_operacion=payload.clave_operacion,
                 )
                 conn.commit()
+            except ventas.ClaveReusada as exc:
+                # La clave ya se aplicó a esta venta con otros datos: es otra devolución y necesita otra clave.
+                conn.rollback()
+                raise HTTPException(409, str(exc)) from None
             except ventas.DepositoInexistente as exc:
                 # Explícito y no sólo cubierto por el `except ValueError` de
                 # abajo (que también lo atraparía, por herencia): así queda
@@ -539,6 +547,7 @@ def build_ventas_router(
             except Exception:
                 conn.rollback()
                 raise
-            return resultado["venta"]
+            # La venta de siempre, más `repetida` (true si la clave ya estaba aplicada y no se escribió nada). Un campo de más no rompe a nadie.
+            return {**resultado["venta"], "repetida": resultado["repetida"]}
 
     return router

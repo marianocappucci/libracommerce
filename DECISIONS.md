@@ -1459,3 +1459,42 @@ general, línea de servicio en el factor, y la guarda. Fallan con la cuenta viej
   corriente.
 
 **La referencia de caja de cada devolución lleva lo ya devuelto (mismo día, mismo PR).** `_referencia_devolucion` armaba `devolucion:venta:{id}:{línea}x{cantidad}` y `create_caja_movimiento` no repite una referencia: dos devoluciones sucesivas iguales (1 y después la otra de un 2x1) reponían el stock las dos veces pero escribían un solo egreso, y el arqueo no veía la plata que salió. Ahora termina en `@{ya_devuelto}`: cada devolución sucesiva es otra referencia, coherente con el stock. Test: `test_dos_devoluciones_sucesivas_iguales_escriben_los_dos_egresos_de_caja` (falla sin el cambio: caja 800 en vez de 1600). Queda pendiente una clave de operación del cliente para distinguir un reintento de doble clic de una segunda devolución legítima (hoy, como antes, ese reintento repone stock de nuevo si hay disponible).
+
+## ADR-041 — La devolución acepta una `clave_operacion` para que un reintento no duplique stock ni caja (2026-10-09)
+
+**Problema.** `erp.ventas.devolver_items` no distingue un REINTENTO (doble clic, timeout y el usuario vuelve a apretar) de una segunda
+devolución legítima: los dos piden lo mismo. Si queda cantidad disponible, el reintento repone el stock otra vez y escribe otro egreso de
+caja. Cerrado el hueco de la referencia de caja (ADR-040: lleva lo ya devuelto) quedaba justo esto, que quedó anotado como pendiente.
+
+**Patrón reutilizado.** El de `vencimientos` y `reposicion_ordenes`: una `clave_operacion` por intento, validada, estampada como `[op:<clave>]`
+en la nota o referencia de lo que se escribe y buscada antes de escribir; con los mismos datos devuelve el resultado anterior con
+`repetida: true`, con otros datos `ClaveReusada` (un `ValueError`; el router, 409). Lo común vive ahora en `erp/claves.py` (`normalizar_clave`,
+`marca`, `ClaveReusada`, `MAX_LARGO_CLAVE`) y las tres operaciones lo usan. La validación de `reposicion_ordenes` sigue siendo la suya (letras,
+números y `. _ : -`, más estricta que la de `vencimientos`): unificarla cambiaría qué claves acepta una de las dos.
+
+**Decisión.**
+- `devolver_items(..., clave_operacion: str | None = None)` y `DevolucionPayload.clave_operacion`: **opcionales en el motor** (Restolibra y quien no la
+  mande siguen igual: sin clave nada cambia, salvo que el resultado trae `repetida: False`). **La UI de VentaLibra la manda siempre**, una por intento.
+- **Fuente de «ya se aplicó»: las filas de stock `devolucion` de la venta con la marca al final de la nota.** Se escriben siempre y en la misma
+  transacción; la caja no (un reintegro a cuenta corriente va a `cc_pagos`, y ahí `reintegrar_devolucion` no es idempotente). Se comparan las
+  cantidades por (ítem, variante, depósito) —el ledger no dice de qué línea volvió lo devuelto, y dos líneas del mismo producto son lo mismo que una
+  con la suma— y el medio de pago, que se lee del reintegro. El `importe` que se devuelve es el que se reintegró (leído de `caja_movimientos` o
+  `cc_pagos` por la referencia), no uno recalculado.
+- Con clave, la referencia de caja es `devolucion:venta:{vid}:op:{clave}` (reemplaza a `…@{ya_devuelto}`): `create_caja_movimiento` también frena el egreso repetido.
+- La búsqueda va **antes** de mirar el estado de la venta: el reintento de la última devolución llega con la venta ya `devuelta`.
+- **Concurrencia:** con clave, antes de buscarla se toma la venta con un `UPDATE` de sí misma (fila en PostgreSQL, base en SQLite). Dos pedidos
+  con la misma clave se serializan y el segundo ve la marca del primero. No se usa el bloqueo por producto de `vencimientos` porque un producto sin
+  marcar no toma ninguno; el de la venta se toma antes que el de los productos y `anular_venta` no toma ninguno.
+- La respuesta de `POST /api/ventas/{vid}/devolver` es la venta de siempre más `repetida`.
+
+**Tests.** `test_erp_ventas.py`: reintento con la misma clave (no duplica stock ni caja, mismo importe, `repetida`), reintento de la última devolución con la
+venta ya `devuelta`, misma clave con otras cantidades / otro depósito / otro medio (`ClaveReusada`), dos claves = dos devoluciones con el prorrateo de
+ADR-040, la clave es por venta, sin clave igual que antes (incluidas las referencias `@n`), cuenta corriente, clave inválida, dos hilos con la misma clave.
+`test_fefo_devolucion_transferencia_ajuste.py`: el par por lote con clave. `test_web_ventas.py`: 200 con `repetida`, 409 y 422. Los del reintento fallan si
+no se busca la clave y el de los hilos falla sin el bloqueo de la venta. La carrera en PostgreSQL no se probó acá (sin base de test); en SQLite la serializa la base.
+
+**No cubre.**
+- **Un reintento sin clave** (un cliente que no la manda) sigue siendo indistinguible de una segunda devolución.
+- **Una clave reusada a propósito** para otra devolución con los mismos datos de la misma venta se toma por reintento: la clave es por intento, y es del cliente generar una nueva.
+- **Devoluciones hechas antes** de este cambio no llevan marca: no se reconocen como aplicadas.
+- Sigue sin cubrir la receta (ADR-018) ni la nota de crédito de una factura emitida.

@@ -240,6 +240,27 @@ def test_devoluciones_acumuladas_restan_lo_ya_devuelto_por_lote_y_respetan_el_to
     assert _stock_total(abrir_fefo, pid) == 2.0           # nunca volvió nada al estante
 
 
+def test_un_reintento_con_clave_de_un_perecedero_no_repite_el_par_ni_la_merma(abrir_fefo):
+    """ADR-041: la devolución que cruza dos lotes escribe dos pares (cuatro filas, todas con `[op:<clave>]`). El reintento con la misma
+    clave las reconoce —cuenta las `devolucion`, no las `merma`— y contesta sin escribir; con otras cantidades es `ClaveReusada`."""
+    pid = _producto(abrir_fefo)
+    dep = _principal(abrir_fefo)
+    vid = _vender(abrir_fefo, [_linea(pid, 8)])          # L1 −6, L2 −2
+    (linea,) = _lineas(abrir_fefo, vid)
+    primera = _devolver(abrir_fefo, vid, {linea: 7.0}, dep, clave_operacion="lote-1")    # L1 6 y L2 1
+    pares = _pares(abrir_fefo, vid)
+    assert len(pares) == 4 and primera["repetida"] is False
+    repetida = _devolver(abrir_fefo, vid, {linea: 7.0}, dep, clave_operacion="lote-1")
+    assert repetida["repetida"] is True and repetida["importe"] == primera["importe"]
+    assert _pares(abrir_fefo, vid) == pares
+    with abrir_fefo() as conn:
+        notas = [f[0] for f in conn.execute("SELECT note FROM stock_movements WHERE source_id = ? AND reason_code IN ('devolucion', 'merma')", (vid,))]
+    assert len(notas) == 4 and all(n.endswith(" [op:lote-1]") for n in notas)
+    with pytest.raises(ventas.ClaveReusada):
+        _devolver(abrir_fefo, vid, {linea: 1.0}, dep, clave_operacion="lote-1")
+    assert _pares(abrir_fefo, vid) == pares
+
+
 def test_dos_lineas_del_mismo_producto_en_una_devolucion_se_reparten_en_secuencia(abrir_fefo):
     pid = _producto(abrir_fefo)
     dep = _principal(abrir_fefo)

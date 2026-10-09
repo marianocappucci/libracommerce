@@ -61,6 +61,7 @@ import datetime
 import uuid
 from decimal import Decimal, InvalidOperation
 
+from . import claves
 from .catalogo import validar_deposito
 from .listas_precio import _ZONA_LOCAL
 from .lotes import CERO as _CERO
@@ -77,8 +78,8 @@ MAX_DIAS_AVISO = 365
 
 ESTADOS = ("vencido", "por_vencer")
 
-#: Largo máximo de la `clave_operacion` (un UUID en texto son 36).
-MAX_LARGO_CLAVE = 64
+#: Largo máximo de la `clave_operacion` (un UUID en texto son 36). Vive en `claves`; el router lo lee de acá.
+MAX_LARGO_CLAVE = claves.MAX_LARGO_CLAVE
 
 
 class VencimientosError(Exception):
@@ -460,29 +461,10 @@ def _saldo_del_bucket(conn, item_id: int, deposito_id: int, variante_id: int | N
 # el índice del producto y recorre las notas de sus movimientos.
 
 
-def _normalizar_clave(clave) -> str:
-    """La `clave_operacion` recortada: un texto imprimible, no vacío, de hasta `MAX_LARGO_CLAVE` caracteres y sin
-    corchetes (delimitan la marca). `ValueError` si no."""
-    if not isinstance(clave, str):
-        raise ValueError(f"clave_operacion tiene que ser un texto (p. ej. un UUID): {clave!r}")
-    clave = clave.strip()
-    if not clave:
-        raise ValueError("clave_operacion no puede estar vacía: es obligatoria para poder reintentar sin duplicar")
-    if len(clave) > MAX_LARGO_CLAVE:
-        raise ValueError(f"clave_operacion no puede pasar de {MAX_LARGO_CLAVE} caracteres")
-    if "[" in clave or "]" in clave or not clave.isprintable():
-        raise ValueError("clave_operacion no puede tener corchetes ni caracteres no imprimibles")
-    return clave
-
-
-def _marca_de_operacion(clave: str) -> str:
-    return f"[op:{clave}]"
-
-
 def _movimientos_de_la_operacion(conn, item_id: int, clave: str) -> list:
     """Los movimientos de `item_id` que ya escribió una operación con esta clave, en orden de escritura (`[]` si es
     nueva). Sólo de ese producto: la clave es única por producto."""
-    marca = _marca_de_operacion(clave)
+    marca = claves.marca(clave)
     patron = "%" + marca.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     filas = conn.execute(
         "SELECT id, item_id, location_id, variant_id, movement_type, reason_code, quantity_delta, lot_code, expires_at, "
@@ -530,7 +512,7 @@ def asignar_vencimiento_a_saldo(conn, item_id: int, deposito_id: int, lot_code: 
     el saldo sin lote de ese depósito y variante es menor a `cantidad`. Todo se valida antes de escribir la primera
     fila. Devuelve `{producto_id, deposito_id, variante_id, lote, vence, cantidad, referencia, saldo_sin_lote,
     repetida}` (`saldo_sin_lote` es el que quedó sin lote al terminar la operación)."""
-    clave = _normalizar_clave(clave_operacion)
+    clave = claves.normalizar_clave(clave_operacion)
     lote = normalizar_lote(lot_code)
     vence = normalizar_vencimiento(expires_at)
     cant = _cantidad_positiva(cantidad)
@@ -555,7 +537,7 @@ def asignar_vencimiento_a_saldo(conn, item_id: int, deposito_id: int, lot_code: 
     marca = f"[asignación {uuid.uuid4().hex[:8]}]"
     referencia = f"{nota.strip()} {marca}" if nota.strip() else f"Asignación de vencimiento {marca}"
     detalle = f"{referencia}: lote {lote}, vence {vence}"
-    op = _marca_de_operacion(clave)
+    op = claves.marca(clave)
     destino = {"usuario_id": usuario_id, "fecha": fecha, "deposito_id": deposito_id, "variant_id": variante_id}
     add_movimiento_stock(conn, item_id, "ajuste", -float(cant), f"{detalle} {_SALE_DE_SIN_LOTE} {op}", **destino)
     add_movimiento_stock(conn, item_id, "ajuste", float(cant), f"{detalle} (entra al lote) {op}",
@@ -587,7 +569,7 @@ def _asignacion_repetida(conn, clave: str, filas: list, pedida: dict) -> dict:
                       "vence": _vence_de_fila(pos["expires_at"]), "cantidad": cantidad}
     _misma_operacion(previa, pedida)
     nota = filas[0]["note"]
-    sufijo = f": lote {previa['lote']}, vence {previa['vence']} {_SALE_DE_SIN_LOTE} {_marca_de_operacion(clave)}"
+    sufijo = f": lote {previa['lote']}, vence {previa['vence']} {_SALE_DE_SIN_LOTE} {claves.marca(clave)}"
     saldo = _saldo_del_bucket(conn, previa["producto_id"], previa["deposito_id"], previa["variante_id"], None, None,
                               hasta_id=filas[0]["id"])
     return {"producto_id": previa["producto_id"], "deposito_id": previa["deposito_id"],
@@ -617,7 +599,7 @@ def dar_de_baja_lote(conn, item_id: int, deposito_id: int, lot_code: str | None,
     ventas no bajan el lote, su saldo puede estar sobreestimado y mermarlo descontaría dos veces lo vendido). Esas
     comprobaciones van después de buscar la clave: un reintento (`repetida`) no se ve afectado por ellas. No exige que el producto esté marcado. Devuelve `{producto_id, deposito_id,
     variante_id, lote, vence, cantidad, saldo_restante, repetida}`."""
-    clave = _normalizar_clave(clave_operacion)
+    clave = claves.normalizar_clave(clave_operacion)
     lote = normalizar_lote(lot_code) if lot_code is not None else None
     vence = normalizar_vencimiento(expires_at) if expires_at is not None else None
     if lote is None and vence is None:
@@ -658,7 +640,7 @@ def dar_de_baja_lote(conn, item_id: int, deposito_id: int, lot_code: str | None,
     referencia = f"Merma: {motivo} — lote {lote or '(sin código)'}, vence {vence or 'sin fecha'}"
     if nota.strip():
         referencia += f" — {nota.strip()}"
-    referencia = f"{referencia} {_marca_de_operacion(clave)}"
+    referencia = f"{referencia} {claves.marca(clave)}"
     add_movimiento_stock(conn, item_id, "merma", -float(cant), referencia, usuario_id=usuario_id,
                          fecha=fecha or hoy_argentina().isoformat(), deposito_id=deposito_id,
                          variant_id=variante_id, lot_code=lote, expires_at=vence)
@@ -744,7 +726,7 @@ def registrar_entrada_con_lote(conn, item_id: int, deposito_id: int, lote: str, 
     `SinRevision` sin la revisión `0002`. Todo se valida antes de escribir. Devuelve `{producto_id, deposito_id,
     variante_id, lote, vence, cantidad, referencia, saldo_lote, repetida}`; `saldo_lote` es el saldo de ese lote (en ese
     depósito y variante) **tras la entrada** (en un reintento, el que tenía justo después de la primera vez)."""
-    clave = _normalizar_clave(clave_operacion)
+    clave = claves.normalizar_clave(clave_operacion)
     lote = normalizar_lote(lote)
     vence = normalizar_vencimiento(vence)
     cant = _cantidad_positiva(cantidad)
@@ -769,7 +751,7 @@ def registrar_entrada_con_lote(conn, item_id: int, deposito_id: int, lote: str, 
     _exigir_escala_de_la_unidad(conn, item_id, cant)
     referencia = nota.strip() or "Entrada con lote"
     add_movimiento_stock(conn, item_id, "entrada", float(cant),
-                         f"{referencia}: lote {lote}, vence {vence} {_marca_de_operacion(clave)}",
+                         f"{referencia}: lote {lote}, vence {vence} {claves.marca(clave)}",
                          usuario_id=usuario_id, fecha=fecha or hoy_argentina().isoformat(), deposito_id=deposito_id,
                          variant_id=variante_id, lot_code=lote, expires_at=vence)
     return {"producto_id": item_id, "deposito_id": deposito_id, "variante_id": variante_id, "lote": lote,
@@ -789,7 +771,7 @@ def _entrada_repetida(conn, clave: str, filas: list, pedida: dict) -> dict:
                   "variante_id": f["variant_id"], "lote": _lote_de_fila(f["lot_code"]),
                   "vence": _vence_de_fila(f["expires_at"]), "cantidad": _saldo(_dec(f["quantity_delta"]))}
     _misma_operacion(previa, pedida)
-    sufijo = f": lote {previa['lote']}, vence {previa['vence']} {_marca_de_operacion(clave)}"
+    sufijo = f": lote {previa['lote']}, vence {previa['vence']} {claves.marca(clave)}"
     nota = f["note"]
     saldo = _saldo_del_bucket(conn, previa["producto_id"], previa["deposito_id"], previa["variante_id"],
                               previa["lote"], previa["vence"], hasta_id=f["id"])

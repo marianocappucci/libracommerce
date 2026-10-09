@@ -312,6 +312,58 @@ def test_devolver_reintegra_y_gatea_como_anular(abrir_ventas):
         "lineas": [{"sale_item_id": item_id_linea, "cantidad": 1}], "deposito_id": deposito_id}).status_code == 404
 
 
+def _venta_para_devolver(client, abrir_ventas):
+    pid = client.post("/api/productos", json={"nombre": "Yerba", "precio_venta": 100.0, "precio_costo": 60.0}).json()["id"]
+    client.post(f"/api/stock/{pid}/ajuste", json={"modo": "absoluto", "cantidad": 10})
+    venta = _venta(client, items=[{"nombre": "Yerba", "qty": 4, "precio": 100.0, "producto_id": pid}],
+                   pagos=[{"medio": "efectivo", "monto": 400.0}])
+    with abrir_ventas() as conn:
+        linea = conn.execute("SELECT id FROM sale_items WHERE sale_id=?", (venta["id"],)).fetchone()["id"]
+        deposito = conn.execute("SELECT location_id FROM stock_movements WHERE source_id=?", (venta["id"],)).fetchone()["location_id"]
+    return venta["id"], pid, linea, deposito
+
+
+def test_devolver_con_clave_un_reintento_responde_lo_mismo_sin_duplicar(abrir_ventas):
+    """ADR-041: `clave_operacion` en el body. Un reintento (doble clic, timeout) contesta 200 con `repetida: true` y no repone otra vez;
+    la misma clave con otras cantidades es 409; otra clave es otra devolución; una clave mal formada es 422."""
+    client = _app(abrir_ventas)
+    vid, pid, linea, deposito = _venta_para_devolver(client, abrir_ventas)
+    body = {"lineas": [{"sale_item_id": linea, "cantidad": 1}], "deposito_id": deposito, "clave_operacion": "uuid-1"}
+
+    r = client.post(f"/api/ventas/{vid}/devolver", json=body)
+    assert r.status_code == 200, r.text
+    assert r.json()["repetida"] is False and r.json()["estado"] == "devuelta_parcial"
+    assert client.get(f"/api/stock/{pid}").json()["stock_actual"] == 7.0              # 10 - 4 + 1
+
+    r = client.post(f"/api/ventas/{vid}/devolver", json=body)                         # el reintento
+    assert r.status_code == 200, r.text
+    assert r.json()["repetida"] is True and r.json()["id"] == vid
+    assert client.get(f"/api/stock/{pid}").json()["stock_actual"] == 7.0              # no repuso otra unidad
+
+    r = client.post(f"/api/ventas/{vid}/devolver", json={**body, "lineas": [{"sale_item_id": linea, "cantidad": 2}]})
+    assert r.status_code == 409 and "clave_operacion" in r.json()["detail"]
+    assert client.get(f"/api/stock/{pid}").json()["stock_actual"] == 7.0
+
+    r = client.post(f"/api/ventas/{vid}/devolver", json={**body, "clave_operacion": "uuid-2"})   # otra clave: otra devolución
+    assert r.status_code == 200 and r.json()["repetida"] is False
+    assert client.get(f"/api/stock/{pid}").json()["stock_actual"] == 8.0
+
+    for mala in ("a[b", "x" * 65, "", "   "):
+        r = client.post(f"/api/ventas/{vid}/devolver", json={**body, "clave_operacion": mala})
+        assert r.status_code == 422, (mala, r.text)
+    assert client.get(f"/api/stock/{pid}").json()["stock_actual"] == 8.0
+
+
+def test_devolver_sin_clave_sigue_igual_y_dice_que_no_es_repetida(abrir_ventas):
+    client = _app(abrir_ventas)
+    vid, pid, linea, deposito = _venta_para_devolver(client, abrir_ventas)
+    body = {"lineas": [{"sale_item_id": linea, "cantidad": 1}], "deposito_id": deposito}
+    for esperado in (7.0, 8.0):                                                       # sin clave cada llamada es una devolución
+        r = client.post(f"/api/ventas/{vid}/devolver", json=body)
+        assert r.status_code == 200 and r.json()["repetida"] is False
+        assert client.get(f"/api/stock/{pid}").json()["stock_actual"] == esperado
+
+
 def test_anular_con_devoluciones_es_409(abrir_ventas):
     client = _app(abrir_ventas)
     pid = client.post("/api/productos", json={"nombre": "Yerba", "precio_venta": 100.0, "precio_costo": 60.0}).json()["id"]

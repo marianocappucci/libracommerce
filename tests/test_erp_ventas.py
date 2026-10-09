@@ -1513,6 +1513,224 @@ def test_el_reintegro_acumulado_nunca_supera_lo_cobrado():
         ventas._reintegro_prorrateado([linea], 1600, {clave: 2.0}, {clave: 1.0})
 
 
+# ── ADR-041: `clave_operacion` distingue un REINTENTO de una segunda devolución ──
+#
+# Sin clave, un reintento (doble clic, timeout y el usuario vuelve a apretar) es indistinguible de una segunda devolución
+# legítima: si quedaba disponible, repone el stock otra vez y escribe otro egreso de caja.
+
+
+def _venta_2x1(abrir):
+    """2 × $1.600 con 2x1 (cobrado $1.600): cada unidad devuelta reintegra $800 (ADR-040)."""
+    with abrir() as conn:
+        pid = _producto(conn, "Lavandina", 1600.0, existencia=10.0)
+    vid = _venta(abrir, items=[
+        {"nombre": "Lavandina", "qty": 2, "precio": 1600.0, "subtotal": 3200.0, "producto_id": pid},
+    ], descuento=1600.0, pagos=[{"medio": "efectivo", "monto": 1600.0, "estado": "aprobado"}])
+    with abrir() as conn:
+        linea = conn.execute("SELECT id FROM sale_items WHERE sale_id=?", (vid,)).fetchone()["id"]
+        deposito = conn.execute("SELECT location_id FROM stock_movements WHERE source_id=? LIMIT 1", (vid,)).fetchone()["location_id"]
+    return vid, pid, linea, deposito
+
+
+def _devolver_con_clave(abrir, vid, devoluciones, deposito, clave, **kw):
+    with abrir() as conn:
+        r = ventas.devolver_items(conn, vid, devoluciones, deposito, clave_operacion=clave, **kw)
+        conn.commit()
+    return r
+
+
+def _stock(abrir, pid):
+    with abrir() as conn:
+        return stock.get_stock_actual(conn, pid)
+
+
+def _filas_de_devolucion(abrir, vid):
+    with abrir() as conn:
+        return conn.execute("SELECT quantity_delta, note FROM stock_movements WHERE source_id=? AND reason_code='devolucion' ORDER BY id", (vid,)).fetchall()
+
+
+def test_un_reintento_con_la_misma_clave_no_duplica_stock_ni_caja(abrir_ventas):
+    """🔴 El defecto: devolver 1 de 2 y reintentar (hay otra disponible) reponía otra unidad y escribía otro egreso de $800."""
+    vid, pid, linea, deposito = _venta_2x1(abrir_ventas)
+    primera = _devolver_con_clave(abrir_ventas, vid, {linea: 1.0}, deposito, "intento-1")
+    assert primera["importe"] == 800.0 and primera["repetida"] is False
+    stock_despues = _stock(abrir_ventas, pid)
+    segunda = _devolver_con_clave(abrir_ventas, vid, {linea: 1.0}, deposito, "intento-1")
+    assert segunda["repetida"] is True and segunda["importe"] == 800.0          # el mismo importe, no uno nuevo
+    assert segunda["venta"]["estado"] == "devuelta_parcial"
+    assert _stock(abrir_ventas, pid) == stock_despues                              # no repuso otra unidad
+    assert len(_filas_de_devolucion(abrir_ventas, vid)) == 1
+    assert _reintegrado_en_caja(abrir_ventas) == 800.0                             # un solo egreso
+
+
+def test_el_reintento_de_la_ultima_devolucion_responde_aunque_la_venta_ya_este_devuelta(abrir_ventas):
+    """Devolver todo y reintentar: la venta ya está `devuelta` y sin clave el reintento daría 422; con la clave contesta lo mismo."""
+    vid, pid, linea, deposito = _venta_2x1(abrir_ventas)
+    primera = _devolver_con_clave(abrir_ventas, vid, {linea: 2.0}, deposito, "todo")
+    assert primera["importe"] == 1600.0 and primera["venta"]["estado"] == "devuelta"
+    segunda = _devolver_con_clave(abrir_ventas, vid, {linea: 2.0}, deposito, "todo")
+    assert segunda["repetida"] is True and segunda["importe"] == 1600.0 and segunda["venta"]["estado"] == "devuelta"
+    assert _reintegrado_en_caja(abrir_ventas) == 1600.0 and _stock(abrir_ventas, pid) == 10.0
+
+
+def test_la_misma_clave_con_otras_cantidades_es_clave_reusada_y_no_escribe(abrir_ventas):
+    vid, pid, linea, deposito = _venta_2x1(abrir_ventas)
+    _devolver_con_clave(abrir_ventas, vid, {linea: 1.0}, deposito, "k")
+    with abrir_ventas() as conn:
+        with pytest.raises(ventas.ClaveReusada, match="clave_operacion"):
+            ventas.devolver_items(conn, vid, {linea: 2.0}, deposito, clave_operacion="k")
+        with pytest.raises(ValueError):                                              # es un ValueError: el router lo ve como 4xx
+            ventas.devolver_items(conn, vid, {linea: 1.0}, deposito, medio_pago="transferencia", clave_operacion="k")
+    assert len(_filas_de_devolucion(abrir_ventas, vid)) == 1 and _reintegrado_en_caja(abrir_ventas) == 800.0
+
+
+def test_la_misma_clave_con_otro_deposito_es_clave_reusada(abrir_ventas):
+    vid, pid, linea, deposito = _venta_2x1(abrir_ventas)
+    with abrir_ventas() as conn:
+        otro = catalogo.create_deposito(conn, "Sucursal Norte")
+        conn.commit()
+    _devolver_con_clave(abrir_ventas, vid, {linea: 1.0}, deposito, "k")
+    with abrir_ventas() as conn, pytest.raises(ventas.ClaveReusada):
+        ventas.devolver_items(conn, vid, {linea: 1.0}, otro, clave_operacion="k")
+
+
+def test_dos_claves_distintas_son_dos_devoluciones_con_el_prorrateo(abrir_ventas):
+    """Una segunda devolución legítima lleva otra clave: repone otra unidad y escribe su propio egreso ($800 + $800 = lo cobrado)."""
+    vid, pid, linea, deposito = _venta_2x1(abrir_ventas)
+    a = _devolver_con_clave(abrir_ventas, vid, {linea: 1.0}, deposito, "a")
+    b = _devolver_con_clave(abrir_ventas, vid, {linea: 1.0}, deposito, "b")
+    assert (a["importe"], b["importe"]) == (800.0, 800.0) and not a["repetida"] and not b["repetida"]
+    assert b["venta"]["estado"] == "devuelta"
+    assert _reintegrado_en_caja(abrir_ventas) == 1600.0 and _stock(abrir_ventas, pid) == 10.0
+    # Y reintentar la primera sigue respondiendo lo suyo, sin tocar nada, aunque la venta ya esté devuelta.
+    de_nuevo = _devolver_con_clave(abrir_ventas, vid, {linea: 1.0}, deposito, "a")
+    assert de_nuevo["repetida"] is True and de_nuevo["importe"] == 800.0
+    assert _reintegrado_en_caja(abrir_ventas) == 1600.0 and len(_filas_de_devolucion(abrir_ventas, vid)) == 2
+
+
+def test_la_clave_es_por_venta_la_misma_clave_en_otra_venta_es_otra_operacion(abrir_ventas):
+    a = _venta_2x1(abrir_ventas)
+    b = _venta_2x1(abrir_ventas)
+    _devolver_con_clave(abrir_ventas, a[0], {a[2]: 1.0}, a[3], "k")
+    otra = _devolver_con_clave(abrir_ventas, b[0], {b[2]: 1.0}, b[3], "k")
+    assert otra["repetida"] is False and otra["importe"] == 800.0
+
+
+def test_sin_clave_el_comportamiento_es_el_de_siempre(abrir_ventas):
+    """Sin `clave_operacion` un reintento sigue siendo una segunda devolución (no se puede distinguir): las dos reponen y salen.
+    Nota de la fila sin marca y `repetida` en falso."""
+    vid, pid, linea, deposito = _venta_2x1(abrir_ventas)
+    with abrir_ventas() as conn:
+        primera = ventas.devolver_items(conn, vid, {linea: 1.0}, deposito)
+        conn.commit()
+        segunda = ventas.devolver_items(conn, vid, {linea: 1.0}, deposito)
+        conn.commit()
+    assert primera["repetida"] is False and segunda["repetida"] is False
+    assert [f["note"] for f in _filas_de_devolucion(abrir_ventas, vid)] == [f"Devolución venta ID {vid}"] * 2
+    assert _reintegrado_en_caja(abrir_ventas) == 1600.0 and _stock(abrir_ventas, pid) == 10.0
+    with abrir_ventas() as conn:
+        refs = [f["referencia"] for f in conn.execute("SELECT referencia FROM caja_movimientos WHERE tipo='egreso' ORDER BY id").fetchall()]
+    assert refs == [f"devolucion:venta:{vid}:{linea}x1.0@0", f"devolucion:venta:{vid}:{linea}x1.0@1"]
+
+
+def test_con_clave_se_estampa_la_marca_y_la_referencia_de_caja_lleva_la_clave(abrir_ventas):
+    vid, pid, linea, deposito = _venta_2x1(abrir_ventas)
+    _devolver_con_clave(abrir_ventas, vid, {linea: 1.0}, deposito, "  uuid-1  ")        # se recorta
+    assert [f["note"] for f in _filas_de_devolucion(abrir_ventas, vid)] == [f"Devolución venta ID {vid} [op:uuid-1]"]
+    with abrir_ventas() as conn:
+        assert conn.execute("SELECT referencia FROM caja_movimientos WHERE tipo='egreso'").fetchone()["referencia"] == f"devolucion:venta:{vid}:op:uuid-1"
+
+
+def test_un_reintento_a_cuenta_corriente_tampoco_duplica(abrir_ventas):
+    """El reintegro a cuenta corriente no pasa por la caja y `reintegrar_devolucion` no es idempotente ahí: lo que frena al reintento
+    es la marca del stock, y el importe se lee de `cc_pagos`."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, "Lavandina", 1600.0, existencia=10.0)
+        cliente = conn.execute("INSERT INTO clients (name) VALUES ('Cliente de prueba') RETURNING id").fetchone()[0]
+        conn.commit()
+    vid = _venta(abrir_ventas, items=[{"nombre": "Lavandina", "qty": 2, "precio": 1600.0, "subtotal": 3200.0, "producto_id": pid}],
+                 pagos=[{"medio": "efectivo", "monto": 3200.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        linea = conn.execute("SELECT id FROM sale_items WHERE sale_id=?", (vid,)).fetchone()["id"]
+        deposito = conn.execute("SELECT location_id FROM stock_movements WHERE source_id=? LIMIT 1", (vid,)).fetchone()["location_id"]
+    hooks = Hooks(cliente_cc_de=lambda conn, venta: cliente)
+    primera = _devolver_con_clave(abrir_ventas, vid, {linea: 1.0}, deposito, "cc", medio_pago="cuenta_corriente", hooks=hooks)
+    segunda = _devolver_con_clave(abrir_ventas, vid, {linea: 1.0}, deposito, "cc", medio_pago="cuenta_corriente", hooks=hooks)
+    assert primera["importe"] == 1600.0 and segunda["repetida"] is True and segunda["importe"] == 1600.0
+    with abrir_ventas() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM cc_pagos WHERE referencia LIKE 'devolucion:venta:%'").fetchone()[0] == 1
+    assert len(_filas_de_devolucion(abrir_ventas, vid)) == 1
+    with abrir_ventas() as conn, pytest.raises(ventas.ClaveReusada):                 # el medio también es parte de «lo mismo»
+        ventas.devolver_items(conn, vid, {linea: 1.0}, deposito, medio_pago="efectivo", clave_operacion="cc", hooks=hooks)
+
+
+@pytest.mark.parametrize("clave", ["", "   ", "a" * 65, "con[corchete", "x]", 7, "tab\there"])
+def test_una_clave_invalida_es_value_error_y_no_escribe(abrir_ventas, clave):
+    vid, pid, linea, deposito = _venta_2x1(abrir_ventas)
+    with abrir_ventas() as conn, pytest.raises(ValueError, match="clave_operacion"):
+        ventas.devolver_items(conn, vid, {linea: 1.0}, deposito, clave_operacion=clave)
+    assert _filas_de_devolucion(abrir_ventas, vid) == [] and _reintegrado_en_caja(abrir_ventas) == 0.0
+
+
+def test_dos_lineas_del_mismo_producto_son_lo_mismo_que_una_con_la_suma(abrir_ventas):
+    """El ledger no distingue de qué línea volvió lo devuelto (ADR-040): el reintento con la cantidad repartida distinto entre dos líneas
+    del mismo (ítem, variante) que suma igual repone y reintegra exactamente lo mismo, así que es el mismo pedido."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn, "Yerba", 100.0, existencia=10.0)
+    vid = _venta(abrir_ventas, items=[
+        {"nombre": "Yerba", "qty": 2, "precio": 100.0, "subtotal": 200.0, "producto_id": pid},
+        {"nombre": "Yerba", "qty": 2, "precio": 100.0, "subtotal": 200.0, "producto_id": pid},
+    ], pagos=[{"medio": "efectivo", "monto": 400.0, "estado": "aprobado"}])
+    with abrir_ventas() as conn:
+        a, b = [r["id"] for r in conn.execute("SELECT id FROM sale_items WHERE sale_id=? ORDER BY id", (vid,)).fetchall()]
+        deposito = conn.execute("SELECT location_id FROM stock_movements WHERE source_id=? LIMIT 1", (vid,)).fetchone()["location_id"]
+    _devolver_con_clave(abrir_ventas, vid, {a: 1.0, b: 1.0}, deposito, "k")
+    assert _devolver_con_clave(abrir_ventas, vid, {a: 2.0}, deposito, "k")["repetida"] is True
+    with abrir_ventas() as conn, pytest.raises(ventas.ClaveReusada):
+        ventas.devolver_items(conn, vid, {a: 1.0, b: 2.0}, deposito, clave_operacion="k")
+
+
+def test_dos_pedidos_simultaneos_con_la_misma_clave_aplican_una_sola_vez(tmp_path):
+    """Dos hilos con la misma clave: el segundo espera la venta que tomó el primero y, al verla, contesta `repetida`. Sin el `UPDATE`
+    que toma la venta, los dos leen «no se aplicó» y reponen dos veces. (SQLite: la base serializa a los escritores; en PostgreSQL
+    el bloqueo es el de la fila de la venta.)"""
+    import threading
+
+    from conftest import _schema_de_producto
+    from libracore.db import core
+
+    core.configure(str(tmp_path / "carrera.db"))
+    conn = core.get_connection()
+    try:
+        _schema_de_producto(conn)
+    finally:
+        conn.close()
+    try:
+        abrir = core.get_connection
+        vid, pid, linea, deposito = _venta_2x1(abrir)
+        resultados, errores = [], []
+        barrera = threading.Barrier(2)
+
+        def pedir():
+            try:
+                barrera.wait(timeout=10)
+                resultados.append(_devolver_con_clave(abrir, vid, {linea: 1.0}, deposito, "carrera"))
+            except Exception as exc:  # noqa: BLE001 - se informa abajo
+                errores.append(exc)
+
+        hilos = [threading.Thread(target=pedir) for _ in range(2)]
+        for h in hilos:
+            h.start()
+        for h in hilos:
+            h.join(timeout=60)
+        assert not errores, errores
+        assert sorted(r["repetida"] for r in resultados) == [False, True]
+        assert len(_filas_de_devolucion(abrir, vid)) == 1 and _reintegrado_en_caja(abrir) == 800.0 and _stock(abrir, pid) == 9.0
+    finally:
+        core._db_path = None
+        core._database_url = None
+
+
 # ── F4 (correcciones sobre la revisión): deposito_id también en devolver_items ──
 
 
