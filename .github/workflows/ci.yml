@@ -32,25 +32,20 @@ jobs:
     # primera linea, un `PRAGMA foreign_keys = ON` -- y ninguna suite lo veia.
     # La imagen es la de Debian (`postgres:16`) y no la alpine: el collation
     # viene de la imagen y tiene que ser el de produccion.
-    services:
-      postgres:
-        image: public.ecr.aws/docker/library/postgres:16
-        env:
-          POSTGRES_DB: libracommerce
-          POSTGRES_USER: libracommerce
-          POSTGRES_PASSWORD: libracommerce-ci
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd="pg_isready -U libracommerce -d libracommerce"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=5
     env:
       # La lee la capa de conexion de LibraCore, que es la que este motor
       # recibe de los productos.
       LIBRACORE_POSTGRES_URL: postgresql://libracommerce:libracommerce-ci@localhost:5432/libracommerce
     steps:
+      # El PostgreSQL sale de la Action compartida de libra-web-kit (`postgres-ci-v1`, desde el espejo de ECR;
+      # reglas/ci.md del wiki), con los mismos datos y el mismo healthcheck que el `services:` de antes.
+      - name: PostgreSQL de la suite
+        uses: marianocappucci/libra-web-kit/.github/actions/postgres-ci@postgres-ci-v1
+        with:
+          variante: debian
+          base: libracommerce
+          usuario: libracommerce
+          clave: libracommerce-ci
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
