@@ -54,7 +54,7 @@ import re
 import sqlite3
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from libracore.fechas import rango_por_dia
@@ -1016,11 +1016,16 @@ def anular_venta(conn, vid: int, usuario_id: int | None = None,
     return True
 
 
-def _referencia_devolucion(vid: int, devoluciones: dict[int, float]) -> str:
-    """Idempotente por el detalle de líneas: dos devoluciones distintas de la
-    misma venta son dos reintegros, pero repetir la misma no paga dos veces."""
+def _referencia_devolucion(vid: int, devoluciones: dict[int, float], ya_devuelto: float = 0.0) -> str:
+    """La referencia del reintegro en la caja, que `create_caja_movimiento` usa para no repetir un movimiento.
+
+    🔴 **Lleva lo ya devuelto de la venta** (`@{ya_devuelto}`, 2026-10-09, ADR-040). Sin eso, dos devoluciones
+    SUCESIVAS iguales —1 unidad de un 2x1 y después la otra— armaban la misma referencia: la segunda reponía el
+    stock y calculaba el importe, pero la caja descartaba su egreso por repetido y el arqueo no veía la plata que
+    salió del cajón. Con lo ya devuelto adentro, cada devolución sucesiva es otra referencia, igual que el stock,
+    que ya se movía en las dos."""
     detalle = ",".join(f"{i}x{c}" for i, c in sorted(devoluciones.items()))
-    return f"devolucion:venta:{vid}:{detalle}"
+    return f"devolucion:venta:{vid}:{detalle}@{ya_devuelto:g}"
 
 
 #: Los `estado` de venta que admiten una devolución (nueva o siguiente
@@ -1028,6 +1033,71 @@ def _referencia_devolucion(vid: int, devoluciones: dict[int, float]) -> str:
 #: viejo —no pasa por `status_detail`, así que no aparece nunca en `estado`—
 #: y por eso se chequea aparte, contra `venta["status"]`.
 _ESTADOS_QUE_ADMITEN_DEVOLUCION = ("cobrada", "devuelta_parcial")
+
+
+_CENTAVO = Decimal("0.01")
+
+
+def _dec(valor) -> Decimal:
+    """`Decimal` por el texto: un `float` de la base (o un `Decimal` de PostgreSQL) sin arrastrar su ruido binario."""
+    return Decimal(str(valor)) if valor is not None else Decimal(0)
+
+
+def _a_centavos(valor: Decimal) -> Decimal:
+    return valor.quantize(_CENTAVO, rounding=ROUND_HALF_UP)
+
+
+def _reintegro_prorrateado(lineas, descuento_venta, ya_devuelto: dict[tuple, float],
+                           pedido: dict[tuple, float]) -> Decimal:
+    """Cuánto se reintegra por `pedido` (unidades por (ítem, variante)) cuando antes ya volvió `ya_devuelto`: lo
+    **efectivamente pagado** por esas unidades, no su precio de lista.
+
+    Misma semántica de totales que `erp.margen` (`crear_venta` no escribe `discount_amount` ni `tax_total`; el dominio
+    puede dejar el descuento en la línea Y en `sales.discount_total`, que es el mismo dinero): el neto de una línea es
+    `quantity*unit_price - discount_amount`; del descuento de la venta sólo cuenta lo que las líneas no explican
+    (`max(discount_total - Σ discount_amount, 0)`, con tope en lo que vale la venta); y lo cobrable es `Σ netos -
+    descuento de la venta`. Cada unidad vale su parte de eso: `neto de la clave / unidades de la clave`, por
+    `cobrable / Σ netos`. Las líneas de servicio entran en la suma (también cargan descuento) pero nunca se devuelven.
+
+    🔑 **Diferencia de acumulados, no suma de importes redondeados**: `redondeo(prorrateo(ya + pedido)) -
+    redondeo(prorrateo(ya))`. Redondear cada devolución por separado deriva centavos (3 × $100 con $10 de descuento
+    dan 96,67 + 96,67 + 96,67 = 290,01 sobre $290); así las devoluciones parciales suman EXACTO lo cobrado cuando
+    vuelve todo. Sin descuentos el factor es 1 y da `cantidad*unit_price`, como siempre.
+
+    El ledger no dice de qué LÍNEA volvió lo ya devuelto, sólo de qué (ítem, variante): con dos líneas del mismo
+    producto a precios distintos las unidades se valúan al promedio de la clave (con el mismo precio, lo de siempre).
+    No suma IVA (`tax_total` es 0 en el mostrador)."""
+    netos = [_dec(li["quantity"]) * _dec(li["unit_price"]) - _dec(li["discount_amount"]) for li in lineas]
+    base = sum(netos, Decimal(0))
+    en_lineas = sum((_dec(li["discount_amount"]) for li in lineas), Decimal(0))
+    de_la_venta = min(max(_dec(descuento_venta) - en_lineas, Decimal(0)), max(base, Decimal(0)))
+    cobrable = base - de_la_venta
+    if base <= 0:
+        return Decimal(0)
+
+    neto_clave: dict[tuple, Decimal] = {}
+    unidades_clave: dict[tuple, Decimal] = {}
+    for li, neto in zip(lineas, netos, strict=True):
+        if li["kind"] == "product" and li["item_id"] is not None:
+            clave = (li["item_id"], li["variant_id"])
+            neto_clave[clave] = neto_clave.get(clave, Decimal(0)) + neto
+            unidades_clave[clave] = unidades_clave.get(clave, Decimal(0)) + _dec(li["quantity"])
+
+    def bruto(unidades: dict[tuple, float]) -> Decimal:
+        return sum(
+            (_dec(n) * neto_clave[k] / unidades_clave[k]
+             for k, n in unidades.items() if k in neto_clave and unidades_clave[k] > 0),
+            Decimal(0),
+        )
+
+    antes = bruto(ya_devuelto)
+    despues = antes + bruto(pedido)
+    acumulado = _a_centavos(cobrable * despues / base)
+    if acumulado > _a_centavos(cobrable):
+        raise ValueError(
+            f"el reintegro acumulado ({acumulado}) superaría lo cobrado por la venta ({_a_centavos(cobrable)})"
+        )
+    return acumulado - _a_centavos(cobrable * antes / base)
 
 
 def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: int,
@@ -1063,8 +1133,22 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
     `parcial` (de cobranza, no de devolución) todavía no tiene toda la plata
     adentro: reintegrar algo ahí devolvería dinero que nunca entró.
 
+    🔑 **El reintegro es PRORRATEADO (ADR-040): se devuelve lo efectivamente
+    pagado, no el precio de lista.** `_reintegro_prorrateado` reparte el
+    descuento de la venta (`sales.discount_total`: ahí cae una promoción, p. ej.
+    un 2x1, o un descuento general) y el de cada línea (`discount_amount`) en
+    proporción a lo que vale cada unidad: 2 × $1.600 con 2x1 cobraron $1.600, y
+    devolver 1 reintegra $800, no $1.600 (antes el cliente se quedaba la otra
+    gratis). Es la **diferencia de acumulados** `redondeo(prorrateo(ya devuelto +
+    esto)) − redondeo(prorrateo(ya devuelto))`, así que las devoluciones
+    parciales suman EXACTO lo cobrado cuando vuelve todo, sin deriva de
+    centavos, y una guarda impide que el acumulado supere el total cobrable. Sin
+    descuentos da `cantidad * unit_price`, como siempre. No cubre el IVA
+    (`tax_total` es 0 en el mostrador) ni corrige reintegros hechos ANTES de
+    este cambio, que pagaron de más.
+
     Repone stock con `tipo="devolucion"` (nunca `UPDATE`, el ledger es
-    aditivo) y reintegra el importe proporcional con
+    aditivo) y reintegra el importe prorrateado con
     `libracore.db.reversiones.reintegrar_devolucion`, por el medio de pago que
     se indique —no tiene por qué ser el que cobró la venta—. Si el reintegro
     es a cuenta corriente, `hooks.cliente_cc_de` tiene que resolver un
@@ -1137,7 +1221,7 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
 
     lineas = {
         r["id"]: r for r in conn.execute(
-            "SELECT id, kind, item_id, variant_id, quantity, unit_price "
+            "SELECT id, kind, item_id, variant_id, quantity, unit_price, discount_amount "
             "FROM sale_items WHERE sale_id=?", (vid,),
         ).fetchall()
     }
@@ -1195,7 +1279,6 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
     hooks.validar_deposito(conn, operacion="devolucion", turno=turno, deposito_id=deposito_id)
 
     pedido_por_clave: dict[tuple, float] = {}
-    importe = 0.0
     for sale_item_id, cantidad in devoluciones.items():
         cantidad = float(cantidad)
         if cantidad <= 0:
@@ -1253,9 +1336,8 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
                 venta_id=vid, usuario_id=usuario_id, fecha=fecha, deposito_id=deposito_id,
                 variant_id=linea["variant_id"], lot_code=lote, expires_at=vence,
             )
-        importe += cantidad * float(linea["unit_price"])
 
-    importe = round(importe, 2)
+    importe = float(_reintegro_prorrateado(lineas.values(), venta["descuento"], ya_devuelto, pedido_por_clave))
     cliente_id = hooks.cliente_cc_de(conn, venta)
     if medio_pago == MEDIO_CUENTA_CORRIENTE and cliente_id is None:
         raise ValueError(
@@ -1270,7 +1352,7 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
     turno_id = turno["id"] if (caja_con_turno and turno) else None
     reintegrar_devolucion(
         venta_id=vid, numero=venta["numero"], fecha=fecha, monto=importe,
-        medio_pago=medio_pago, referencia=_referencia_devolucion(vid, devoluciones),
+        medio_pago=medio_pago, referencia=_referencia_devolucion(vid, devoluciones, sum(ya_devuelto.values())),
         cliente_id=cliente_id, usuario_id=usuario_id,
         turno_id=turno_id, conn=conn,
     )
