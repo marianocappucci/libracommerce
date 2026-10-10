@@ -924,7 +924,7 @@ def build_stock_router(
 
     @router.post("/{pid}/ajuste")
     def ajuste(pid: int, payload: Payload, user: dict = Depends(usuario)):
-        fecha = payload.fecha or date.today().isoformat()
+        fecha = payload.fecha or vencimientos.hoy_argentina().isoformat()
         referencia = payload.referencia.strip() or "Ajuste manual"
         usuario_id = user.get("id")
         # Sin `por_deposito` el ajuste es el de siempre, aunque el payload traiga el campo.

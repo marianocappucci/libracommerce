@@ -387,7 +387,11 @@ def transferir_stock(conn, producto_id: int, origen_id: int, destino_id: int,
     """
     validar_deposito(conn, origen_id)
     validar_deposito(conn, destino_id)
-    _fecha = _datetime.fromisoformat(fecha or _date.today().isoformat())
+    # Import diferido: `erp.vencimientos` importa este módulo, así que un import de arriba sería un ciclo. Se usa SU
+    # `hoy_argentina` para que «hoy» sea uno solo en todo el motor (ADR-044; mismo patrón que `lotes._hoy`).
+    from .vencimientos import hoy_argentina
+
+    _fecha = _datetime.fromisoformat(fecha or hoy_argentina().isoformat())
     ref = observaciones or "Transferencia entre depósitos"
     tramos = _tramos_de_transferencia(conn, producto_id, origen_id, destino_id, cantidad, variant_id)
     try:
