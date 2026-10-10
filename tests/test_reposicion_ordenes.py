@@ -11,7 +11,7 @@ import test_vencimientos as _vto
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from test_proveedor_por_producto import _con_proveedor, _nuevo_tercero
-from test_reposicion import HOY, _dos_sucursales, _producto, _venta, _yerba_de_referencia
+from test_reposicion import HOY, _dos_sucursales, _producto, _venta, _yerba_de_referencia, fijar_hoy_del_router
 
 from libracommerce.erp import compras, reposicion, reposicion_ordenes
 from libracommerce.web.reposicion_router import build_reposicion_ordenes_router
@@ -35,9 +35,11 @@ def _cantidad_de_ordenes(abrir) -> int:
 
 
 @pytest.fixture
-def escenario(abrir_vto_ventas):
+def escenario(abrir_vto_ventas, monkeypatch):
     """Yerba (stock 10, rota 1 por día: sugiere 8) con el proveedor Norte; Sal (stock 2, mínimo 10: sugiere 8) con Sur; Azúcar (mínimo 6, nada
-    en stock: sugiere 6) sin proveedor; y Fideos, que no hay que pedir."""
+    en stock: sugiere 6) sin proveedor; y Fideos, que no hay que pedir. Las ventas son de septiembre de 2026: el router (que no recibe `hoy`)
+    mira el mundo desde `HOY` (`fijar_hoy_del_router`), no desde el día en que se corre."""
+    fijar_hoy_del_router(monkeypatch)
     abrir = abrir_vto_ventas
     yerba = _yerba_de_referencia(abrir)
     with abrir() as conn:
