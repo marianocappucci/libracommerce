@@ -14,6 +14,7 @@ from test_reposicion import (
     _proveedor,
     _reporte,
     _yerba_de_referencia,
+    fijar_hoy_del_router,
 )
 from test_vencimientos import _columnas_de, _con_conexion, _crear_base_al_dia_de_0001, _ledger, catalogo, migrar, stock
 
@@ -200,7 +201,8 @@ def test_fijar_el_proveedor_sin_la_0004_pide_la_revision(destino):
 # ── El router ────────────────────────────────────────────────────────────
 
 
-def test_el_router_lee_y_escribe_el_proveedor_y_la_clave_ausente_no_lo_toca(abrir_vto_ventas):
+def test_el_router_lee_y_escribe_el_proveedor_y_la_clave_ausente_no_lo_toca(abrir_vto_ventas, monkeypatch):
+    fijar_hoy_del_router(monkeypatch)
     from fastapi import Depends
 
     from libracommerce.web.reposicion_router import build_reposicion_parametros_router, build_reposicion_router
@@ -233,9 +235,10 @@ def test_el_router_lee_y_escribe_el_proveedor_y_la_clave_ausente_no_lo_toca(abri
     assert csv[0].endswith(",proveedor_id,proveedor,factor_estacional,stock_minimo_propio,por_vencer") and csv[1].endswith(f",{prov},Distribuidora Norte,,no,0")
 
 
-def test_el_router_traduce_los_ids_del_producto_con_los_ganchos_de_compras(abrir_vto_ventas):
+def test_el_router_traduce_los_ids_del_producto_con_los_ganchos_de_compras(abrir_vto_ventas, monkeypatch):
     """Un producto cuyos proveedores no son el `party_id` (VentaLibra: offset +100.000) pasa los mismos ganchos que a `OpcionesCompras`: el
     `proveedor_id` del cuerpo, del filtro y de cada respuesta habla en SUS ids; el motor guarda y compara por `party_id`."""
+    fijar_hoy_del_router(monkeypatch)
     from fastapi import Depends, FastAPI, HTTPException
     from fastapi.testclient import TestClient
 
