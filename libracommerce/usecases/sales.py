@@ -11,7 +11,7 @@ from decimal import Decimal
 
 from libracommerce.domain.catalog import CatalogItemType
 from libracommerce.domain.inventory import StockMovement, StockMovementType
-from libracommerce.domain.sales import Sale, SaleStatus
+from libracommerce.domain.sales import LineaReintegro, Sale, SaleStatus, reintegro_prorrateado
 from libracommerce.ports.persistence import CommerceRepository
 from libracommerce.usecases.inventory import verificar_disponibilidad
 
@@ -144,8 +144,18 @@ def return_sale_items(
     `remove_item`/`set_item_quantity` del POS.
 
     Devuelve la venta actualizada y **cuánta plata hay que reintegrar**, que
-    es lo que el producto necesita para mover la caja: eso no se calcula acá
-    porque el dinero no es de este contexto.
+    es lo que el producto necesita para mover la caja (mover la caja no se
+    hace acá: el dinero no es de este contexto).
+
+    🔑 **El importe es lo efectivamente pagado, no el precio de lista**
+    (ADR-043): `reintegro_prorrateado` reparte el descuento de la venta
+    (`discount_total`) y el de cada línea (`discount_amount`) en proporción a
+    lo que vale cada unidad, con la misma cuenta que `erp.ventas.devolver_items`
+    (ADR-040). Es una diferencia de acumulados, así que devoluciones sucesivas
+    suman EXACTO lo cobrado, y una guarda impide reintegrar de más. Como el
+    ledger de acá sí dice de qué línea volvió lo ya devuelto, cada línea se
+    valúa por separado (con una sola línea por producto, o a igual precio, da
+    lo mismo que el camino del ERP). Sin descuentos es `cantidad * unit_price`.
 
     La venta queda en `RETURNED` si volvió todo y en `PARTIALLY_RETURNED` si
     volvió una parte, así que el historial distingue "el cliente devolvió una
@@ -159,8 +169,10 @@ def return_sale_items(
         raise ValueError("no se indicó ninguna línea a devolver")
 
     ya_devuelto = _devuelto_por_linea(repo, sale)
-    importe = Decimal("0")
 
+    # Primero se valida todo y se calcula el importe (la guarda del prorrateo
+    # puede levantar), y recién después se escribe en el ledger: un pedido
+    # rechazado no deja stock repuesto a medias.
     for indice, cantidad in devoluciones.items():
         if indice < 0 or indice >= len(sale.items):
             raise ValueError(f"la venta no tiene una línea en la posición {indice}")
@@ -186,6 +198,23 @@ def return_sale_items(
                 f"quedan {disponible} sin devolver"
             )
 
+    importe = reintegro_prorrateado(
+        [
+            # La clave es la posición: cada línea vale lo suyo. Un servicio no
+            # se devuelve (clave `None`) pero entra en la suma de la venta.
+            LineaReintegro(
+                indice if linea.kind == CatalogItemType.PRODUCT else None,
+                linea.quantity, linea.unit_price, linea.discount_amount,
+            )
+            for indice, linea in enumerate(sale.items)
+        ],
+        sale.discount_total,
+        ya_devuelto,
+        devoluciones,
+    )
+
+    for indice, cantidad in devoluciones.items():
+        linea = sale.items[indice]
         repo.append_stock_movement(
             StockMovement(
                 id=None,
@@ -200,7 +229,6 @@ def return_sale_items(
                 reason_code=str(indice),
             )
         )
-        importe += cantidad * linea.unit_price
 
     devuelto_total = sum(
         (ya_devuelto.get(i, Decimal("0")) + devoluciones.get(i, Decimal("0"))

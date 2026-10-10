@@ -22,7 +22,7 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
 - **`domain/`** — el modelo de negocio puro, sin dependencias de I/O:
   `entities` (`Party`, roles y tipos), `catalog` (`CatalogItem`, `Category`,
   `Unit`, `PriceList`, `ItemPrice`, `ItemVariant`, `ItemCode`), `inventory`
-  (`Location`, `StockMovement`), `sales` (`Sale`, `SaleItem`, `SalePayment`),
+  (`Location`, `StockMovement`), `sales` (`Sale`, `SaleItem`, `SalePayment`, y la cuenta pura del reintegro prorrateado de una devolución, `reintegro_prorrateado`, ADR-040/043),
   `purchasing` (`PurchaseOrder`, `PurchaseReceipt`), `scale` (lectura de códigos
   de balanza, `parse_scale_barcode`) y `presets` (rubros comerciales y sus ejes
   de variante).

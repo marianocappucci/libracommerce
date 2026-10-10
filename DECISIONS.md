@@ -1520,6 +1520,38 @@ esa función. Los dos fallan con el código anterior. La suite de reposición pa
 
 **No cubre.** Quedan cinco `date.today()` fuera de la reposición, con el mismo riesgo en un servidor en UTC: la fecha por default de un ajuste de stock (`erp/stock.py`, `erp/catalogo.py` y `web/catalogo_router.py`) y el período por default del margen (`web/margen_router.py`).
 
+## ADR-043 — `usecases.sales.return_sale_items` reintegra lo efectivamente pagado, con la misma cuenta que `devolver_items` (2026-10-10)
+
+**Problema.** ADR-040 hizo que `erp.ventas.devolver_items` reintegrara lo efectivamente pagado (descuento prorrateado), pero la otra devolución
+del motor, `usecases.sales.return_sale_items` (API pública sobre el dominio `Sale`), seguía haciendo `importe += cantidad * linea.unit_price`:
+ni `Sale.discount_total` ni `SaleItem.discount_amount`. Con un 2x1 de 2 × $1.600 devolvía $1.600 por una unidad. Ningún producto la llama en
+producción (sólo tests), pero es el contrato del motor y tenía que dar lo mismo que el camino nuevo.
+
+**Patrón reutilizado.** El prorrateo de ADR-040, sin duplicarlo: la cuenta salió de `erp.ventas._reintegro_prorrateado` (que leía filas SQL) a una
+función pura del dominio, `domain.sales.reintegro_prorrateado(lineas, descuento_venta, ya_devuelto, pedido)` con `LineaReintegro(clave, quantity,
+unit_price, discount_amount)`. `_reintegro_prorrateado` queda como adaptador (filas → `Decimal` por el texto) con la misma firma y el mismo
+resultado; `return_sale_items` es el otro llamador. Mismas reglas: neto de línea, descuento de la venta sólo por lo que las líneas no explican,
+diferencia de acumulados redondeada al centavo, servicios dentro de la suma pero nunca devueltos, guarda contra reintegrar de más (`ValueError`).
+
+**Decisión.**
+- `return_sale_items` devuelve el importe prorrateado (`Decimal` al centavo). Sin descuentos da `cantidad * unit_price`, como siempre.
+- **La clave de valuación es la posición de la línea**, no `(ítem, variante)`: el ledger de acá guarda de qué línea volvió cada unidad
+  (`reason_code`), así que dos líneas del mismo producto a distinto precio se valúan cada una por lo suyo. Con una línea por producto, o a igual
+  precio, da exactamente lo mismo que `devolver_items`. (El camino del ERP promedia porque su ledger no lo dice; ver «No cubre» de ADR-040.)
+- **Se valida todo y se calcula el importe antes de escribir en el ledger.** Antes validaba y escribía línea por línea: un pedido con una segunda
+  línea inválida dejaba repuesta la primera; y la guarda del prorrateo, al levantar después de escribir, habría dejado stock repuesto sin reintegro.
+
+**Tests.** `test_usecases.py`: 2x1 (800 + 800), descuento de la línea, descuento general repartido entre dos líneas, descuento en la línea y en el
+total (el mismo dinero), centavos que no dividen exacto (96,67 / 96,66 / 96,67 = 290,00), parcial más resto que suma lo cobrado, servicio dentro del
+prorrateo, sin descuentos (idéntico), dos líneas del mismo producto a distinto precio, coincidencia con la cuenta de `devolver_items` y pedido inválido
+sin stock a medias. Diez fallan con el código anterior (los otros dos son de control: sin descuento y precios distintos sin descuento).
+
+**No cubre.**
+- **IVA**: `tax_amount`/`tax_total` no entran, como en ADR-040.
+- **Reintegros hechos antes** con el cálculo viejo: pagaron de más y no se corrigen.
+- **La caja**: este caso de uso sigue sin mover plata; sólo calcula cuánto (el dinero es del contexto de LibraCore).
+- **Ventas con `discount_total` mayor que lo que valen las líneas**: se topa en lo que vale la venta, como en ADR-040.
+
 ## ADR-044 — «Hoy» es el día de Argentina en todo el motor: ajustes, transferencias y margen (2026-10-10)
 
 **Problema.** Después de ADR-042 (reposición) quedaban cinco `date.today()` en el motor, que tomaban la fecha del sistema:
