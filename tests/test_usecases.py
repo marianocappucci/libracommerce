@@ -411,3 +411,198 @@ def test_no_se_devuelve_sobre_una_venta_anulada(repo: SqliteCommerceRepository):
 
     with pytest.raises(ValueError, match="confirmada"):
         return_sale_items(repo, anulada, {0: Decimal("1")}, location.id, WHEN)
+
+
+# return_sale_items reintegra lo efectivamente pagado (ADR-043, misma cuenta que ADR-040)
+
+
+def _linea(product, cantidad, precio, descuento="0", nombre=None) -> SaleItem:
+    return SaleItem(CatalogItemType.PRODUCT, nombre or product.name, Decimal(cantidad),
+                    Decimal(precio), item_id=product.id, discount_amount=Decimal(descuento))
+
+
+def _devolver_de_a_una(repo, venta, location, pedidos) -> list[Decimal]:
+    """Devuelve de a una (`pedidos`: `[(posición, cantidad), ...]`, cada una sobre la venta que dejó la anterior) y
+    trae los importes reintegrados."""
+    importes = []
+    for posicion, cantidad in pedidos:
+        venta, importe = return_sale_items(
+            repo, venta, {posicion: Decimal(cantidad)}, location.id, WHEN
+        )
+        importes.append(importe)
+    return importes
+
+
+def test_promocion_2x1_reintegra_lo_pagado_y_no_el_precio_de_lista(repo: SqliteCommerceRepository):
+    """🔴 El caso medido en la demo: 2 x $1.600 con 2x1 (descuento $1.600) cobran $1.600. Devolver 1 reintegra $800; con
+    el precio de lista el cliente se quedaba la otra gratis."""
+    product = _product(repo)
+    location = _location(repo)
+    sale = confirm_sale(repo, Sale(
+        None, "V-2X1", (_linea(product, "2", "1600"),), discount_total=Decimal("1600"),
+    ), location.id, WHEN)
+
+    devuelta, importe = return_sale_items(repo, sale, {0: Decimal("1")}, location.id, WHEN)
+
+    assert importe == Decimal("800")
+    assert devuelta.status == SaleStatus.PARTIALLY_RETURNED
+
+
+def test_devoluciones_sucesivas_de_un_2x1_suman_exacto_lo_cobrado(repo: SqliteCommerceRepository):
+    product = _product(repo)
+    location = _location(repo)
+    sale = confirm_sale(repo, Sale(
+        None, "V-2X1", (_linea(product, "2", "1600"),), discount_total=Decimal("1600"),
+    ), location.id, WHEN)
+
+    assert _devolver_de_a_una(repo, sale, location, [(0, "1"), (0, "1")]) == [Decimal("800"), Decimal("800")]
+
+
+def test_descuento_de_la_linea_se_prorratea_en_la_devolucion(repo: SqliteCommerceRepository):
+    """3 x $100 con $30 de descuento en la línea cobran $270: cada unidad vale $90."""
+    product = _product(repo)
+    location = _location(repo)
+    sale = confirm_sale(repo, Sale(
+        None, "V-DL", (_linea(product, "3", "100", descuento="30"),),
+    ), location.id, WHEN)
+
+    _, importe = return_sale_items(repo, sale, {0: Decimal("1")}, location.id, WHEN)
+
+    assert importe == Decimal("90")
+
+
+def test_descuento_general_se_reparte_entre_las_lineas(repo: SqliteCommerceRepository):
+    """Dos líneas ($1.000 y $500) con 10% general ($150): se cobra $1.350. La primera vale 900 y la segunda 450."""
+    uno = _product(repo)
+    otro = repo.save_catalog_item(
+        CatalogItem(None, CatalogItemType.PRODUCT, "Azucar 1kg", _unit())
+    )
+    location = _location(repo)
+    sale = confirm_sale(repo, Sale(
+        None, "V-DG", (_linea(uno, "2", "500"), _linea(otro, "1", "500")),
+        discount_total=Decimal("150"),
+    ), location.id, WHEN)
+
+    primera, importe_a = return_sale_items(repo, sale, {0: Decimal("2")}, location.id, WHEN)
+    segunda, importe_b = return_sale_items(repo, primera, {1: Decimal("1")}, location.id, WHEN)
+
+    assert (importe_a, importe_b) == (Decimal("900"), Decimal("450"))
+    assert importe_a + importe_b == Decimal("1350")
+    assert segunda.status == SaleStatus.RETURNED
+
+
+def test_descuento_en_la_linea_y_en_el_total_es_el_mismo_dinero(repo: SqliteCommerceRepository):
+    """El dominio puede dejar el descuento en la línea Y en `discount_total`: no se descuenta dos veces. 2 x $100 con $20
+    en la línea y $50 de descuento de la venta (los $20 incluidos) cobran $150, no $130."""
+    product = _product(repo)
+    location = _location(repo)
+    sale = confirm_sale(repo, Sale(
+        None, "V-LT", (_linea(product, "2", "100", descuento="20"),), discount_total=Decimal("50"),
+    ), location.id, WHEN)
+
+    assert _devolver_de_a_una(repo, sale, location, [(0, "1"), (0, "1")]) == [Decimal("75"), Decimal("75")]
+
+
+def test_las_devoluciones_sucesivas_no_derivan_centavos(repo: SqliteCommerceRepository):
+    """3 x $100 con $10 de descuento cobran $290. Redondear cada devolución por separado daba 96,67 x 3 = 290,01; la
+    diferencia de acumulados da 96,67 + 96,66 + 96,67 = 290,00."""
+    product = _product(repo)
+    location = _location(repo)
+    sale = confirm_sale(repo, Sale(
+        None, "V-CT", (_linea(product, "3", "100"),), discount_total=Decimal("10"),
+    ), location.id, WHEN)
+
+    importes = _devolver_de_a_una(repo, sale, location, [(0, "1"), (0, "1"), (0, "1")])
+
+    assert importes == [Decimal("96.67"), Decimal("96.66"), Decimal("96.67")]
+    assert sum(importes, Decimal("0")) == Decimal("290.00")
+
+
+def test_una_devolucion_parcial_con_descuento_y_el_resto_despues_suma_lo_cobrado(
+    repo: SqliteCommerceRepository,
+):
+    """5 x $100 con $33 de descuento cobran $467: 2 unidades reintegran $186,80 y las 3 restantes, el resto exacto."""
+    product = _product(repo)
+    location = _location(repo)
+    sale = confirm_sale(repo, Sale(
+        None, "V-PR", (_linea(product, "5", "100"),), discount_total=Decimal("33"),
+    ), location.id, WHEN)
+
+    importes = _devolver_de_a_una(repo, sale, location, [(0, "2"), (0, "3")])
+
+    assert importes[0] == Decimal("186.80")
+    assert sum(importes, Decimal("0")) == Decimal("467.00")
+
+
+def test_la_linea_de_servicio_entra_en_el_prorrateo_pero_no_se_devuelve(repo: SqliteCommerceRepository):
+    """Yerba 2 x $100 y un Envío de $100 con $30 de descuento general: se cobra $270 y el descuento se reparte también
+    sobre el envío. Devolver las 2 yerbas reintegra $180; los $90 del envío no vuelven."""
+    product = _product(repo)
+    location = _location(repo)
+    sale = confirm_sale(repo, Sale(
+        None, "V-SV",
+        (_linea(product, "2", "100"),
+         SaleItem(CatalogItemType.SERVICE, "Envio", Decimal("1"), Decimal("100"))),
+        discount_total=Decimal("30"),
+    ), location.id, WHEN)
+
+    assert _devolver_de_a_una(repo, sale, location, [(0, "1"), (0, "1")]) == [Decimal("90"), Decimal("90")]
+
+
+def test_sin_descuentos_el_importe_sigue_siendo_cantidad_por_precio(repo: SqliteCommerceRepository):
+    product = _product(repo)
+    location = _location(repo)
+    sale = confirm_sale(repo, _venta(product, Decimal("7"), precio=Decimal("33.33")), location.id, WHEN)
+
+    _, importe = return_sale_items(repo, sale, {0: Decimal("3")}, location.id, WHEN)
+
+    assert importe == Decimal("99.99")
+
+
+def test_dos_lineas_del_mismo_producto_a_distinto_precio_se_valuan_cada_una(repo: SqliteCommerceRepository):
+    """Acá el ledger dice de qué línea volvió cada unidad (`reason_code`), así que no hace falta promediar: la línea de
+    $300 reintegra $300, y la de $100, $100."""
+    product = _product(repo)
+    location = _location(repo)
+    sale = confirm_sale(repo, Sale(
+        None, "V-2L", (_linea(product, "1", "100"), _linea(product, "1", "300")),
+    ), location.id, WHEN)
+
+    assert _devolver_de_a_una(repo, sale, location, [(1, "1"), (0, "1")]) == [Decimal("300"), Decimal("100")]
+
+
+def test_el_importe_coincide_con_el_de_devolver_items_del_erp(repo: SqliteCommerceRepository):
+    """Las dos devoluciones del motor comparten la cuenta (`domain.sales.reintegro_prorrateado`): para las mismas líneas
+    y los mismos descuentos, `return_sale_items` y la cuenta de `erp.ventas.devolver_items` dan lo mismo."""
+    ventas = pytest.importorskip("libracommerce.erp.ventas")
+    product = _product(repo)
+    location = _location(repo)
+    sale = confirm_sale(repo, Sale(
+        None, "V-EQ", (_linea(product, "3", "100", descuento="5"),), discount_total=Decimal("35"),
+    ), location.id, WHEN)
+    fila = {"id": 1, "kind": "product", "item_id": product.id, "variant_id": None,
+            "quantity": 3, "unit_price": 100, "discount_amount": 5}
+    clave = (product.id, None)
+
+    del_erp, ya = [], 0.0
+    for cantidad in (1.0, 1.0, 1.0):
+        del_erp.append(float(ventas._reintegro_prorrateado([fila], 35, {clave: ya}, {clave: cantidad})))
+        ya += cantidad
+
+    del_dominio = [float(i) for i in _devolver_de_a_una(repo, sale, location, [(0, "1"), (0, "1"), (0, "1")])]
+
+    assert del_dominio == del_erp
+    assert round(sum(del_dominio), 2) == 265.0
+
+
+def test_un_pedido_invalido_no_deja_stock_repuesto_a_medias(repo: SqliteCommerceRepository):
+    """El importe se calcula y todo se valida antes de escribir en el ledger: una segunda línea inexistente no deja
+    repuesta la primera."""
+    product = _product(repo)
+    location = _location(repo)
+    sale = confirm_sale(repo, _venta(product, Decimal("2")), location.id, WHEN)
+
+    with pytest.raises(ValueError, match="posición 9"):
+        return_sale_items(repo, sale, {0: Decimal("1"), 9: Decimal("1")}, location.id, WHEN)
+
+    assert repo.current_stock(product.id, location.id) == Decimal("-2")
