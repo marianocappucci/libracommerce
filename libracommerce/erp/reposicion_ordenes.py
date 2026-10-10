@@ -244,7 +244,7 @@ def generar_ordenes_borrador(conn, *, clave_operacion, producto_ids: list[int] |
     escalas = _escalas(conn, ids_a_pedir)
     sucursal_id = parametros.get("sucursal_id")
     creadas: list[dict] = []
-    fecha = (hoy or datetime.date.today()).isoformat()
+    fecha = (hoy or reposicion.hoy_argentina()).isoformat()
     for party_id, lista in por_proveedor.items():
         items = []
         for f in lista:

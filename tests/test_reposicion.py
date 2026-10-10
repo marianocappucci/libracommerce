@@ -611,15 +611,6 @@ def _cliente(abrir) -> TestClient:
     return TestClient(app)
 
 
-def fijar_hoy_del_router(monkeypatch, hoy=HOY):
-    """El «hoy» del servidor, fijo en `hoy`, para los tests que pasan por el ROUTER con el escenario de fechas fijas (`_yerba_de_referencia`,
-    `_dos_sucursales`...). Los routers no reciben `hoy` y las funciones del motor caen en `date.today()`: sin esto, a medida que pasan los días las
-    ventas sembradas salen de la ventana de rotación y el sugerido cambia (bomba de tiempo, 2026-10-10). Lo único que se fija es el reloj: el
-    router, la validación y el motor corren sin tocar. Los tests que llaman al motor ya pasan `hoy=HOY` por su cuenta (y ese gana)."""
-    for modulo, nombre in ((reposicion, "sugerencia_reposicion"), (reposicion_ordenes, "generar_ordenes_borrador")):
-        monkeypatch.setattr(modulo, nombre, functools.partial(getattr(modulo, nombre), hoy=hoy))
-
-
 def _yerba_de_hoy(abrir):
     """Como `_yerba_de_referencia`, pero contra la fecha real: el router usa el «hoy» del servidor."""
     hoy = datetime.date.today()
@@ -1098,3 +1089,46 @@ def test_un_producto_con_el_minimo_ya_por_encima_del_techo_puede_seguir_editando
     editar(30.0)                                               # bajarlo hacia el techo
     with pytest.raises(ValueError, match="no puede ser mayor"):
         editar(40.0)                                           # subirlo, no
+
+
+# ── El «hoy» del router y del motor (2026-10-10) ─────────────────────────
+
+
+def test_el_router_mira_el_mundo_desde_su_reloj_y_el_csv_lleva_esa_fecha(abrir_ventas):
+    """`reloj` es el «hoy» de cada pedido: el de la ventana de rotación y el del nombre del CSV. Con el reloj en `HOY` el router da lo mismo
+    que el motor con `hoy=HOY`; con el reloj dos meses después, las ventas sembradas salen de la ventana y la rotación cae a cero."""
+    abrir = abrir_ventas
+    yerba = _yerba_de_referencia(abrir)
+    with abrir() as conn:
+        (esperada,) = reposicion.sugerencia_reposicion(conn, hoy=HOY, producto_id=yerba, solo_a_pedir=False)
+    app = FastAPI()
+    app.include_router(build_reposicion_router(conexion=abrir, reloj=lambda: HOY))
+    c = TestClient(app)
+    r = c.get("/api/reportes/reposicion", params={"producto_id": yerba, "solo_a_pedir": "false"})
+    assert r.status_code == 200
+    (fila,) = r.json()["productos"]
+    assert fila["sugerido"] == esperada["sugerido"] > 0
+    r = c.get("/api/reportes/reposicion/export", params={"producto_id": yerba, "solo_a_pedir": "false"})
+    assert r.status_code == 200 and "reposicion_2026-09-30.csv" in r.headers["content-disposition"]
+
+    despues = FastAPI()
+    despues.include_router(build_reposicion_router(conexion=abrir, reloj=lambda: HOY + datetime.timedelta(days=60)))
+    (fila,) = TestClient(despues).get("/api/reportes/reposicion",
+                                     params={"producto_id": yerba, "solo_a_pedir": "false"}).json()["productos"]
+    assert fila["sin_ventas"] and fila["sugerido"] != esperada["sugerido"]
+
+
+def test_sin_hoy_el_motor_y_el_router_usan_la_fecha_de_argentina(abrir_ventas, monkeypatch):
+    """Sin `hoy`, la reposición y las órdenes toman `hoy_argentina()`, no `date.today()`: un servidor o un CI en UTC corría el día entre las
+    21 y las 24 de Argentina. El reloj por default de los dos routers es esa misma función."""
+    import libracommerce.web.reposicion_router as R
+
+    assert inspect.signature(R.build_reposicion_router).parameters["reloj"].default is vencimientos.hoy_argentina
+    assert inspect.signature(R.build_reposicion_ordenes_router).parameters["reloj"].default is vencimientos.hoy_argentina
+    abrir = abrir_ventas
+    yerba = _yerba_de_referencia(abrir)
+    with abrir() as conn:
+        con_hoy = reposicion.sugerencia_reposicion(conn, hoy=HOY, producto_id=yerba, solo_a_pedir=False)
+    monkeypatch.setattr(reposicion, "hoy_argentina", lambda ahora=None: HOY)
+    with abrir() as conn:
+        assert reposicion.sugerencia_reposicion(conn, producto_id=yerba, solo_a_pedir=False) == con_hoy

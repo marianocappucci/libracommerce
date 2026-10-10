@@ -25,6 +25,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from ..erp import compras, reposicion, reposicion_ordenes
+from ..erp.vencimientos import hoy_argentina
 from . import fastapi as _fastapi
 from ._validacion import sin_booleanos
 from .catalogo_router import Conexion, _deps
@@ -72,6 +73,7 @@ def build_reposicion_router(
     prefix: str = "/api/reportes/reposicion",
     resolver_proveedor: Callable[[Any, int], int] = _sin_traduccion,
     proveedor_de: Callable[[Any, int], int] = _sin_traduccion,
+    reloj: Callable[[], datetime.date] = hoy_argentina,
 ):
     """`GET ""` (los parámetros y la lista de productos a pedir) y `GET /export` (CSV). Sólo lee. Parámetros:
     `dias_rotacion` (30), `dias_cobertura` (15) y `plazo_entrega_dias` (3): enteros de 1 hasta su tope
@@ -82,14 +84,16 @@ def build_reposicion_router(
     cada fila trae `por_vencer`) y `orden` (una de `erp.reposicion.ORDENES`, las columnas de la pantalla) con `sentido` (`asc` por
     default, o `desc`): la lista y el CSV salen en ese orden, lo que no tiene valor al final (ADR-037); sin `orden`, el de urgencia. `resolver_proveedor(conn, proveedor_id) -> party_id` y
     `proveedor_de(conn, party_id) -> proveedor_id` son los mismos ganchos que `OpcionesCompras`, para un producto cuyos proveedores no son el `party_id`
-    del motor (VentaLibra): el `proveedor_id` del filtro y el de cada fila hablan en los ids del producto. Sin ellos, identidad. Un parámetro inválido, o una sucursal que no existe, es 422."""
+    del motor (VentaLibra): el `proveedor_id` del filtro y el de cada fila hablan en los ids del producto. Sin ellos, identidad. Un parámetro inválido, o una sucursal que no existe, es 422.
+    `reloj() -> date` es el «hoy» de cada pedido (el de la ventana de rotación y el del nombre del CSV): por default la fecha de Argentina
+    (`hoy_argentina`), no la del sistema, así un servidor o un CI en UTC no corre el día entre las 21 y las 24; las pruebas pasan uno fijo."""
     abrir, _ = _deps(None, conexion)
     router = APIRouter(prefix=prefix, tags=["reportes"])
 
     def _reporte(dias_rotacion: int, dias_cobertura: int, plazo_entrega_dias: int, sucursal_id: int | None,
                  categoria: str | None, producto_id: int | None, solo_a_pedir: bool,
                  descontar_vencido: bool, proveedor_id: int | None, estacionalidad: bool,
-                 descontar_por_vencer: bool, orden: str | None, sentido: str) -> list[dict]:
+                 descontar_por_vencer: bool, orden: str | None, sentido: str, hoy: datetime.date) -> list[dict]:
         try:
             with abrir() as conn:
                 party_id = resolver_proveedor(conn, proveedor_id) if proveedor_id is not None else None
@@ -98,7 +102,7 @@ def build_reposicion_router(
                     plazo_entrega_dias=plazo_entrega_dias, sucursal_id=sucursal_id, categoria=categoria or None,
                     producto_id=producto_id, solo_a_pedir=solo_a_pedir,
                     descontar_vencido=descontar_vencido, proveedor_id=party_id, estacionalidad=estacionalidad,
-                    descontar_por_vencer=descontar_por_vencer,
+                    descontar_por_vencer=descontar_por_vencer, hoy=hoy,
                 )
                 # El `proveedor_id` de cada fila, en los ids del producto.
                 filas = [dict(f, proveedor_id=proveedor_de(conn, f["proveedor_id"]) if f["proveedor_id"] is not None else None)
@@ -117,7 +121,8 @@ def build_reposicion_router(
                 proveedor_id: int | None = None, estacionalidad: bool = False, descontar_por_vencer: bool = False,
                 orden: str | None = None, sentido: str = "asc"):
         productos = _reporte(dias_rotacion, dias_cobertura, plazo_entrega_dias, sucursal_id, categoria, producto_id,
-                             solo_a_pedir, descontar_vencido, proveedor_id, estacionalidad, descontar_por_vencer, orden, sentido)
+                             solo_a_pedir, descontar_vencido, proveedor_id, estacionalidad, descontar_por_vencer, orden, sentido,
+                             reloj())
         return {
             "dias_rotacion": dias_rotacion, "dias_cobertura": dias_cobertura,
             "plazo_entrega_dias": plazo_entrega_dias, "sucursal_id": sucursal_id, "categoria": categoria,
@@ -142,9 +147,10 @@ def build_reposicion_router(
                  solo_a_pedir: bool = True, descontar_vencido: bool = True,
                  proveedor_id: int | None = None, estacionalidad: bool = False, descontar_por_vencer: bool = False,
                  orden: str | None = None, sentido: str = "asc"):
+        hoy = reloj()
         productos = _reporte(dias_rotacion, dias_cobertura, plazo_entrega_dias, sucursal_id, categoria, producto_id,
-                             solo_a_pedir, descontar_vencido, proveedor_id, estacionalidad, descontar_por_vencer, orden, sentido)
-        return _csv(productos, _CAMPOS, f"reposicion_{datetime.date.today().isoformat()}.csv")
+                             solo_a_pedir, descontar_vencido, proveedor_id, estacionalidad, descontar_por_vencer, orden, sentido, hoy)
+        return _csv(productos, _CAMPOS, f"reposicion_{hoy.isoformat()}.csv")
 
     return router
 
@@ -279,13 +285,14 @@ def build_reposicion_ordenes_router(
     numerador: compras.Numerador = compras.numero_por_defecto,
     resolver_proveedor: Callable[[Any, int], int] = _sin_traduccion,
     proveedor_de: Callable[[Any, int], int] = _sin_traduccion,
+    reloj: Callable[[], datetime.date] = hoy_argentina,
 ):
     """`POST ""` (ADR-022): genera **una orden de compra en borrador por proveedor habitual** con lo que la reposición sugiere pedir, con los
     parámetros del cuerpo (los de `GET /api/reportes/reposicion`). Nunca envía ni confirma: son borradores para revisar. Devuelve
     `{ordenes, sin_proveedor, omitidos, repetida}`: las órdenes creadas (`proveedor_id` en los ids del producto), los productos a pedir sin proveedor
     habitual, los `producto_ids` sin nada que pedir, y si es el reintento de una `clave_operacion` ya usada (devuelve las mismas órdenes sin crear
     otras). Todo o nada: si algo falla no queda ninguna. 422 con un parámetro inválido, 503 sin la revisión `0004`. `numerador`, `resolver_proveedor` y
-    `proveedor_de` son los ganchos de `OpcionesCompras`.
+    `proveedor_de` son los ganchos de `OpcionesCompras`. `reloj() -> date` es el «hoy» del pedido, como en `build_reposicion_router`.
 
     **Escribe órdenes de compra, así que la factory FALLA al construirse (`ValueError`) sin `dependencias_escribir`** (una lista no vacía de
     `Depends(...)`: el producto pone acá la misma capacidad que protege la escritura de Compras) ni sin `usuario_actual` (la orden queda a nombre de quien
@@ -308,7 +315,7 @@ def build_reposicion_ordenes_router(
                     numerador=numerador, dias_rotacion=cuerpo.dias_rotacion, dias_cobertura=cuerpo.dias_cobertura,
                     plazo_entrega_dias=cuerpo.plazo_entrega_dias, sucursal_id=cuerpo.sucursal_id, categoria=cuerpo.categoria or None,
                     proveedor_id=party, descontar_vencido=cuerpo.descontar_vencido, estacionalidad=cuerpo.estacionalidad,
-                    descontar_por_vencer=cuerpo.descontar_por_vencer,
+                    descontar_por_vencer=cuerpo.descontar_por_vencer, hoy=reloj(),
                 )
                 # Los proveedores de las órdenes, en los ids del producto, ANTES de confirmar (si el gancho falla no queda nada escrito).
                 resultado["ordenes"] = [

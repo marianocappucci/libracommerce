@@ -1498,3 +1498,24 @@ no se busca la clave y el de los hilos falla sin el bloqueo de la venta. La carr
 - **Una clave reusada a propósito** para otra devolución con los mismos datos de la misma venta se toma por reintento: la clave es por intento, y es del cliente generar una nueva.
 - **Devoluciones hechas antes** de este cambio no llevan marca: no se reconocen como aplicadas.
 - Sigue sin cubrir la receta (ADR-018) ni la nota de crédito de una factura emitida.
+
+## ADR-042 — La reposición toma «hoy» de Argentina, y sus routers lo reciben de un `reloj` (2026-10-10)
+
+**Problema.** `sugerencia_reposicion` y `generar_ordenes_borrador` caían en `datetime.date.today()` sin `hoy`, y los dos routers nunca lo pasaban:
+el «hoy» era la fecha del sistema. Los contenedores desplegados tienen `TZ=America/Argentina/Buenos_Aires` (medido el 2026-10-10 en las tres
+demos), así que hoy no se corre el día. Pero un servidor o un CI en UTC sí lo corre entre las 21 y las 24, y la ventana de rotación se mueve un
+día. Además, los tests que pasan por el router tenían que fijar el reloj con un `monkeypatch` sobre las funciones del motor (libracommerce#201).
+
+**Patrón reutilizado.** `erp.vencimientos.hoy_argentina()`, que ya usaban `vencimientos` y los avisos FEFO de la venta.
+
+**Decisión.**
+- Sin `hoy`, `sugerencia_reposicion` y `generar_ordenes_borrador` usan `hoy_argentina()`.
+- `build_reposicion_router` y `build_reposicion_ordenes_router` aceptan `reloj: Callable[[], date] = hoy_argentina`. Cada pedido lo llama **una
+  vez**: en el export, la lista y el nombre del CSV salen del mismo día. Los productos no cambian nada.
+- Los tests pasan `reloj=lambda: HOY` al router, y se borró `fijar_hoy_del_router`.
+
+**Tests.** `test_reposicion.py`: con el reloj en `HOY` el router da lo mismo que el motor con `hoy=HOY` y el CSV se llama `reposicion_2026-09-30.csv`.
+Con el reloj 60 días después, las ventas salen de la ventana. Sin `hoy`, el motor usa `hoy_argentina` y el reloj por default de los dos routers es
+esa función. Los dos fallan con el código anterior. La suite de reposición pasa con el reloj del proceso adelantado 60 y 400 días.
+
+**No cubre.** Quedan cinco `date.today()` fuera de la reposición, con el mismo riesgo en un servidor en UTC: la fecha por default de un ajuste de stock (`erp/stock.py`, `erp/catalogo.py` y `web/catalogo_router.py`) y el período por default del margen (`web/margen_router.py`).
