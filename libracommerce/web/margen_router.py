@@ -26,7 +26,7 @@ import csv
 import datetime
 import io
 
-from ..erp import margen
+from ..erp import margen, vencimientos
 from . import fastapi as _fastapi
 from .catalogo_router import Conexion, _deps
 from .csv_seguro import celda_segura
@@ -45,11 +45,12 @@ _CAMPOS_PERIODOS = [
 
 
 def _fechas_default(desde: str, hasta: str) -> tuple[str, str]:
-    """Mismo default que `libracore.reportes_router`: del primero del mes a hoy."""
+    """Mismo default que `libracore.reportes_router`: del primero del mes a hoy, con «hoy» de Argentina (ADR-044)."""
+    hoy = vencimientos.hoy_argentina()
     if not desde:
-        desde = datetime.date.today().replace(day=1).isoformat()
+        desde = hoy.replace(day=1).isoformat()
     if not hasta:
-        hasta = datetime.date.today().isoformat()
+        hasta = hoy.isoformat()
     return desde, hasta
 
 

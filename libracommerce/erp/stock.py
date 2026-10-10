@@ -115,10 +115,14 @@ def add_movimiento_stock(conn, producto_id: int, tipo: str, cantidad: float,
         raise ValueError(f"tipo de movimiento desconocido: {tipo!r}")
     _lote = normalizar_lote(lot_code) if lot_code is not None else None
     _vence = normalizar_vencimiento(expires_at) if expires_at is not None else None
+    # Import diferido: `erp.vencimientos` importa este módulo, así que un import de arriba sería un ciclo. Se usa SU
+    # `hoy_argentina` para que «hoy» sea uno solo en todo el motor (ADR-044; mismo patrón que `lotes._hoy`).
+    from .vencimientos import hoy_argentina
+
     # `fecha` llega como 'YYYY-MM-DD'; `occurred_at` es un timestamp ISO. Se
     # normaliza siempre a la forma canónica completa para que todos los
-    # movimientos ordenen igual entre sí.
-    _fecha = _datetime.fromisoformat(fecha or _date.today().isoformat()).isoformat()
+    # movimientos ordenen igual entre sí. Sin `fecha`, el día de Argentina.
+    _fecha = _datetime.fromisoformat(fecha or hoy_argentina().isoformat()).isoformat()
     # `is None` y no `or`: un `deposito_id=0` no es un id real (los ids de
     # `locations` son seriales, arrancan en 1), pero `or` lo confundiría en
     # silencio con "no vino ninguno" y lo mandaría al default. Verificado:

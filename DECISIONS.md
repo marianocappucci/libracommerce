@@ -1519,3 +1519,25 @@ Con el reloj 60 días después, las ventas salen de la ventana. Sin `hoy`, el mo
 esa función. Los dos fallan con el código anterior. La suite de reposición pasa con el reloj del proceso adelantado 60 y 400 días.
 
 **No cubre.** Quedan cinco `date.today()` fuera de la reposición, con el mismo riesgo en un servidor en UTC: la fecha por default de un ajuste de stock (`erp/stock.py`, `erp/catalogo.py` y `web/catalogo_router.py`) y el período por default del margen (`web/margen_router.py`).
+
+## ADR-044 — «Hoy» es el día de Argentina en todo el motor: ajustes, transferencias y margen (2026-10-10)
+
+**Problema.** Después de ADR-042 (reposición) quedaban cinco `date.today()` en el motor, que tomaban la fecha del sistema:
+- la fecha por default de un movimiento de stock (`erp/stock.add_movimiento_stock`);
+- la de una transferencia (`erp/catalogo.transferir_stock`);
+- la de un ajuste por el router de stock (`web/catalogo_router`);
+- y el período por default del reporte de margen (`web/margen_router._fechas_default`, dos usos).
+
+Los contenedores desplegados tienen la zona de Argentina, así que hoy no fallan. Un servidor o un CI en UTC, en cambio, fecha un ajuste hecho
+a las 22 con el día siguiente, y el margen arranca el mes nuevo tres horas antes.
+
+**Patrón reutilizado.** `vencimientos.hoy_argentina()`, con el import diferido de `lotes._hoy`: `vencimientos` importa `stock` y `catalogo`,
+así que un import de arriba en esos dos módulos sería un ciclo. Los routers ya podían importar `vencimientos`.
+
+**Decisión.** Los cinco usan `hoy_argentina()`. Fijar `vencimientos.hoy_argentina` en un test fija «hoy» en todo el motor.
+
+**Tests.** `tests/test_hoy_argentina.py`: con `hoy_argentina` fijado en 2024-03-15, el ajuste por HTTP, el movimiento y la transferencia sin
+fecha quedan con ese día, y el margen sin fechas va del 2024-03-01 al 2024-03-15, en la función y en el router. Los cuatro fallan con el código anterior.
+
+**No cubre.** Los `datetime.now()` que estampan un instante, con hora (auditoría, `repository.save`, vigencia de listas y promociones), siguen
+con la hora del sistema. Con hora no se corre «el día», sino que cambia la zona en que se guarda el instante, y eso es otra decisión.
