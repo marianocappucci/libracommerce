@@ -8,6 +8,7 @@ se trata un producto que estuvo sin stock."""
 from __future__ import annotations
 
 import datetime
+import functools
 import inspect
 from decimal import Decimal
 
@@ -21,7 +22,7 @@ from libracommerce.db.repository import SqliteCommerceRepository, repositorio_de
 from libracommerce.domain.catalog import CatalogItemType
 from libracommerce.domain.entities import Party, PartyType
 from libracommerce.domain.sales import Sale, SaleItem
-from libracommerce.erp import catalogo, compras, reposicion, stock, vencimientos, ventas
+from libracommerce.erp import catalogo, compras, reposicion, reposicion_ordenes, stock, vencimientos, ventas
 from libracommerce.usecases.sales import confirm_sale
 from libracommerce.web.reposicion_router import build_reposicion_router
 
@@ -608,6 +609,15 @@ def _cliente(abrir) -> TestClient:
     app = FastAPI()
     app.include_router(build_reposicion_router(conexion=abrir))
     return TestClient(app)
+
+
+def fijar_hoy_del_router(monkeypatch, hoy=HOY):
+    """El «hoy» del servidor, fijo en `hoy`, para los tests que pasan por el ROUTER con el escenario de fechas fijas (`_yerba_de_referencia`,
+    `_dos_sucursales`...). Los routers no reciben `hoy` y las funciones del motor caen en `date.today()`: sin esto, a medida que pasan los días las
+    ventas sembradas salen de la ventana de rotación y el sugerido cambia (bomba de tiempo, 2026-10-10). Lo único que se fija es el reloj: el
+    router, la validación y el motor corren sin tocar. Los tests que llaman al motor ya pasan `hoy=HOY` por su cuenta (y ese gana)."""
+    for modulo, nombre in ((reposicion, "sugerencia_reposicion"), (reposicion_ordenes, "generar_ordenes_borrador")):
+        monkeypatch.setattr(modulo, nombre, functools.partial(getattr(modulo, nombre), hoy=hoy))
 
 
 def _yerba_de_hoy(abrir):
