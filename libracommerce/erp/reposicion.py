@@ -110,7 +110,7 @@ from fractions import Fraction
 from . import margen
 from .lotes import saldos_por_bucket
 from .stock import get_stock_por_deposito
-from .vencimientos import tiene_revision
+from .vencimientos import hoy_argentina, tiene_revision
 
 DIAS_ROTACION = 30
 DIAS_COBERTURA = 15
@@ -405,7 +405,7 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
     `sucursal_id`, siempre el global (ADR-024). `estacionalidad` (apagada por default) ajusta la proyección por lo que pasó hace un año. `descontar_por_vencer` (apagado por default, ADR-025) resta además del stock utilizable lo que, de los
     lotes que vencen dentro del horizonte, no llega a venderse antes (`por_vencer`; 0 sin la opción; un producto sin ventas pierde completo lo que vence dentro del horizonte, y con un mínimo > 0 se
     sugiere reponerlo). `hoy` es para las pruebas: el default es la fecha
-    del servidor. Levanta `ValueError` con un parámetro fuera de rango o una `sucursal_id` que no existe.
+    de Argentina (`hoy_argentina`), no la del sistema. Levanta `ValueError` con un parámetro fuera de rango o una `sucursal_id` que no existe.
     No commitea (no escribe)."""
     _entero_en_rango("dias_rotacion", dias_rotacion, MAX_DIAS_ROTACION)
     _entero_en_rango("dias_cobertura", dias_cobertura, MAX_DIAS_COBERTURA)
@@ -415,7 +415,7 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
     if proveedor_id is not None and not conn.execute("SELECT 1 FROM parties WHERE id = ?", (proveedor_id,)).fetchall():
         raise ValueError(f"el proveedor {proveedor_id} no existe")
 
-    hoy = hoy or datetime.date.today()
+    hoy = hoy or hoy_argentina()
     desde = hoy - datetime.timedelta(days=dias_rotacion - 1)
     muestra_minima = min(dias_rotacion, _MIN_DIAS_DE_MUESTRA)
 
