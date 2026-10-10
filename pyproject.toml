@@ -138,7 +138,8 @@ dev = [
     # v1.147.0 -> v1.148.0 (2026-10-09): filtros de fecha por dia completo (`libracore.fechas`, ADR-037). Sin migracion.
     # v1.148.0 -> v1.149.0 (2026-10-09): en una demo (`DEMO_MODE=1`) la empresa es siempre ficticia (`config_manager`, ADR-038 de libracore). Fuera de una demo no cambia nada. Sin migracion.
     # v1.149.0 -> v1.151.0 (2026-10-09): un plan retirado se resuelve con `PLANES_RETIRADOS` en el alta y en el cambio de plan (`provisioning.resolver_plan`, libracore#375). Este producto no retira planes: no cambia nada. Sin migracion.
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.152.0",
+    # v1.152.0 -> v1.153.0 (2026-10-10): sucursales contratadas y abono por unidad adicional (`libracore.limites` y `libracore.abono`, ADR-041). Sin dato de sucursales contratadas no limita nada; este producto no lo usa. Sin migracion.
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.153.0",
 ]
 offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@develop"]
 offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@develop"]
