@@ -17,14 +17,14 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from ..erp import compras
+from ..erp import claves, compras
 from . import fastapi as _fastapi
 from ._validacion import sin_booleanos
 from .catalogo_router import Conexion, _deps
 
 _fastapi()
 from fastapi import APIRouter, Depends, HTTPException  # noqa: E402
-from pydantic import BaseModel  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
 
 
 class OrdenCreatePayload(BaseModel):
@@ -62,6 +62,22 @@ class RecepcionItemPayload(BaseModel):
     expires_at: datetime | None = None
 
     _no_son_booleanos = sin_booleanos("item_id")
+
+
+class RecepcionRecibirPayload(BaseModel):
+    """«Recibir mercadería» de una vez (ADR-046): la recepción entera, con su depósito, y la `clave_operacion` del intento."""
+
+    proveedor_id: int
+    purchase_order_id: int | None = None
+    document_reference: str | None = None
+    #: El `id` del depósito de destino, como en `ConfirmarPayload`.
+    deposito_id: int
+    #: Obligatoria acá (es el motivo de la ruta). Una por INTENTO (p. ej. un UUID): un reintento con la misma clave no vuelve a mover stock y contesta la
+    #: recepción de la primera vez con `repetida: true`; la misma clave con otros datos es 409.
+    clave_operacion: str = Field(min_length=1, max_length=claves.MAX_LARGO_CLAVE)
+    items: list[RecepcionItemPayload] = Field(min_length=1)
+
+    _no_son_booleanos = sin_booleanos("proveedor_id", "purchase_order_id", "deposito_id")
 
 
 class ConfirmarPayload(BaseModel):
@@ -193,6 +209,29 @@ def build_compras_router(*, conexion: Conexion | None = None,
                 raise HTTPException(404, "purchase receipt not found") from e
             except compras.EstadoInvalido as e:
                 raise HTTPException(409, str(e)) from e
+            return _con_proveedor(conn, recepcion)
+
+    @router.post("/purchase-receipts/recibir", dependencies=escribe)
+    def recibir_mercaderia(payload: RecepcionRecibirPayload):
+        """Crea, carga y confirma la recepción en una transacción, idempotente por `clave_operacion` (ADR-046). La respuesta es la recepción más `repetida`."""
+        with abrir() as conn:
+            party_id = opt.resolver_proveedor(conn, payload.proveedor_id)
+            try:
+                recepcion = compras.recibir_mercaderia(
+                    conn, supplier_party_id=party_id, deposito_id=payload.deposito_id,
+                    items=[i.model_dump() for i in payload.items], clave_operacion=payload.clave_operacion,
+                    occurred_at=datetime.now(UTC), purchase_order_id=payload.purchase_order_id,
+                    document_reference=payload.document_reference,
+                )
+            except compras.OrdenNoEncontrada as e:
+                raise HTTPException(404, "purchase order not found") from e
+            except compras.SinRevision as e:
+                raise HTTPException(503, str(e)) from e
+            except claves.ClaveReusada as e:
+                # La clave ya se aplicó con otros datos: es otra recepción y necesita otra clave.
+                raise HTTPException(409, str(e)) from e
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
             return _con_proveedor(conn, recepcion)
 
     @router.post("/purchase-receipts/{recepcion_id}/confirm", dependencies=escribe)

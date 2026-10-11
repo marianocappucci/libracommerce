@@ -16,6 +16,8 @@ esta tabla referencia (`supplier_party_id INTEGER NOT NULL REFERENCES parties(id
 """
 from __future__ import annotations
 
+import hashlib
+import sqlite3
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
@@ -32,6 +34,7 @@ from ..domain.purchasing import (
     PurchaseReceiptStatus,
 )
 from ..usecases.purchasing import confirm_purchase_receipt
+from . import claves
 
 
 class OrdenNoEncontrada(Exception):
@@ -44,6 +47,10 @@ class RecepcionNoEncontrada(Exception):
 
 class EstadoInvalido(Exception):
     """409: la operación no es válida para el estado actual de la orden o la recepción."""
+
+
+class SinRevision(Exception):
+    """503: a la base le falta la revisión `0006_clave_operacion_recepciones` del motor (la columna `purchase_receipts.clave_operacion`)."""
 
 
 #: `conn -> "OC-000001"`. El default no toma un lock: lee `MAX(id)+1` sobre una tabla sin baja (no hay `DELETE`), es
@@ -194,3 +201,115 @@ def confirmar_recepcion(conn, recepcion_id: int, *, location_id: int, occurred_a
         raise EstadoInvalido("no se puede confirmar una recepción sin líneas")
     confirmada = confirm_purchase_receipt(repositorio_de(conn), recepcion, location_id, occurred_at)
     return _recepcion_dict(confirmada)
+
+
+# ── Recibir mercadería de una vez, idempotente (ADR-046) ────────────────────
+#
+# Las tres llamadas de arriba (crear, cargar líneas, confirmar) son tres escrituras con tres commits: si la respuesta de la última se pierde y la persona reintenta, el
+# cliente vuelve a empezar desde la primera y el stock entra dos veces. `recibir_mercaderia` es la misma operación en UNA transacción y con una `clave_operacion`: un reintento no
+# escribe nada y contesta la recepción de la primera vez.
+
+#: Qué hace el candado de la clave; sólo cambia el texto que se hashea, para no chocar con el de otra operación que use la misma clave.
+_CANDADO = "recepcion-de-mercaderia:"
+
+
+def tiene_clave_operacion(conn) -> bool:
+    """Si la base tiene la revisión `0006_clave_operacion_recepciones` (la columna `purchase_receipts.clave_operacion`). Se sondea por metadatos (`PRAGMA table_info`, que el
+    adaptador de PostgreSQL traduce a `information_schema`) y no con un `SELECT` de la columna: en PostgreSQL un `SELECT` fallido aborta la transacción entera."""
+    return "clave_operacion" in {f[1] for f in conn.execute("PRAGMA table_info(purchase_receipts)").fetchall()}
+
+
+def _serializar(conn, clave: str) -> None:
+    """Toma el candado de ESTA clave hasta el fin de la transacción: dos pedidos a la vez con la misma clave (un doble clic que salió dos veces) se hacen cola y el segundo ve la
+    recepción del primero. PostgreSQL: un candado asesor (`pg_advisory_xact_lock`). SQLite (sólo pruebas y nodos sueltos): un `UPDATE` que no toca ninguna fila igual toma el candado de
+    escritura de la base, que ya serializa a los escritores. Detrás hay además un índice único sobre la clave (revisión 0006): si el candado fallara, la base rechaza la segunda."""
+    if isinstance(conn, sqlite3.Connection):
+        conn.execute("UPDATE purchase_receipts SET clave_operacion = clave_operacion WHERE 0")
+    else:
+        numero = int.from_bytes(hashlib.sha256((_CANDADO + clave).encode()).digest()[:7], "big")
+        conn.execute("SELECT pg_advisory_xact_lock(?)", (numero,))
+
+
+def _texto_o_none(valor: str | None) -> str | None:
+    """Un texto recortado, o `None` si no queda nada: `""`, `"  "` y `None` son lo mismo (no hay lote / no hay remito)."""
+    return (valor or "").strip() or None
+
+
+def _huella_del_pedido(supplier_party_id: int, purchase_order_id: int | None, document_reference: str | None, deposito_id: int,
+                       lineas: list[PurchaseReceiptItem]) -> dict:
+    """Lo que identifica a una recepción para decidir si un pedido con una clave ya usada es el mismo o es otro. Las cantidades y los costos son `Decimal`: `1` y `1.0` son lo mismo."""
+    return {
+        "proveedor": supplier_party_id, "orden": purchase_order_id, "remito": document_reference, "deposito": deposito_id,
+        "lineas": [(x.item_id, x.quantity, x.unit_cost, x.lot_code, x.expires_at) for x in lineas],
+    }
+
+
+def recibir_mercaderia(conn, *, supplier_party_id: int, deposito_id: int, items: list[dict], clave_operacion: str,
+                       occurred_at: datetime, purchase_order_id: int | None = None,
+                       document_reference: str | None = None) -> dict:
+    """Crea la recepción con sus líneas y la confirma (entra el stock, se actualiza el último costo y el avance de la orden) **en una sola transacción**: o queda todo o no queda nada.
+
+    **Idempotente por `clave_operacion`** (obligatoria: un texto no vacío de hasta 64 caracteres, sin corchetes; p. ej. un UUID que el cliente genera una vez por intento). La clave se
+    guarda en `purchase_receipts.clave_operacion` (índice único) y se busca con el candado de la clave tomado. Un **reintento con la misma clave y los mismos datos** no escribe nada y
+    devuelve la recepción de la primera vez con `repetida: True`; con la misma clave y **otros** datos (otro proveedor, orden, remito, depósito o líneas), `claves.ClaveReusada` (409).
+
+    `items` es una lista de `{item_id, quantity, unit_cost, lot_code?, expires_at?}`. `ValueError` con datos inválidos (clave mal formada, sin líneas, cantidad ≤ 0, costo < 0, un producto o
+    el depósito inexistente); `OrdenNoEncontrada`; `SinRevision` sin la revisión `0006`. Confirma la transacción (las demás funciones de este módulo confirman cada escritura).
+    Devuelve la recepción (`_recepcion_dict`) más `repetida`."""
+    clave = claves.normalizar_clave(clave_operacion)
+    if not items:
+        raise ValueError("no se puede recibir mercadería sin líneas")
+    lineas: list[PurchaseReceiptItem] = []
+    for i in items:
+        try:
+            cantidad, costo = Decimal(str(i["quantity"])), Decimal(str(i["unit_cost"]))
+        except ArithmeticError as e:
+            raise ValueError(f"la cantidad y el costo del producto {i['item_id']} tienen que ser números: {i['quantity']!r}, {i['unit_cost']!r}") from e
+        if not cantidad.is_finite() or cantidad <= 0:
+            raise ValueError(f"la cantidad recibida del producto {i['item_id']} tiene que ser mayor que 0: {i['quantity']}")
+        if not costo.is_finite() or costo < 0:
+            raise ValueError(f"el costo unitario del producto {i['item_id']} no puede ser negativo: {i['unit_cost']}")
+        lineas.append(PurchaseReceiptItem(item_id=i["item_id"], quantity=cantidad, unit_cost=costo,
+                                          lot_code=_texto_o_none(i.get("lot_code")), expires_at=i.get("expires_at")))
+    remito = _texto_o_none(document_reference)
+    pedido = _huella_del_pedido(supplier_party_id, purchase_order_id, remito, deposito_id, lineas)
+    if not tiene_clave_operacion(conn):
+        raise SinRevision("Falta la revisión 0006_clave_operacion_recepciones del motor: corré `libracommerce-migrar upgrade` "
+                          "(--prefijo del producto) antes de recibir mercadería con clave de operación.")
+
+    repo = repositorio_de(conn)
+    with repo.transaction():
+        _serializar(conn, clave)
+        previa = conn.execute("SELECT id FROM purchase_receipts WHERE clave_operacion = ?", (clave,)).fetchone()
+        if previa is not None:
+            return _recepcion_repetida(conn, previa[0], pedido)
+
+        if purchase_order_id is not None:
+            _obtener_orden_domain(conn, purchase_order_id)  # 404 temprano si no existe
+        if not conn.execute("SELECT 1 FROM locations WHERE id = ?", (deposito_id,)).fetchall():
+            raise ValueError(f"el depósito {deposito_id} no existe")
+        for linea in lineas:
+            if not conn.execute("SELECT 1 FROM catalog_items WHERE id = ?", (linea.item_id,)).fetchall():
+                raise ValueError(f"el producto {linea.item_id} no existe")
+        recepcion = repo.save_purchase_receipt(PurchaseReceipt(
+            id=None, supplier_party_id=supplier_party_id, items=tuple(lineas),
+            purchase_order_id=purchase_order_id, document_reference=remito,
+        ))
+        # La clave se escribe aparte porque el repositorio no la conoce (la columna es de una revisión opt-in, no de `init_schema`).
+        conn.execute("UPDATE purchase_receipts SET clave_operacion = ? WHERE id = ?", (clave, recepcion.id))
+        confirm_purchase_receipt(repo, recepcion, deposito_id, occurred_at)
+        # Se vuelve a leer lo escrito, en vez de devolver lo que se armó en memoria: así la respuesta de la primera vez y la de un reintento son la misma, letra por letra
+        # (PostgreSQL devuelve `8.0` para lo que se mandó como `8`).
+        return {**obtener_recepcion(conn, recepcion.id), "repetida": False}
+
+
+def _recepcion_repetida(conn, recepcion_id: int, pedido: dict) -> dict:
+    """La recepción que ya se escribió con esta clave, o `claves.ClaveReusada` si lo pedido ahora no es lo mismo. Sin escribir nada."""
+    recepcion = _obtener_recepcion_domain(conn, recepcion_id)
+    depositos = {f[0] for f in conn.execute(
+        "SELECT DISTINCT location_id FROM stock_movements WHERE source_type = 'purchase_receipt' AND source_id = ?", (recepcion_id,)).fetchall()}
+    previa = _huella_del_pedido(recepcion.supplier_party_id, recepcion.purchase_order_id, recepcion.document_reference,
+                                depositos.pop() if len(depositos) == 1 else None, list(recepcion.items))
+    if recepcion.status != PurchaseReceiptStatus.CONFIRMED or previa != pedido:
+        raise claves.ClaveReusada("la clave_operacion ya se usó con otros datos: es otra recepción y necesita otra clave")
+    return {**_recepcion_dict(recepcion), "repetida": True}

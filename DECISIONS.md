@@ -1613,3 +1613,43 @@ venta completa (descuento, `sale_promotions`, líneas intactas con su variante) 
   talles en dos líneas de a una unidad no suman para un quiebre de 2; un producto sin variantes escaneado dos veces tampoco. Es el comportamiento
   de siempre y cambiarlo toca los productos sin variantes.
 - **Promociones por variante, por categoría o por porcentaje:** no existen.
+
+## ADR-046 — «Recibir mercadería» es idempotente: `POST /api/purchase-receipts/recibir` con `clave_operacion` (revisión 0006, 2026-10-11)
+
+**Problema** (anotado el 2026-10-01 en los pendientes de VentaLibra). Recibir mercadería eran tres llamadas con tres commits —`POST /purchase-receipts`, una `POST …/items` por línea y `POST …/confirm`— y ninguna llevaba una identidad de operación. Si el motor
+guardaba la recepción pero la respuesta se perdía y la persona reintentaba, el cliente volvía a empezar desde la primera: otra recepción y el stock entraba dos veces (con lote o sin lote). Además, `confirm_purchase_receipt` hace cada escritura con su commit, así que un fallo entre
+la recepción confirmada y sus movimientos dejaba una recepción confirmada sin mercadería.
+
+**Patrón reutilizado.** El de ADR-041 (`devolver_items`), `vencimientos` y `reposicion_ordenes`: una `clave_operacion` por intento (`erp/claves.py`: `normalizar_clave`, `ClaveReusada`), una búsqueda antes de escribir, el mismo resultado con `repetida: true` si los datos son los mismos y
+`ClaveReusada` (409) si son otros. Lo propio de esta operación es **dónde vive la clave**.
+
+**Decisión.**
+- **Una ruta nueva, `POST /api/purchase-receipts/recibir`** (`erp.compras.recibir_mercaderia`): recibe la recepción entera —`proveedor_id`, `purchase_order_id?`, `document_reference?`, `deposito_id`, `items` (`item_id`, `quantity`, `unit_cost`, `lot_code?`, `expires_at?`) y `clave_operacion`
+  (obligatoria *acá*: es su razón de ser)— y la crea, la carga y la confirma **en una transacción** (`repo.transaction()`): o queda todo o no queda nada. La respuesta es la recepción de siempre más `repetida`. La respuesta de la primera vez se vuelve a leer de la base, para que sea
+  idéntica letra por letra a la de un reintento (PostgreSQL devuelve `8.0` para lo que se mandó como `8`).
+- **Las tres rutas de siempre no cambian**: no llevan clave, siguen andando como hoy y, sin clave, siguen sin poder distinguir un reintento de otra recepción (lo mismo que ADR-041 dice de la devolución). Un cliente viejo sigue andando.
+- **La clave vive en `purchase_receipts.clave_operacion`** (revisión **`0006_clave_operacion_recepciones`**, aditiva, opcional, sin tocar una fila existente), con un **índice único parcial** (`WHERE clave_operacion IS NOT NULL`: las recepciones sin clave no compiten). No se estampa en una nota
+  como `[op:<clave>]` (lo que hacen vencimientos y devolución) porque acá no hay una nota en la recepción y buscarla en `stock_movements.note` sería recorrer el ledger entero sin índice. La columna no está en `init_schema()` (el gate `test_schema_congelado` sigue verde): es de la
+  revisión, como `supplier_party_id` o `item_branch_min_stock`; la revisión llama a `init_schema()` antes, por la lección de la 0005.
+- **La unicidad es global, no por producto**: una recepción es una sola fila, no una por producto. La misma clave con otro proveedor, orden, remito, depósito o líneas es `ClaveReusada` (409). «Los mismos datos» se compara contra lo escrito: proveedor, orden, remito, depósito (de los
+  movimientos de stock de la recepción) y las líneas en orden, con las cantidades y los costos como `Decimal` (`8` y `8.0` son lo mismo).
+- **Concurrencia.** Con la clave, antes de buscarla se toma un candado de ESA clave hasta el fin de la transacción: `pg_advisory_xact_lock` en PostgreSQL (como `reposicion_ordenes`) y, en SQLite, un `UPDATE` que no toca ninguna fila (toma el candado de escritura). Dos pedidos con la misma
+  clave se hacen cola y el segundo ve la recepción del primero. Detrás, el índice único: si el candado fallara, la base rechaza la segunda en vez de duplicar.
+- **Sin la revisión** la ruta contesta 503 con el texto de `libracommerce-migrar upgrade` (como vencimientos); las tres rutas de siempre no la necesitan. Se sondea por metadatos (`PRAGMA table_info`), no con un `SELECT` (en PostgreSQL uno fallido aborta la transacción).
+- **Validación** antes de escribir: clave bien formada, al menos una línea, cantidad > 0 y costo ≥ 0 (la ruta de siempre acepta cualquier cantidad: no se tocó), depósito y productos existentes (`ValueError`, 422), orden inexistente (404). La búsqueda de la clave va **antes** de los chequeos que dependen de la
+  base: un reintento no puede fallar por algo que ya no hace falta.
+
+**Tests.** `tests/test_recibir_mercaderia.py`, contra SQLite y PostgreSQL: el mismo intento dos veces cuenta una recepción y el stock una vez (y la respuesta es la misma); el reintento no vuelve a sumar a la orden ni a pisar el costo; con lote y vencimiento no duplica el lote; claves distintas son dos
+recepciones; la misma clave con otro proveedor / orden / remito / depósito / producto / cantidad / costo / lote / más líneas es 409 sin escribir; una línea inválida o un fallo a mitad no dejan nada (y la clave no se gasta); los pedidos inválidos; sin clave las rutas de siempre son las de siempre
+y no se deduplican; dos pedidos simultáneos con la misma clave cuentan una vez; sin la revisión, 503; la revisión 0006 sobre datos previos, idempotente por introspección, con su downgrade, y el índice único (con NULL repetidos permitidos). Fallan si no se busca la clave, si no se toma el candado
+(el simultáneo) o si no hay transacción (el fallo a mitad).
+
+**No cubre.**
+- **Un reintento sin clave** (las tres rutas de siempre) sigue siendo indistinguible de otra recepción.
+- **Una clave reusada a propósito** para otra recepción con exactamente los mismos datos se toma por reintento: la clave es por intento y es del cliente generar una nueva.
+- **Las recepciones hechas antes** no llevan clave: no se reconocen como aplicadas.
+- Las rutas de siempre siguen sin transacción única: `confirm_purchase_receipt` commitea cada escritura. No se tocó (cambiaría qué queda ante un fallo a mitad para quien no manda clave).
+- No valida que lo recibido no pase de lo pendiente de la orden (la ruta de siempre tampoco).
+
+**Cómo se adopta.** Subir el pin del motor, correr `libracommerce-migrar upgrade --prefijo <producto>` (la 0006 es opt-in: una instancia sin ella sigue andando con las tres rutas) y subir la pantalla del kit (`libra-ui` ADR-049, que usa la ruta nueva). El producto no cambia código si ya monta
+`build_compras_router`: la ruta cuelga de `/purchase-receipts`, así que los permisos y filtros por prefijo de ruta de VentaLibra (`compras.recibir`, costos) la cubren.
