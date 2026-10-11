@@ -1573,3 +1573,43 @@ fecha quedan con ese día, y el margen sin fechas va del 2024-03-01 al 2024-03-1
 
 **No cubre.** Los `datetime.now()` que estampan un instante, con hora (auditoría, `repository.save`, vigencia de listas y promociones), siguen
 con la hora del sistema. Con hora no se corre «el día», sino que cambia la zona en que se guarda el instante, y eso es otra decisión.
+
+## ADR-045 — Las variantes reciben las promociones de su producto y cuentan juntas (2026-10-11)
+
+**Problema.** VentaLibra tenía anotado desde el 2026-09-29 que «la ruta de variantes del POS sigue al precio plano, sin promoción». Se midió
+antes de tocar nada, y la mitad del título era falsa en el motor: ADR-014 ya aplica «llevá N pagá M» y combos a las líneas con variante. Una
+venta con dos talles de la misma remera y un 2x1 sobre la remera descuenta una unidad hoy, en SQLite y en PostgreSQL, sin cambiar una línea del
+motor. Lo que sí estaba mal era del lado del POS: la variante entraba al precio plano y no al de la lista predeterminada (ADR-042 de VentaLibra).
+Ese arreglo vive en el producto (su `Pos.tsx`); acá queda fijada la regla del motor para que no se pierda.
+
+**Por qué ya andaba.** Las promociones se definen sobre **productos** (`promotion_items.item_id` es `catalog_items.id`), y la variante
+(`item_variants`) no tiene precio ni categoría propios: `item_prices` no tiene columna de variante y `catalog_items` guarda la categoría.
+`erp.promociones.calcular` agrupa las líneas por `producto_id` y la `variante_id` no interviene.
+
+**Decisión.** Se deja como está y se documenta:
+- **Promoción por producto:** alcanza a **todas** sus variantes. No existe «sólo el talle L»: el ítem de la promoción es un producto, y una
+  variante no se puede nombrar en ella.
+- **Promoción por categoría:** **no existe en el modelo** (`promotions` son `nxm` y `combo` sobre productos, y no hay descuentos por
+  porcentaje). Si se agrega, la categoría se lee **del producto** (`catalog_items.category_id`) y la variante la hereda: nunca se le da categoría
+  a la variante. Queda dicho acá para que quien la construya no cree una segunda fuente de verdad.
+- **2x1 (o N×M) mezclando variantes del mismo producto: cuentan juntas.** Es lo que espera un comercio (dos remeras, la más barata o no, son
+  «dos remeras»; el cliente no tiene por qué llevar dos del mismo talle). Como la variante no tiene precio propio, no hay «la más barata»:
+  todas valen el precio del producto, y si las líneas difieren (un quiebre por cantidad en una, una etiqueta de balanza en otra) rige el
+  promedio ponderado de siempre.
+- **Combos:** un producto con variantes cuenta una vez por cada unidad de cualquiera de sus variantes.
+- **Las líneas no se tocan.** Cada variante sigue siendo su línea, a su precio de lista, con su `variante_id`: el stock, el costo y las
+  devoluciones (que ya prorratean por `(ítem, variante)`) siguen siendo por variante. El ahorro viaja en el `descuento` de la venta, como en ADR-014.
+- `POST /api/promociones/calcular` no recibe `variante_id` (Pydantic lo descarta si llega): el cálculo no lo necesita y que lo ignore es parte de
+  la regla.
+
+**Tests.** `tests/test_promociones_variantes.py`, en los dos motores: 2x1 con dos variantes del mismo producto, con una sola variante y dos
+unidades, 3x2 con tres variantes y una suelta, la variante de otro producto que no suma, un combo con un producto con variantes y otro sin, la
+venta completa (descuento, `sale_promotions`, líneas intactas con su variante) y que el servidor cobre lo mismo que mostró el cálculo. Son de
+**caracterización**: pasan con el código de antes. Si `calcular` agrupara por `(producto_id, variante_id)`, los dos de la venta se ponen rojos
+(medido).
+
+**No cubre.**
+- **Quiebres por cantidad:** el precio por cantidad de la lista (ADR-042 de VentaLibra) sigue resolviéndose **por línea**, no por producto. Dos
+  talles en dos líneas de a una unidad no suman para un quiebre de 2; un producto sin variantes escaneado dos veces tampoco. Es el comportamiento
+  de siempre y cambiarlo toca los productos sin variantes.
+- **Promociones por variante, por categoría o por porcentaje:** no existen.
