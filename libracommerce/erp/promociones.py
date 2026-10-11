@@ -17,6 +17,10 @@ producto a su precio de lista, y el ahorro viaja en el `descuento` de la venta.
 Así el stock, el costo por línea y las devoluciones siguen siendo veraces por
 producto. Qué promoción se aplicó y cuánto ahorró queda en `sale_promotions`.
 
+**Las variantes cuentan como su producto (ADR-045).** La promoción se define sobre productos y la
+variante no tiene precio ni categoría propios, así que `calcular` agrupa por `producto_id` y la
+`variante_id` de la línea no interviene: un 2x1 se arma con dos talles distintos del mismo producto.
+
 **Cuando compiten**, gana la de mayor ahorro por paquete (empate: la más
 vieja), consume las unidades que usa y las demás se calculan con lo que sobra.
 Es un criterio simple y predecible, no el óptimo global: no busca la
@@ -193,7 +197,8 @@ def calcular(conn, lineas: list[dict], *, en: str = "") -> dict:
 
     `lineas` es `[{producto_id, qty, precio}]` (lo que viaja en la venta). Las
     líneas sin `producto_id` se ignoran, y varias del mismo producto se juntan
-    con el precio promedio ponderado. `en` (ISO, vacío = ahora) admite un
+    con el precio promedio ponderado (también las de distintas variantes: la `variante_id`, si viene, no
+    se mira). `en` (ISO, vacío = ahora) admite un
     instante con zona: se pasa a hora local igual que las vigencias de precio.
 
     Devuelve `{"aplicadas": [{promocion_id, nombre, veces, ahorro}], "ahorro": total}`.
