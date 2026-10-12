@@ -25,6 +25,9 @@ from test_reposicion import (
 )
 
 from libracommerce.erp import catalogo, reposicion, vencimientos
+from libracommerce.erp.vencimientos import (
+    hoy_argentina,  # el «hoy» del motor (ADR-044): date.today() en un CI en UTC es mañana de 21 a 24 h
+)
 
 destino = _rep.destino
 abrir_vto_ventas = _rep.abrir_vto_ventas
@@ -442,7 +445,7 @@ def test_el_router_de_ordenes_acepta_la_opcion_en_el_cuerpo(abrir_vto_ventas):
 
     abrir = abrir_vto_ventas
     yerba = _yerba_de_hoy(abrir)
-    hoy = datetime.date.today()
+    hoy = hoy_argentina()
     _lote(abrir, yerba, "A", _en(5, hoy), 20)
     _con_proveedor(abrir, yerba, _nuevo_tercero(abrir, "Distribuidora Norte"))
     app = FastAPI()
@@ -458,7 +461,7 @@ def test_el_router_de_ordenes_acepta_la_opcion_en_el_cuerpo(abrir_vto_ventas):
 def test_el_router_acepta_la_opcion_la_devuelve_y_rechaza_lo_que_no_es_booleano(abrir_vto_ventas):
     abrir = abrir_vto_ventas
     yerba = _yerba_de_hoy(abrir)
-    _lote(abrir, yerba, "A", _en(5, datetime.date.today()), 20)
+    _lote(abrir, yerba, "A", _en(5, hoy_argentina()), 20)
     c = _rep._cliente(abrir)
     sin = c.get("/api/reportes/reposicion", params={"solo_a_pedir": "false"})
     assert sin.status_code == 200 and sin.json()["descontar_por_vencer"] is False
@@ -474,7 +477,7 @@ def test_el_router_acepta_la_opcion_la_devuelve_y_rechaza_lo_que_no_es_booleano(
 def test_el_csv_trae_por_vencer_al_final(abrir_vto_ventas):
     abrir = abrir_vto_ventas
     yerba = _yerba_de_hoy(abrir)
-    _lote(abrir, yerba, "A", _en(5, datetime.date.today()), 20)
+    _lote(abrir, yerba, "A", _en(5, hoy_argentina()), 20)
     c = _rep._cliente(abrir)
     for params, esperado in (({}, "0"), ({"descontar_por_vencer": "true"}, "14")):   # la yerba es de unidades enteras: sin decimales (ADR-028)
         lineas = c.get("/api/reportes/reposicion/export", params={"solo_a_pedir": "false", **params}).text.splitlines()
