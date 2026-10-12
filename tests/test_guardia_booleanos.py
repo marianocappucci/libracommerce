@@ -53,7 +53,8 @@ def _routers_del_motor():
         C.build_productos_router(opciones=C.OpcionesCatalogo(con_vencimientos=True)),
         C.build_depositos_router(),
         C.build_sucursales_router(),
-        C.build_stock_router(opciones=C.OpcionesStock(con_lotes=True, por_deposito=True, motivos_merma=("Otro",))),
+        C.build_stock_router(usuario_actual=_usuario, opciones=C.OpcionesStock(
+            con_lotes=True, autorizar_lotes=lambda _u: True, por_deposito=True, motivos_merma=("Otro",))),
         VE.build_ventas_router(opciones=VE.OpcionesVentas(con_avisos_de_vencimiento=True, promociones=True)),
         V.build_vencimientos_router(),
         V.build_vencimientos_escritura_router(usuario_actual=_usuario, dependencias_marcar=_DEP, dependencias_movimientos=_DEP),

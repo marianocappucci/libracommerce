@@ -835,7 +835,7 @@ siguen el lote. Estado intermedio que termina acá: el PR-2 solo existía en `de
   escribe la fila de siempre; pasar lote a un producto sin marcar es `ValueError`. Toma el producto antes de leer saldos.
   **HTTP, opt-in:** `OpcionesStock.con_lotes` (default `False`) hace que el cuerpo acepte `lot_code` y `expires_at` (sólo con
   `modo="absoluto"` o `"entrada"`; `salida`/`merma`, un producto sin marcar o un lote inválido, 422). Apagada, el cuerpo, el esquema OpenAPI y las
-  respuestas son los de siempre (un test compara el esquema).
+  respuestas son los de siempre (un test compara el esquema). **Prenderla exige la guarda `OpcionesStock.autorizar_lotes` (ADR-047).**
 - **Avisos por HTTP, opt-in: `OpcionesVentas.con_avisos_de_vencimiento` (default `False`).** Prendida, `POST /api/ventas` y
   `GET /api/ventas/{id}` agregan la clave `avisos` (`erp.lotes.avisos_de_venta`, umbral por vencer de 15 días) **sólo si hay
   alguno**, y existe `POST /api/ventas/plan-salida`: cuerpo `{items: [{producto_id, qty, variante_id?}], deposito_id?}`, respuesta
@@ -1653,3 +1653,30 @@ y no se deduplican; dos pedidos simultáneos con la misma clave cuentan una vez;
 
 **Cómo se adopta.** Subir el pin del motor, correr `libracommerce-migrar upgrade --prefijo <producto>` (la 0006 es opt-in: una instancia sin ella sigue andando con las tres rutas) y subir la pantalla del kit (`libra-ui` ADR-049, que usa la ruta nueva). El producto no cambia código si ya monta
 `build_compras_router`: la ruta cuelga de `/purchase-receipts`, así que los permisos y filtros por prefijo de ruta de VentaLibra (`compras.recibir`, costos) la cubren.
+
+## ADR-047 — El ajuste de stock con lote exige una guarda propia: `OpcionesStock.autorizar_lotes` (2026-10-12)
+
+**Problema** (anotado el 2026-10-01 en los pendientes de VentaLibra: «Ajuste de stock con lote por API, deshabilitado a propósito»). Con `OpcionesStock(con_lotes=True)` el cuerpo de `POST /api/stock/{pid}/ajuste` acepta `lot_code` y `expires_at`: el conteo de UN lote (`modo="absoluto"`) o una entrada a un lote (`modo="entrada"`). Eso es lo mismo que hacen `POST /api/vencimientos/asignar`, `/entrada` y `/merma`,
+pero el producto monta el ajuste con la capacidad del ajuste común y esas tres con otra (`dependencias_movimientos`). Con un rol que pudiera ajustar stock y no mover lotes, el ajuste habría sido una vía lateral para alterar lotes. Por eso VentaLibra dejó la opción apagada.
+
+**Qué ya existía** (se miró antes de cambiar). El motor **ya respeta** `lot_code` y `expires_at` en el ajuste desde A-4 PR-3 (ADR-018; `stock.ajustar_stock` y `stock.entrada_manual_con_lote`): con la opción prendida el conteo es contra el saldo de ESE bucket, un lote que no existe se crea, y un producto sin marcar es 422. Lo que se anotó como «el motor ignora `lot_code`» describe la opción **apagada**,
+que lo ignora a propósito (el cuerpo es el de siempre). Lo único que faltaba era la guarda.
+
+**Patrón reutilizado.** El de `OpcionesCatalogo.autorizar_marcar_vence` (un `Callable[[dict], bool]` que recibe el usuario de la sesión) y el de `build_vencimientos_escritura_router` (la factory FALLA al construirse si falta lo que hace seguro el router).
+
+**Decisión.**
+- **`OpcionesStock.autorizar_lotes: Callable[[dict], bool] | None = None`.** Se consulta **por cuerpo**: sólo si el pedido trae `lot_code` o `expires_at` (con `is not None`: un `""` también cuenta como «traer lote»), y **antes de leer la base**, así que un pedido con lote de quien no puede tocar lotes es **403** sea cual sea el producto (existente o no, marcado o no) o el modo (incluso uno que después se rechazaría con 422).
+  No se escribe nada. El ajuste sin esos campos no la consulta: es el ajuste común, con la protección con la que el producto monte el router.
+- **Default seguro: la opción no se puede prender sin la guarda.** `build_stock_router` levanta `ValueError` al construirse si `con_lotes=True` y falta `autorizar_lotes` **o** `usuario_actual` (sin sesión no hay a quién preguntarle). Se eligió fallar al construir y no «denegar siempre»: un 403 permanente sería indistinguible, desde afuera, de un permiso mal configurado.
+  Apagada (`con_lotes=False`, el default) no se pide nada y `autorizar_lotes` no se consulta: Contalibra y Restolibra no cambian, ni el cuerpo, ni el esquema OpenAPI, ni las respuestas.
+- **Sin migración**: no toca el esquema ni el ledger.
+- **Cambio de contrato.** Quien ya montaba `con_lotes=True` tiene que pasar la guarda. Ningún producto de la familia lo hacía (VentaLibra la tenía apagada; sólo los tests del motor la prendían, y se adaptaron).
+
+**Tests** (`tests/test_fefo_devolucion_transferencia_ajuste.py`, contra SQLite y PostgreSQL): sin la capacidad, ocho formas de pedido con lote (absoluto, entrada, sólo `expires_at`, `lot_code` vacío, modo inválido, producto sin marcar, producto inexistente) dan 403 y el ledger no cambia; con la capacidad, el conteo mueve el lote pedido y no toca los otros, y la entrada va a un lote nuevo;
+el ajuste sin lote (absoluto, entrada, salida; marcado y sin marcar) anda sin la capacidad y la guarda ni se llama; la guarda recibe el usuario de la sesión; la factory falla sin `autorizar_lotes` o sin `usuario_actual`, y apagada no pide nada. `tests/test_guardia_booleanos.py` pasa la guarda al prender la opción. Los tests de la guarda se ponen rojos sin ella.
+
+**No cubre.**
+- **El ajuste SIN lote de un producto marcado sigue yendo por FEFO** (ADR-018, A-4 PR-3): un delta negativo consume lotes, y eso lo puede hacer quien tenga el permiso del ajuste común. No es nuevo ni depende de `con_lotes`; la guarda es sobre elegir un lote en el cuerpo, no sobre el efecto de un ajuste común en los lotes.
+- La guarda es un solo permiso para «contar un lote» y «entrar a un lote». Si un producto quiere separarlas necesita otra costura.
+
+**Cómo se adopta.** Subir el pin. Quien quiera el ajuste con lote por API monta `OpcionesStock(con_lotes=True, autorizar_lotes=<su capacidad de mover lotes>)` y le pasa `usuario_actual` a `build_stock_router`. Quien no lo use no cambia nada.

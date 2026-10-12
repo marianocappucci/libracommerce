@@ -162,7 +162,18 @@ class OpcionesStock:
     #: las respuestas son los de siempre (Contalibra y Restolibra no cambian). **Sin esta opción, y con ella sin los
     #: campos**, un producto marcado igual sigue el lote: el ajuste que baja, la `salida` y la `merma` salen por FEFO
     #: (`stock.salida_manual`) y lo que sube o entra sin lote entra «sin lote».
+    #:
+    #: 🔴 **Prenderla exige `autorizar_lotes`** (y `usuario_actual` en la factory): `build_stock_router` FALLA al construirse
+    #: (`ValueError`) si falta alguno. Tocar un lote por el ajuste es lo mismo que `POST /api/vencimientos/asignar`, `/entrada` y
+    #: `/merma`, y el producto suele guardar esas tres con una capacidad más estricta que la del ajuste común: sin esta guarda,
+    #: quien sólo puede ajustar stock alteraría lotes por esta ruta.
     con_lotes: bool = False
+    #: Quién puede tocar lotes por el ajuste (con `con_lotes`): recibe el usuario de la sesión (`usuario_actual`) y devuelve si
+    #: puede. Se consulta **por cuerpo**: sólo si el pedido trae `lot_code` o `expires_at` (aunque sea vacío o en un modo que
+    #: después se rechace), y antes de leer la base; `False` es un 403 y no se escribe nada. El ajuste sin esos campos no la
+    #: consulta: sigue siendo el ajuste común, con la protección con la que el producto monte el router. (Mismo contrato que
+    #: `OpcionesCatalogo.autorizar_marcar_vence`.)
+    autorizar_lotes: Callable[[dict], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -869,6 +880,9 @@ def build_stock_router(
     un producto y el ajuste (fijar / entrada / salida / merma)."""
     abrir, usuario = _deps(usuario_actual, conexion)
     opciones = opciones or OpcionesStock()
+    if opciones.con_lotes and (opciones.autorizar_lotes is None or usuario_actual is None):
+        raise ValueError("build_stock_router con OpcionesStock(con_lotes=True) necesita autorizar_lotes y usuario_actual: "
+                         "no se exponen lotes por el ajuste sin saber quién los toca")
     con_merma = bool(opciones.motivos_merma)
     # Sin `con_lotes` el payload (y por eso el OpenAPI) es el de siempre.
     Payload = AjusteConLotePayload if opciones.con_lotes else AjustePayload
@@ -927,6 +941,10 @@ def build_stock_router(
         fecha = payload.fecha or vencimientos.hoy_argentina().isoformat()
         referencia = payload.referencia.strip() or "Ajuste manual"
         usuario_id = user.get("id")
+        # La guarda va por cuerpo y antes de leer nada: un pedido con lote de quien no puede tocar lotes es 403 sea cual sea el producto o el modo.
+        toca_lotes = opciones.con_lotes and (payload.lot_code is not None or payload.expires_at is not None)
+        if toca_lotes and not opciones.autorizar_lotes(user or {}):
+            raise HTTPException(403, "No tenés permiso para tocar lotes: el ajuste con lote o vencimiento es de quien puede mover lotes.")
         # Sin `por_deposito` el ajuste es el de siempre, aunque el payload traiga el campo.
         deposito_id = payload.deposito_id if opciones.por_deposito else None
         variant_id = payload.variant_id if opciones.por_deposito else None
