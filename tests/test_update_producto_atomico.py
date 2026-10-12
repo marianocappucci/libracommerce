@@ -13,6 +13,7 @@ import threading
 
 import pytest
 import test_vencimientos as _vto
+from registrador_de_prueba import registrador_de_prueba
 
 from libracommerce.db.auditoria import RepositorioAuditado
 from libracommerce.db.repository import SqliteCommerceRepository, repositorio_de, usar_fabrica_de_repositorio
@@ -54,7 +55,7 @@ def con_auditoria(abrir_vto):
     with abrir_vto() as conn:
         conn.execute(_LOG)
         conn.commit()
-    usar_fabrica_de_repositorio(lambda conn: RepositorioAuditado(SqliteCommerceRepository(conn), conn, usuario=lambda: "ana"))
+    usar_fabrica_de_repositorio(lambda conn: RepositorioAuditado(SqliteCommerceRepository(conn), conn, registrador_de_prueba()))
     try:
         yield abrir_vto
     finally:
@@ -75,7 +76,7 @@ def _foto(abrir, pid):
 # ═══════════════════════════════════════════════════ (1) transaction() en las dos implementaciones
 
 
-@pytest.mark.parametrize("envolver", [lambda repo, conn: repo, lambda repo, conn: RepositorioAuditado(repo, conn)], ids=["SqliteCommerceRepository", "RepositorioAuditado"])
+@pytest.mark.parametrize("envolver", [lambda repo, conn: repo, lambda repo, conn: RepositorioAuditado(repo, conn, registrador_de_prueba())], ids=["SqliteCommerceRepository", "RepositorioAuditado"])
 def test_dentro_de_la_transaccion_ninguna_escritura_confirma_y_al_salir_confirma_una_vez(abrir_vto, envolver):
     with abrir_vto() as real:
         real.execute(_LOG)

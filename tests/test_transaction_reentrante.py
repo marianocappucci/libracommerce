@@ -13,6 +13,7 @@ import threading
 import pytest
 import test_update_producto_atomico as _atomico
 import test_vencimientos as _vto
+from registrador_de_prueba import registrador_de_prueba
 
 from libracommerce.db import repository as _repository
 from libracommerce.db.auditoria import RepositorioAuditado
@@ -55,7 +56,7 @@ def _barcode(repo, pid, codigo):
 # ═══════════════════════════════════════════════════ El mismo repositorio, anidado
 
 
-@pytest.mark.parametrize("envolver", [lambda repo, conn: repo, lambda repo, conn: RepositorioAuditado(repo, conn)], ids=["SqliteCommerceRepository", "RepositorioAuditado"])
+@pytest.mark.parametrize("envolver", [lambda repo, conn: repo, lambda repo, conn: RepositorioAuditado(repo, conn, registrador_de_prueba())], ids=["SqliteCommerceRepository", "RepositorioAuditado"])
 def test_anidar_transaction_en_el_mismo_repositorio_no_levanta_y_confirma_una_vez(abrir_vto, envolver):
     with abrir_vto() as real:
         real.execute(_LOG)
@@ -288,8 +289,8 @@ def test_con_auditoria_ninguna_escritura_confirma_en_ningun_nivel_y_se_confirma_
         real.commit()
         pid = _crear(real, "Yerba", "111")
         conn = _Cuenta(real)
-        exterior = RepositorioAuditado(SqliteCommerceRepository(conn), conn, usuario=lambda: "ana")
-        interior = RepositorioAuditado(SqliteCommerceRepository(conn), conn, usuario=lambda: "ana")   # otra instancia, como el `repositorio_de(conn)` de `update_producto`
+        exterior = RepositorioAuditado(SqliteCommerceRepository(conn), conn, registrador_de_prueba())
+        interior = RepositorioAuditado(SqliteCommerceRepository(conn), conn, registrador_de_prueba())   # otra instancia, como el `repositorio_de(conn)` de `update_producto`
         item = exterior.get_catalog_item(pid)
         antes = conn.commits
         with exterior.transaction():
@@ -310,7 +311,7 @@ def test_con_auditoria_la_fila_de_una_interior_que_se_revierte_se_revierte_con_e
         real.commit()
         pid = _crear(real, "Yerba", "111")
     with abrir_vto() as conn:
-        repo = RepositorioAuditado(SqliteCommerceRepository(conn), conn, usuario=lambda: "ana")
+        repo = RepositorioAuditado(SqliteCommerceRepository(conn), conn, registrador_de_prueba())
         antes = len(_log(abrir_vto))
         with repo.transaction():
             _barcode(repo, pid, "EXT")

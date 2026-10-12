@@ -37,7 +37,8 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
 - **`db/`** — un adaptador de persistencia concreto: `repository`
   (`SqliteCommerceRepository`), `schema` (`init_schema`), `migrations` (la cadena
   numerada `_migration_0001…0011`, **congelada** desde P9-M0: ver "Migraciones") y
-  `auditoria` (`RepositorioAuditado`, `ActividadRepository`).
+  `auditoria` (`RepositorioAuditado`, que le pasa un `Cambio` a un registrador —el de
+  `libraauth`, ADR-050—, y `ActividadRepository`).
 - **`migrations/`** — la cadena de Alembic del motor, adentro del paquete para
   viajar en el wheel; se aplica con `libracommerce-migrar` (`migrar.py`).
 - **`erp/`** (extra `[erp]`) — los casos de uso comerciales: `catalogo` (productos,
