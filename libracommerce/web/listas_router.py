@@ -13,6 +13,8 @@ Remitos, que tienen cada uno su gate).
 - `build_quiebres_router`: quiebres por cantidad y precio efectivo por
   cantidad. Comparte el prefijo `/api/listas-precio`; sus rutas no chocan con
   las de arriba. Restolibra puede montarlo el día que venda por volumen.
+  `POST /{lista_id}/precios` (ADR-048, 2026-10-12) resuelve un carrito entero
+  con el quiebre contado por producto; es aditivo: `GET /precio` no cambia.
 - `build_buscar_productos_router`: `GET /productos/buscar` (sin `/api`, es
   la ruta histórica). Lo que variaba: Restolibra devuelve sólo vendibles y no
   filtra por `tipo`; Contalibra filtra por `tipo` para Facturas. Acá `tipo` se
@@ -48,7 +50,7 @@ from .catalogo_router import Conexion, _deps
 _fastapi()
 from fastapi import APIRouter, HTTPException  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
-from pydantic import BaseModel  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
 
 
 class ListaPrecioPayload(BaseModel):
@@ -93,6 +95,24 @@ class QuiebrePayload(BaseModel):
 
 class QuiebresPayload(BaseModel):
     quiebres: list[QuiebrePayload]
+
+
+class LineaPrecioPayload(BaseModel):
+    producto_id: int
+    #: Se valida contra `producto_id` (como en `GET /precio`), pero no cambia el precio: la variante no tiene uno propio.
+    variante_id: int | None = None
+    cantidad: float = 1
+
+    _no_son_booleanos = sin_booleanos("producto_id", "variante_id", "cantidad")
+
+
+class PreciosPorProductoPayload(BaseModel):
+    #: Un carrito de mostrador son decenas de líneas; el tope es para que un pedido no dispare miles de consultas.
+    lineas: list[LineaPrecioPayload] = Field(max_length=500)
+    sucursal_id: int | None = None
+    en: str = ""  # ISO datetime; vacío = ahora
+
+    _no_son_booleanos = sin_booleanos("sucursal_id")
 
 
 class PrecioVigentePayload(BaseModel):
@@ -257,6 +277,26 @@ def build_quiebres_router(
             except ValueError as e:
                 raise HTTPException(422, str(e)) from e
             return {"precio": precio}
+
+    @router.post("/{lista_id}/precios")
+    def precios_por_producto(lista_id: int, payload: PreciosPorProductoPayload):
+        """El precio de cada línea de un carrito con el quiebre por cantidad contado **por producto** (ADR-048):
+        las cantidades de todas las líneas del mismo producto se suman, con o sin variante. `GET /precio` sigue
+        igual y resuelve una sola línea por su cantidad. La respuesta trae una entrada por línea, en el mismo orden.
+        """
+        with abrir() as conn:
+            if lp.get_lista_precio(conn, lista_id) is None:
+                raise HTTPException(404, "lista de precios no encontrada")
+            try:
+                precios = lp.precios_por_producto(
+                    conn, lista_id,
+                    [{"producto_id": linea.producto_id, "variante_id": linea.variante_id, "cantidad": linea.cantidad}
+                     for linea in payload.lineas],
+                    sucursal_id=payload.sucursal_id, en=payload.en,
+                )
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
+            return {"precios": precios}
 
     return router
 

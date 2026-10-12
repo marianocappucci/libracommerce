@@ -1611,7 +1611,7 @@ venta completa (descuento, `sale_promotions`, líneas intactas con su variante) 
 **No cubre.**
 - **Quiebres por cantidad:** el precio por cantidad de la lista (ADR-042 de VentaLibra) sigue resolviéndose **por línea**, no por producto. Dos
   talles en dos líneas de a una unidad no suman para un quiebre de 2; un producto sin variantes escaneado dos veces tampoco. Es el comportamiento
-  de siempre y cambiarlo toca los productos sin variantes.
+  de siempre y cambiarlo toca los productos sin variantes. **Resuelto en ADR-048.**
 - **Promociones por variante, por categoría o por porcentaje:** no existen.
 
 ## ADR-046 — «Recibir mercadería» es idempotente: `POST /api/purchase-receipts/recibir` con `clave_operacion` (revisión 0006, 2026-10-11)
@@ -1680,3 +1680,29 @@ el ajuste sin lote (absoluto, entrada, salida; marcado y sin marcar) anda sin la
 - La guarda es un solo permiso para «contar un lote» y «entrar a un lote». Si un producto quiere separarlas necesita otra costura.
 
 **Cómo se adopta.** Subir el pin. Quien quiera el ajuste con lote por API monta `OpcionesStock(con_lotes=True, autorizar_lotes=<su capacidad de mover lotes>)` y le pasa `usuario_actual` a `build_stock_router`. Quien no lo use no cambia nada.
+
+## ADR-048 — El quiebre por cantidad cuenta por producto: `POST /api/listas-precio/{id}/precios` (2026-10-12)
+
+**Problema.** El precio por cantidad de la lista (`item_prices.min_quantity`) se resolvía **por línea** (`GET /api/listas-precio/{id}/precio`): dos talles de una remera, de a una unidad, no llegaban a un quiebre de 2, y un producto sin variantes escaneado dos veces en dos líneas tampoco. Las promociones «llevá N pagá M» ya agrupaban por `producto_id` (ADR-045), así que el mismo carrito tenía dos reglas distintas para «cuántas unidades llevó». Es lo que ADR-045 dejó anotado en «No cubre».
+
+**Qué ya existía** (se miró antes de elegir).
+- `resolve_price` (`db/repository.py`) ya elige el quiebre más alto aplicable a **una cantidad**, con vigencia (`valid_from`/`valid_until`), sucursal y desempate por el más reciente. No hace falta tocarlo: lo que faltaba era **qué cantidad se le pasa**.
+- `erp.listas_precio.precio_vigente` ya valida la variante contra el producto y pasa `en` a hora local (`a_hora_local`); se reusa tal cual.
+- `erp.promociones.calcular` ya agrupa por `producto_id` y suma las cantidades de las líneas con y sin variante. Es la regla que se alinea.
+- **El motor NO recalcula el precio de la venta.** `POST /api/ventas` (`web/ventas_router.crear`, `erp/ventas.crear_venta_directa`) guarda el `precio` que manda el cliente en cada línea (`max(0, precio)`), y sólo recalcula las promociones, a partir de esos precios. El que decide el precio es el cliente (el POS), el mismo trato que ya tenía el quiebre por línea. Este ADR **no** cambia eso (ver «No cubre»): el motor ofrece la cuenta bien hecha y el POS la pide.
+
+**Decisión.**
+- **Función del motor `erp.listas_precio.precios_por_producto(conn, lista_id, lineas, *, sucursal_id, en)`**: dadas las líneas `[{producto_id, variante_id, cantidad}]`, suma las cantidades **por `producto_id`** (con o sin variante, en `Decimal`) y resuelve **una vez por producto** con ese total (`resolve_price`). Devuelve una entrada por línea, **en el mismo orden**: `{producto_id, variante_id, cantidad_producto, precio}`. Un mismo momento (`en`) y una misma sucursal para todo el carrito.
+- **Ruta `POST /api/listas-precio/{lista_id}/precios`** en `build_quiebres_router`, junto a `GET /precio`. Cuerpo `{lineas: [...], sucursal_id?, en?}`; respuesta `{precios: [...]}`. Es un POST por el cuerpo, **no escribe nada**. Una lista inexistente es 404; una variante que no es del producto, un `en` que no es fecha o más de 500 líneas, 422; los campos numéricos rechazan booleanos (ADR-027).
+- **`GET /precio` no cambia**: resuelve **una línea por su cantidad**, como siempre (lo usan Contalibra para re-cotizar un renglón de presupuesto y los tests de quiebres). El quiebre por producto es una **pregunta distinta** («¿a cuánto va cada línea de este carrito?») y por eso es una ruta aparte, no un parámetro más del GET.
+- **Una cantidad que no es positiva no suma** (igual que en `promociones.calcular`): la línea se cotiza al total que junta el producto, o al precio base si no junta nada. La variante **no cambia el precio** (no tiene precio propio, ADR-045): se valida y se devuelve, nada más.
+- **Productos distintos no se suman**, aunque tengan el mismo quiebre. Sin migración, sin cambio de esquema.
+
+**Tests** (`tests/test_quiebre_por_producto.py`, contra SQLite y PostgreSQL): dos variantes de a una unidad con un quiebre de 2 dan el precio del quiebre; un producto sin variantes en dos líneas, igual; una sola unidad no llega; productos distintos no se suman (solos y mezclados); la suma de cantidades distintas contra un quiebre de 5; varios quiebres sobre el total; la suma en decimal (0,1 + 0,2 contra un quiebre de 0,3); cantidades 0 y negativas; producto sin precio en la lista; vigencia (`en` pasado, y con zona `...Z` convertido a hora de Argentina) y precio por sucursal; variante ajena, lista inexistente, `en` inválido, booleanos y tope de líneas; y que `GET /precio` siga resolviendo por línea. Los de la suma se ponen rojos si `precios_por_producto` resuelve cada línea por su cantidad.
+
+**No cubre.**
+- **El servidor no valida el precio de la línea.** `POST /api/ventas` confía en el `precio` que manda el cliente, con el quiebre por línea o por producto. Si un día se quiere que el motor recalcule al confirmar, es otra decisión (cambia el contrato de la venta, y el POS offline manda el suyo).
+- **Contalibra (mayorista) no cambia**: sigue cotizando cada renglón de presupuesto con `GET /precio`, por su cantidad. La ruta nueva queda montada ahí (viaja en `build_quiebres_router`, detrás del add-on `mayorista`) y sin uso. Si el humano quiere el mismo criterio en presupuestos, el motor ya lo tiene.
+- Las líneas con precio fijado por fuera de la lista (la etiqueta de la balanza) las resuelve el producto: el motor no sabe qué línea vino de una balanza, así que el POS las cuenta para el total pero no las reprecia.
+
+**Cómo se adopta.** Cortar tag y subir el pin en los productos que lo quieran. Quien monta `build_quiebres_router` recibe la ruta nueva; si la gatea por ruta (VentaLibra, `requiere_segun_ruta`) tiene que decidir el permiso de `POST /{lista_id}/precios`: por defecto cae en el más estricto, y el POS lo necesita con el de **leer** precios.

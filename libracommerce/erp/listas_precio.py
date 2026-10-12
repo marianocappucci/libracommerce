@@ -249,15 +249,66 @@ def precio_vigente(conn, item_id: int, *, lista_id: int | None = None, cantidad:
     `en` ni `variante_id` resuelve exactamente lo mismo que
     `resolver_precio_por_cantidad` (misma llamada de fondo, con `branch_id` y
     `at` en None)."""
-    if variante_id is not None:
-        variante = repositorio_de(conn).get_item_variant(variante_id)
-        if variante is None or variante.item_id != item_id:
-            raise ValueError(f"la variante {variante_id} no pertenece al producto {item_id}")
+    _exigir_variante_del_producto(conn, item_id, variante_id)
     momento = a_hora_local(datetime.fromisoformat(en)) if en else None
     precio = repositorio_de(conn).resolve_price(
         item_id, price_list_id=lista_id, quantity=Decimal(str(cantidad)),
         at=momento, branch_id=sucursal_id,
     )
+    return float(precio) if precio is not None else None
+
+
+def _exigir_variante_del_producto(conn, item_id: int, variante_id: int | None) -> None:
+    if variante_id is not None:
+        variante = repositorio_de(conn).get_item_variant(variante_id)
+        if variante is None or variante.item_id != item_id:
+            raise ValueError(f"la variante {variante_id} no pertenece al producto {item_id}")
+
+
+def precios_por_producto(conn, lista_id: int, lineas: list[dict], *,
+                         sucursal_id: int | None = None, en: str = "") -> list[dict]:
+    """El precio de cada línea de un carrito, con el quiebre por cantidad contado **por producto**
+    (ADR-048): se suman las cantidades de TODAS las líneas del mismo `producto_id`, con o sin
+    variante, y cada una se cobra al precio que corresponde a ese total. Es la misma regla con la
+    que `erp.promociones.calcular` agrupa para «llevá N pagá M» (ADR-045).
+
+    `lineas` es `[{producto_id, variante_id, cantidad}]` (`variante_id` puede faltar). Devuelve una
+    entrada por línea, **en el mismo orden**, con `{producto_id, variante_id, cantidad_producto,
+    precio}`: `cantidad_producto` es el total del producto en el carrito (lo que decidió el quiebre)
+    y `precio` es `None` si el producto no tiene precio en la lista. Vigencia (`en`) y sucursal se
+    resuelven igual que en `precio_vigente`: un mismo momento y una misma sucursal para todo el
+    carrito. Una cantidad que no es positiva no suma (como en las promociones): una línea así se
+    cotiza al precio de lo que el carrito junta de ese producto, o al base si no junta nada.
+
+    Raises:
+        ValueError: una variante que no es del producto de su línea, o un `en` que no es una fecha.
+    """
+    momento = a_hora_local(datetime.fromisoformat(en)) if en else None
+    juntas: dict[int, Decimal] = {}
+    for linea in lineas:
+        _exigir_variante_del_producto(conn, linea["producto_id"], linea.get("variante_id"))
+        cantidad = Decimal(str(linea["cantidad"]))
+        if cantidad > 0:
+            juntas[linea["producto_id"]] = juntas.get(linea["producto_id"], Decimal(0)) + cantidad
+
+    repo = repositorio_de(conn)
+    precio_de: dict[int, float | None] = {}
+    resultado = []
+    for linea in lineas:
+        pid = linea["producto_id"]
+        total = juntas.get(pid, Decimal(0))  # un producto que no sumó nada se cotiza a cantidad 0: el precio base
+        if pid not in precio_de:
+            precio_de[pid] = _como_float(repo.resolve_price(
+                pid, price_list_id=lista_id, quantity=total, at=momento, branch_id=sucursal_id,
+            ))
+        resultado.append({
+            "producto_id": pid, "variante_id": linea.get("variante_id"),
+            "cantidad_producto": float(total), "precio": precio_de[pid],
+        })
+    return resultado
+
+
+def _como_float(precio: Decimal | None) -> float | None:
     return float(precio) if precio is not None else None
 
 
