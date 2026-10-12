@@ -6,9 +6,14 @@ Lo que fijan estos tests, en orden de lo que se rompe sin que se note:
    Es el test que sostiene todo lo demas: un log incompleto se ve exactamente
    igual que uno completo, asi que la unica defensa contra "alguien agrego un
    metodo y se olvido" es que el CI lo cace.
-2. Que el envoltorio no cambie lo que el repositorio devuelve.
-3. Que un secreto no termine escrito, y que igual quede rastro de que cambio.
+2. Que el envoltorio le pase al registrador el `Cambio` correcto (tabla, accion, id,
+   antes y despues) y no cambie lo que el repositorio devuelve.
+3. Que sin registrador no se construya: un wrapper que no audita sin avisar es el modo de
+   falla que este archivo existe para evitar.
 4. Que la interfaz de lectura sea la misma que espera `build_logs_router`.
+
+El FORMATO de la fila (secretos tapados, diff, etiqueta, usuario) ya no se define aca
+(ADR-050): vive en `libraauth.auditoria` y lo prueba `test_auditoria_formato_libraauth.py`.
 """
 import inspect
 import sqlite3
@@ -17,20 +22,25 @@ from datetime import datetime
 from decimal import Decimal
 
 import pytest
+from registrador_de_prueba import registrador_de_prueba
 
 from libracommerce.db.auditoria import (
     AUDITABLES,
     CREAR,
     EDITAR,
     NO_AUDITABLES,
-    OCULTO,
     ActividadRepository,
+    Cambio,
     RepositorioAuditado,
     entidades,
+    entidades_por_tabla,
+    etiqueta_de_tabla,
+    opciones_del_registrador,
+    resumir_colecciones,
 )
 from libracommerce.db.repository import SqliteCommerceRepository
 from libracommerce.db.schema import init_schema
-from libracommerce.domain.catalog import CatalogItem, CatalogItemType, PriceList, Unit
+from libracommerce.domain.catalog import CatalogItem, CatalogItemType, ItemCode, ItemCodeType, PriceList, Unit
 from libracommerce.domain.entities import Party, PartyType
 from libracommerce.domain.inventory import Location, StockMovement, StockMovementType
 
@@ -43,8 +53,14 @@ def conn() -> sqlite3.Connection:
 
 
 @pytest.fixture
-def repo(conn) -> RepositorioAuditado:
-    return RepositorioAuditado(SqliteCommerceRepository(conn), conn, usuario=lambda: "ana")
+def cambios() -> list[Cambio]:
+    """Los `Cambio` que recibio el registrador, en orden."""
+    return []
+
+
+@pytest.fixture
+def repo(conn, cambios) -> RepositorioAuditado:
+    return RepositorioAuditado(SqliteCommerceRepository(conn), conn, registrador_de_prueba(cambios))
 
 
 @pytest.fixture
@@ -102,40 +118,64 @@ def test_toda_escritura_esta_auditada():
     assert not fantasmas, f"declarados pero inexistentes: {sorted(fantasmas)}"
 
 
-# ── Que registre ──────────────────────────────────────────────────────────
+# ── Que le avise al registrador ───────────────────────────────────────────
 
-def test_un_alta_queda_registrada(repo, log):
-    _producto(repo)
+def test_toda_entrada_declarada_apunta_a_una_tabla_que_existe(conn):
+    """La `tabla` de cada `AUDITABLES` es la clave con la que el registrador resuelve la
+    entidad y su etiqueta: si se desalinea del schema, la fila sale sin entidad conocida."""
+    reales = {f[0] for f in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    tablas = [meta.tabla for meta in AUDITABLES.values()]
+    assert set(tablas) <= reales
+    assert len(tablas) == len(set(tablas)), "dos metodos auditan la misma tabla"
+    assert entidades_por_tabla() == {meta.tabla: meta.entidad for meta in AUDITABLES.values()}
+
+
+def test_un_alta_le_avisa_al_registrador(repo, log, cambios):
+    item = _producto(repo)
+
+    assert len(cambios) == 1
+    c = cambios[0]
+    assert (c.tabla, c.accion, c.id, c.antes) == ("catalog_items", CREAR, item.id, None)
+    assert c.despues["name"] == "Yerba 1kg"
 
     filas = log.listar()
-    assert len(filas) == 1
-    assert filas[0]["accion"] == CREAR
-    assert filas[0]["entidad"] == "producto"
+    assert (filas[0]["accion"], filas[0]["entidad"], filas[0]["usuario"]) == (CREAR, "producto", "ana")
     assert "Yerba 1kg" in filas[0]["descripcion"]
-    assert filas[0]["usuario"] == "ana"
 
 
-def test_una_edicion_guarda_el_antes_y_el_despues(repo, log):
+def test_una_edicion_lleva_el_antes_y_el_despues(repo, cambios):
     item = _producto(repo)
     repo.save_catalog_item(replace(item, name="Yerba 500g"))
 
-    edicion = [f for f in log.listar() if f["accion"] == EDITAR][0]
-    assert edicion["cambios"]["name"] == ["Yerba 1kg", "Yerba 500g"]
-    assert edicion["entidad_id"] == item.id
+    editar = [c for c in cambios if c.accion == EDITAR][0]
+    assert (editar.tabla, editar.id) == ("catalog_items", item.id)
+    assert (editar.antes["name"], editar.despues["name"]) == ("Yerba 1kg", "Yerba 500g")
+    # Las dos fotos son de la entidad entera: el diff lo arma el registrador, no este motor.
+    assert editar.antes.keys() == editar.despues.keys()
 
 
-def test_guardar_sin_cambiar_nada_no_inventa_un_diff(repo, log):
-    """No se descarta la fila —el motor no puede saber si el usuario apreto
-    guardar a proposito—, pero `cambios` tiene que quedar vacio en vez de
-    listar todos los campos."""
+def test_guardar_sin_cambiar_nada_igual_le_avisa_al_registrador(repo, cambios):
+    """El motor no puede saber si el usuario apreto guardar a proposito: avisa, y es el
+    registrador (el de `libraauth`) quien descarta la edicion que no cambio nada."""
     item = _producto(repo)
     repo.save_catalog_item(item)
 
-    edicion = [f for f in log.listar() if f["accion"] == EDITAR][0]
-    assert not edicion["cambios"]
+    editar = [c for c in cambios if c.accion == EDITAR][0]
+    assert editar.antes == editar.despues
 
 
-def test_el_ledger_de_stock_siempre_es_un_alta(repo, log):
+def test_una_edicion_sin_getter_llega_sin_antes(repo, cambios):
+    """`save_item_code` no tiene como leer el estado previo: el cambio llega con `antes=None`
+    y el registrador deja el hecho sin detalle."""
+    item = _producto(repo)
+    codigo = repo.save_item_code(ItemCode(None, item.id, ItemCodeType.BARCODE, "7790001"))
+    repo.save_item_code(replace(codigo, code="7790002"))
+
+    editar = [c for c in cambios if c.tabla == "item_codes" and c.accion == EDITAR][0]
+    assert editar.antes is None and editar.despues["code"] == "7790002"
+
+
+def test_el_ledger_de_stock_siempre_es_un_alta(repo, log, cambios):
     """Un movimiento de stock nunca se edita: se agrega otro que lo compensa.
     Registrar "editar" sobre un ledger seria mentir sobre lo que paso."""
     item = _producto(repo)
@@ -145,40 +185,54 @@ def test_el_ledger_de_stock_siempre_es_un_alta(repo, log):
         Decimal("10"), datetime(2026, 8, 5, 10, 0),
     ))
 
-    movimientos = [f for f in log.listar() if f["entidad"] == "movimiento de stock"]
-    assert len(movimientos) == 1
-    assert movimientos[0]["accion"] == CREAR
+    movimientos = [c for c in cambios if c.tabla == "stock_movements"]
+    assert [(c.accion, c.antes) for c in movimientos] == [(CREAR, None)]
+    assert len([f for f in log.listar() if f["entidad"] == "movimiento de stock"]) == 1
 
 
-def test_una_coleccion_anidada_se_resume_en_vez_de_volcarse(repo, log):
-    """El diff de una tupla de dataclasses no lo lee nadie. Lo que importa es
-    que el log diga que los items cambiaron, no que los imprima."""
+def test_una_coleccion_anidada_llega_como_tupla_y_se_resume_con_el_gancho(repo, cambios):
+    """El diff de una tupla de dataclasses no lo lee nadie: el registrador resume con
+    `resumir_colecciones`, que este motor entrega en `opciones_del_registrador()`."""
+    assert resumir_colecciones((1, 2, 3)) == "3 items"
+    assert resumir_colecciones([]) == "0 items"
+    assert resumir_colecciones("texto") == "texto"
+    assert opciones_del_registrador()["resumir"] is resumir_colecciones
+
     lista = repo.save_price_list(PriceList(None, "Mostrador"))
     repo.save_price_list(replace(lista, name="Mayorista"))
-
-    edicion = [f for f in log.listar() if f["accion"] == EDITAR][0]
-    assert edicion["cambios"]["name"] == ["Mostrador", "Mayorista"]
-
-
-# ── Secretos ──────────────────────────────────────────────────────────────
-
-def test_un_setting_secreto_deja_rastro_sin_el_valor(repo, log):
-    """Mismo criterio que `libraauth` v0.12.0: la fila se registra igual y lo
-    unico que se tapa es el valor. Un log que descarta la edicion entera no
-    oculta el secreto — oculta el hecho de que alguien lo cambio."""
-    repo.set_setting("api_key", "secreto-viejo")
-    repo.set_setting("api_key", "secreto-nuevo")
-
-    filas = [f for f in log.listar() if f["entidad"] == "configuracion"]
-    assert len(filas) == 2
-    assert filas[0]["cambios"] == {"api_key": [OCULTO, OCULTO]}
-    assert "secreto" not in str(filas)
+    editar = [c for c in cambios if c.tabla == "price_lists" and c.accion == EDITAR][0]
+    assert (editar.antes["name"], editar.despues["name"]) == ("Mostrador", "Mayorista")
 
 
-def test_guardar_el_mismo_setting_no_registra_nada(repo, log):
+def test_las_opciones_del_registrador_ignoran_created_at_y_etiquetan_por_tabla():
+    opciones = opciones_del_registrador()
+    assert opciones["columnas_ignoradas"] == {"created_at"}
+    assert opciones["etiqueta"] is etiqueta_de_tabla
+    assert etiqueta_de_tabla("parties", {"display_name": "Ana"}) == "Ana"
+    assert etiqueta_de_tabla("sales", {"number": "V-1"}) == "V-1"
+    assert etiqueta_de_tabla("item_prices", {"price": 10}) == ""   # conocida, sin etiqueta
+    assert etiqueta_de_tabla("commerce_settings", {"balanza_formato": "ean13"}) == "balanza_formato"
+    assert etiqueta_de_tabla("clients", {"name": "Ana"}) is None   # no es de este motor: la resuelve el registrador
+
+
+# ── Configuraciones ───────────────────────────────────────────────────────
+
+def test_un_setting_llega_como_alta_y_despues_como_edicion(repo, cambios):
+    repo.set_setting("balanza_formato", "ean13")
+    repo.set_setting("balanza_formato", "ean8")
+
+    alta, edicion = cambios
+    assert (alta.tabla, alta.accion, alta.antes, alta.despues) == (
+        "commerce_settings", CREAR, None, {"balanza_formato": "ean13"})
+    assert (edicion.accion, edicion.antes, edicion.despues) == (
+        EDITAR, {"balanza_formato": "ean13"}, {"balanza_formato": "ean8"})
+
+
+def test_guardar_el_mismo_setting_no_registra_nada(repo, log, cambios):
     repo.set_setting("balanza_formato", "ean13")
     repo.set_setting("balanza_formato", "ean13")
 
+    assert len(cambios) == 1
     assert len([f for f in log.listar() if f["entidad"] == "configuracion"]) == 1
 
 
@@ -196,19 +250,36 @@ def test_la_escritura_devuelve_lo_mismo_que_sin_envolver(conn):
     """Si el envoltorio se comiera el valor de retorno, el producto entero
     dejaria de funcionar — pero recien al usarlo, no al arrancar."""
     desnudo = SqliteCommerceRepository(conn)
-    envuelto = RepositorioAuditado(desnudo, conn)
+    envuelto = RepositorioAuditado(desnudo, conn, registrador_de_prueba())
 
     party = envuelto.save_party(Party(None, PartyType.PERSON, "Ana"))
     assert party.id is not None
     assert desnudo.get_party(party.id) == party
 
 
-def test_sin_usuario_la_fila_queda_a_nombre_del_sistema(conn, log):
-    """El caso de un script o una tarea programada, que escriben sin request."""
-    repo = RepositorioAuditado(SqliteCommerceRepository(conn), conn)
-    _producto(repo)
+def test_sin_registrador_no_se_construye(conn):
+    """Un wrapper que no audita sin avisar es el modo de falla que este archivo existe para
+    evitar; y un default seria una segunda copia del formato (ADR-050)."""
+    with pytest.raises(TypeError):
+        RepositorioAuditado(SqliteCommerceRepository(conn), conn)
+    with pytest.raises(TypeError, match="registrador"):
+        RepositorioAuditado(SqliteCommerceRepository(conn), conn, None)
 
-    assert log.listar()[0]["usuario"] == "Sistema"
+
+def test_el_parametro_usuario_de_antes_ya_no_existe(conn):
+    """El usuario lo resuelve el registrador (del ContextVar de libraauth). Pasar `usuario=`
+    como hasta v0.56 es un error ruidoso y no un usuario ignorado en silencio."""
+    with pytest.raises(TypeError):
+        RepositorioAuditado(SqliteCommerceRepository(conn), conn, registrador_de_prueba(), usuario=lambda: "x")
+
+
+def test_si_el_registrador_falla_la_excepcion_sube(conn):
+    def roto(conn, cambio):
+        raise RuntimeError("el log no se pudo escribir")
+
+    repo = RepositorioAuditado(SqliteCommerceRepository(conn), conn, roto)
+    with pytest.raises(RuntimeError, match="el log"):
+        _producto(repo)
 
 
 # ── La interfaz que espera el router del motor de auth ────────────────────

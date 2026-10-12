@@ -142,6 +142,11 @@ dev = [
     # v1.153.0 -> v1.154.0 (2026-10-12): `libracore.cuit.solo_digitos` y se retira `cc_resumen` (codigo muerto, nadie lo usaba). Sin migracion.
     # v1.154.0 -> v1.155.0 (2026-10-12): migracion 0024 retira cc_resumenes_enviados y clients.cc_resumen_* (ADR-042). Desplegar el producto ANTES de migrar.
     "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.155.0",
+    # SOLO PARA TESTS, como libracore: `tests/test_auditoria_formato_libraauth.py` compara
+    # las filas de `RepositorioAuditado` con las de `libraauth.auditoria.registrador_dbapi`
+    # (ADR-050). En runtime este motor no importa libraauth: el registrador lo pasa el producto.
+    # v0.49.0 (2026-10-12): `registrador_dbapi` y las piezas puras del formato (ADR-022).
+    "libraauth @ git+https://github.com/marianocappucci/libraauth.git@v0.49.0",
 ]
 offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@develop"]
 offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@develop"]
