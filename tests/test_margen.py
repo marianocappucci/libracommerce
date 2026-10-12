@@ -19,6 +19,9 @@ from libracommerce.db.repository import SqliteCommerceRepository
 from libracommerce.domain.catalog import CatalogItemType
 from libracommerce.domain.sales import Sale, SaleItem
 from libracommerce.erp import catalogo, margen, stock, ventas
+from libracommerce.erp.vencimientos import (
+    hoy_argentina,  # el «hoy» del motor (ADR-044): date.today() en un CI en UTC es mañana de 21 a 24 h
+)
 from libracommerce.usecases.sales import confirm_sale, return_sale_items
 from libracommerce.web.margen_router import build_margen_router
 
@@ -431,7 +434,7 @@ def test_sin_fechas_es_el_mes_en_curso(abrir_ventas):
     abrir = abrir_ventas
     with abrir() as conn:
         yerba = _producto(conn, "Yerba", 100.0, 60.0)
-    hoy = datetime.date.today()
+    hoy = hoy_argentina()
     _venta(abrir, [(yerba, "Yerba", 1, 100.0)], fecha=hoy.isoformat())
     _venta(abrir, [(yerba, "Yerba", 7, 100.0)], fecha=D1)  # de otro mes (2026-09 no es el mes de "hoy" si hoy no es septiembre)
     cuerpo = _cliente(abrir).get("/api/reportes/margen").json()

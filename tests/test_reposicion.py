@@ -23,6 +23,9 @@ from libracommerce.domain.catalog import CatalogItemType
 from libracommerce.domain.entities import Party, PartyType
 from libracommerce.domain.sales import Sale, SaleItem
 from libracommerce.erp import catalogo, compras, reposicion, reposicion_ordenes, stock, vencimientos, ventas
+from libracommerce.erp.vencimientos import (
+    hoy_argentina,  # el «hoy» del motor (ADR-044): date.today() en un CI en UTC es mañana de 21 a 24 h
+)
 from libracommerce.usecases.sales import confirm_sale
 from libracommerce.web.reposicion_router import build_reposicion_router
 
@@ -613,7 +616,7 @@ def _cliente(abrir) -> TestClient:
 
 def _yerba_de_hoy(abrir):
     """Como `_yerba_de_referencia`, pero contra la fecha real: el router usa el «hoy» del servidor."""
-    hoy = datetime.date.today()
+    hoy = hoy_argentina()
     with abrir() as conn:
         yerba = catalogo.create_producto(conn, "Yerba", precio_venta=100.0, precio_costo=60.0)
         stock.ajustar_stock(conn, yerba, 40.0, "inicial", fecha=(hoy - datetime.timedelta(days=60)).isoformat())
@@ -667,7 +670,7 @@ def test_export_csv(abrir_ventas):
     _orden(abrir, proveedor, [(_id_de(abrir, "Yerba"), 5)])
     r = _cliente(abrir).get("/api/reportes/reposicion/export")
     assert r.status_code == 200 and r.headers["content-type"].startswith("text/csv")
-    assert f'filename="reposicion_{datetime.date.today().isoformat()}.csv"' in r.headers["content-disposition"]
+    assert f'filename="reposicion_{hoy_argentina().isoformat()}.csv"' in r.headers["content-disposition"]
     lineas = r.text.splitlines()
     assert lineas[0] == ("producto_id,codigo,nombre,categoria,unidad,stock,vencido,en_camino,en_camino_sin_sucursal,"
                          "stock_minimo,unidades_vendidas,dias_con_stock,rotacion_diaria,cobertura_dias,sugerido,"

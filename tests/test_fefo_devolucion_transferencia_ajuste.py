@@ -1090,12 +1090,16 @@ def test_en_postgres_dos_ajustes_a_la_baja_del_mismo_marcado_no_consumen_dos_vec
 # ═══════════════════════════════════════════ HTTP: ajuste con lote ═══════
 
 
-def _app(abrir, *, avisos=False, con_lotes=False, merma=False, **kw) -> TestClient:
+def _app(abrir, *, avisos=False, con_lotes=False, merma=False, autorizar_lotes=None, usuario=_usuario, **kw) -> TestClient:
+    """`con_lotes` exige `autorizar_lotes` (ADR-047): por defecto lo autoriza todo, y los tests de la guarda pasan la suya.
+    `usuario` es la sesión del router de stock."""
+    if con_lotes and autorizar_lotes is None:
+        autorizar_lotes = lambda _u: True  # noqa: E731
     app = FastAPI()
     app.include_router(build_productos_router(conexion=abrir, usuario_actual=_usuario))
-    app.include_router(build_stock_router(conexion=abrir, usuario_actual=_usuario,
+    app.include_router(build_stock_router(conexion=abrir, usuario_actual=usuario,
                                           opciones=OpcionesStock(
-                                              por_deposito=True, con_lotes=con_lotes,
+                                              por_deposito=True, con_lotes=con_lotes, autorizar_lotes=autorizar_lotes,
                                               motivos_merma=("Rotura", "Vencimiento") if merma else ())))
     app.include_router(build_depositos_router(conexion=abrir, usuario_actual=_usuario))
     app.include_router(build_ventas_router(conexion=abrir, usuario_actual=_usuario,
@@ -1150,6 +1154,112 @@ def test_http_sin_la_opcion_el_esquema_y_las_respuestas_del_ajuste_son_los_de_si
     r1 = apagado.post(f"/api/stock/{marcado}/ajuste", json={"modo": "absoluto", "cantidad": 7, "fecha": "2026-09-12"})
     r2 = prendido.post(f"/api/stock/{marcado}/ajuste", json={"modo": "absoluto", "cantidad": 7, "fecha": "2026-09-12"})
     assert r1.status_code == r2.status_code == 200 and r1.content == r2.content
+
+
+# ── La guarda del ajuste con lote (ADR-047): `OpcionesStock.autorizar_lotes` ──
+
+DEPOSITO = {"id": 8, "username": "deposito", "rol": "deposito"}
+ENCARGADO = {"id": 9, "username": "encargado", "rol": "encargado"}
+SOLO_EL_ENCARGADO = lambda u: u.get("rol") == "encargado"  # noqa: E731
+
+
+def _como(rol: dict):
+    return lambda: rol
+
+
+def test_http_el_ajuste_con_lote_sin_la_capacidad_es_403_y_no_escribe_nada(abrir_fefo):
+    marcado = _producto(abrir_fefo)
+    comun = _producto(abrir_fefo, "Pan", lotes_=(), sin_lote=10, marcado=False)
+    dep = _principal(abrir_fefo)
+    sin_permiso = _app(abrir_fefo, con_lotes=True, autorizar_lotes=SOLO_EL_ENCARGADO, usuario=_como(DEPOSITO))
+    antes = _ledger(abrir_fefo)
+    casos = [
+        (marcado, {"modo": "absoluto", "cantidad": 3, "lot_code": "L2", "expires_at": "2026-11-01", "deposito_id": dep}),
+        (marcado, {"modo": "absoluto", "cantidad": 3, "lot_code": "L2"}),
+        (marcado, {"modo": "absoluto", "cantidad": 3, "expires_at": "2026-11-01"}),
+        (marcado, {"modo": "entrada", "cantidad": 3, "lot_code": "L9", "expires_at": "2027-01-01"}),   # lote nuevo
+        (marcado, {"modo": "absoluto", "cantidad": 3, "lot_code": ""}),                       # vacío también es «traer lote»
+        (marcado, {"modo": "salida", "cantidad": 1, "lot_code": "L1"}),                       # modo que después se rechazaría: 403 primero
+        (comun, {"modo": "absoluto", "cantidad": 5, "lot_code": "L1"}),                       # sin marcar: 403 y no 422
+        (99999, {"modo": "absoluto", "cantidad": 5, "lot_code": "L1"}),                       # inexistente: 403 y no 404
+    ]
+    for pid, cuerpo in casos:
+        r = sin_permiso.post(f"/api/stock/{pid}/ajuste", json={**cuerpo, "fecha": "2026-09-12"})
+        assert r.status_code == 403, (cuerpo, r.text)
+        assert "lotes" in r.json()["detail"]
+    assert _ledger(abrir_fefo) == antes
+
+
+def test_http_el_ajuste_con_lote_con_la_capacidad_mueve_el_lote_pedido(abrir_fefo):
+    pid = _producto(abrir_fefo)                                   # L1 6 (2026-10-05) y L2 4 (2026-11-01)
+    dep = _principal(abrir_fefo)
+    con_permiso = _app(abrir_fefo, con_lotes=True, autorizar_lotes=SOLO_EL_ENCARGADO, usuario=_como(ENCARGADO))
+    marca = _ultimo_id(abrir_fefo)
+    r = con_permiso.post(f"/api/stock/{pid}/ajuste", json={"modo": "absoluto", "cantidad": 1, "lot_code": "L2",
+                                                           "expires_at": "2026-11-01", "deposito_id": dep, "fecha": "2026-09-12"})
+    assert r.status_code == 200, r.text
+    assert _ajustes(abrir_fefo, marca) == [(-3.0, "L2", "2026-11-01", dep)]          # el conteo del lote L2: de 4 a 1
+    assert _saldos(abrir_fefo, pid) == {"L1": 6, "L2": 1}                              # y L1 no se tocó
+    marca = _ultimo_id(abrir_fefo)
+    r = con_permiso.post(f"/api/stock/{pid}/ajuste", json={"modo": "entrada", "cantidad": 5, "lot_code": "L3",
+                                                           "expires_at": "2027-01-01", "deposito_id": dep, "fecha": "2026-09-12"})
+    assert r.status_code == 200, r.text
+    assert _saldos(abrir_fefo, pid) == {"L1": 6, "L2": 1, "L3": 5}
+
+
+def test_http_el_ajuste_sin_lote_no_consulta_la_capacidad_y_es_el_de_siempre(abrir_fefo):
+    marcado = _producto(abrir_fefo)
+    comun = _producto(abrir_fefo, "Pan", lotes_=(), sin_lote=10, marcado=False)
+    consultas: list[dict] = []
+
+    def autorizar(u):
+        consultas.append(u)
+        return False
+
+    sin_permiso = _app(abrir_fefo, con_lotes=True, autorizar_lotes=autorizar, usuario=_como(DEPOSITO))
+    cuerpos = [
+        (marcado, {"modo": "absoluto", "cantidad": 7, "fecha": "2026-09-12"}),     # 10 -> 7: sale 3 por FEFO (L1)
+        (marcado, {"modo": "entrada", "cantidad": 2, "fecha": "2026-09-12"}),      # entra «sin lote»
+        (marcado, {"modo": "salida", "cantidad": 1, "fecha": "2026-09-12"}),       # FEFO
+        (comun, {"modo": "absoluto", "cantidad": 4, "fecha": "2026-09-12"}),
+        (comun, {"modo": "entrada", "cantidad": 2, "fecha": "2026-09-12"}),
+    ]
+    for pid, cuerpo in cuerpos:
+        r = sin_permiso.post(f"/api/stock/{pid}/ajuste", json=cuerpo)
+        assert r.status_code == 200, (cuerpo, r.text)
+        assert set(r.json()) == {"producto", "stock_actual"}                      # la respuesta de siempre
+    assert _saldos(abrir_fefo, marcado) == {"L1": 2, "L2": 4, None: 2}   # el conteo (-3) y la salida (-1) salen de L1 por FEFO; la entrada suma 2 «sin lote»
+    assert consultas == []                                                      # sin lote en el cuerpo, la guarda ni se llama
+
+
+def test_http_la_guarda_recibe_el_usuario_de_la_sesion(abrir_fefo):
+    pid = _producto(abrir_fefo)
+    vistos: list[dict] = []
+
+    def autorizar(u):
+        vistos.append(u)
+        return True
+
+    client = _app(abrir_fefo, con_lotes=True, autorizar_lotes=autorizar, usuario=_como(ENCARGADO))
+    r = client.post(f"/api/stock/{pid}/ajuste", json={"modo": "absoluto", "cantidad": 4, "lot_code": "L2",
+                                                      "expires_at": "2026-11-01", "fecha": "2026-09-12"})
+    assert r.status_code == 200, r.text
+    assert vistos == [ENCARGADO]
+
+
+def test_con_lotes_sin_autorizar_lotes_o_sin_usuario_la_factory_falla_al_construirse(abrir_fefo):
+    for opciones, kw in (
+        (OpcionesStock(con_lotes=True), {"usuario_actual": _usuario}),
+        (OpcionesStock(con_lotes=True, autorizar_lotes=lambda _u: True), {}),
+        (OpcionesStock(con_lotes=True), {}),
+    ):
+        with pytest.raises(ValueError, match="autorizar_lotes y usuario_actual"):
+            build_stock_router(conexion=abrir_fefo, opciones=opciones, **kw)
+    # Apagada no pide nada, ni siquiera con la guarda puesta (que no se consulta).
+    build_stock_router(conexion=abrir_fefo, opciones=OpcionesStock(por_deposito=True))
+    apagada = _app(abrir_fefo, autorizar_lotes=lambda _u: False)
+    esquema = apagada.get("/openapi.json").json()["components"]["schemas"]["AjustePayload"]
+    assert "lot_code" not in esquema["properties"]
 
 
 def test_http_la_transferencia_de_un_marcado_responde_lo_de_siempre(abrir_fefo):
