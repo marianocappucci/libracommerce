@@ -141,7 +141,8 @@ dev = [
     # v1.152.0 -> v1.153.0 (2026-10-10): sucursales contratadas y abono por unidad adicional (`libracore.limites` y `libracore.abono`, ADR-041). Sin dato de sucursales contratadas no limita nada; este producto no lo usa. Sin migracion.
     # v1.153.0 -> v1.154.0 (2026-10-12): `libracore.cuit.solo_digitos` y se retira `cc_resumen` (codigo muerto, nadie lo usaba). Sin migracion.
     # v1.154.0 -> v1.155.0 (2026-10-12): migracion 0024 retira cc_resumenes_enviados y clients.cc_resumen_* (ADR-042). Desplegar el producto ANTES de migrar.
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.155.0",
+    # v1.155.0 -> v1.157.0 (2026-10-12): `libracore.auditoria` (ADR-043): las escrituras de clients avisan a un registrador, apagado si el producto no lo configura. v1.156.0 es un tag erroneo, no usar. Sin migracion.
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.157.0",
     # SOLO PARA TESTS, como libracore: `tests/test_auditoria_formato_libraauth.py` compara
     # las filas de `RepositorioAuditado` con las de `libraauth.auditoria.registrador_dbapi`
     # (ADR-050). En runtime este motor no importa libraauth: el registrador lo pasa el producto.
