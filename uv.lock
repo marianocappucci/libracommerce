@@ -604,7 +604,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "libracore", marker = "extra == 'dev'", specifier = ">=1.125,<2" },
     { name = "libracore", marker = "extra == 'dev'", specifier = ">=1.137,<2" },
-    { name = "libracore", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libracore.git?rev=v1.153.0" },
+    { name = "libracore", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libracore.git?rev=v1.154.0" },
     { name = "libracore", marker = "extra == 'erp'", specifier = ">=1.137,<2" },
     { name = "libracore", marker = "extra == 'web'", specifier = ">=1.125,<2" },
     { name = "libracore", extras = ["migrations"], marker = "extra == 'dev'", specifier = ">=1.148,<2" },
@@ -626,8 +626,8 @@ provides-extras = ["dev", "erp", "migrations", "offline", "offline-server", "pla
 
 [[package]]
 name = "libracore"
-version = "1.153.0"
-source = { git = "https://github.com/marianocappucci/libracore.git?rev=v1.153.0#647cb2b62342b670d2b610e46e885e2f33b25024" }
+version = "1.154.0"
+source = { git = "https://github.com/marianocappucci/libracore.git?rev=v1.154.0#727e6b1bd321e2f5d4eec87ed7c6e9f1ff710705" }
 dependencies = [
     { name = "cryptography" },
     { name = "fastapi" },
