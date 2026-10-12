@@ -36,7 +36,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..erp import catalogo, claves, lotes, ventas
+from ..erp import catalogo, claves, lotes, precio_de_venta, ventas
 from ..erp.hooks import SIN_GANCHOS, Hooks
 from . import fastapi as _fastapi
 from ._validacion import sin_booleanos
@@ -44,6 +44,7 @@ from .catalogo_router import Conexion, _deps, _nadie
 
 _fastapi()
 from fastapi import APIRouter, Depends, HTTPException, Request  # noqa: E402
+from fastapi.responses import JSONResponse  # noqa: E402
 from libracore import medios_pago  # noqa: E402
 from libracore import pagos as acreditacion  # noqa: E402
 from libracore.db.caja import MEDIO_CUENTA_CORRIENTE  # noqa: E402
@@ -65,6 +66,11 @@ class ItemPayload(BaseModel):
     #: `None` es "sin variante", que es lo único que mandan Contalibra y
     #: Restolibra hoy.
     variante_id: int | None = None
+    #: El EAN-13 crudo de la etiqueta de balanza de la que salió la línea (ADR-049). Sólo lo lee `OpcionesVentas.validar_precios`:
+    #: el servidor la decodifica con el formato de balanza del comercio y valida la línea contra ella (por importe, el precio es
+    #: el de la etiqueta; por peso, la cantidad). `None` (el default, y lo único que mandan Contalibra y Restolibra) es una línea
+    #: común. Con la opción apagada se ignora: no cambia lo que se guarda.
+    etiqueta: str | None = Field(default=None, max_length=64)
 
     #: `true`/`false` no son un número (ADR-027): pydantic los convertiría en 1 y 0 (una cantidad, un precio o el producto 1).
     _no_son_booleanos = sin_booleanos("qty", "precio", "producto_id", "variante_id")
@@ -243,6 +249,16 @@ class OpcionesVentas:
     #: y la devolución de una venta ajena dan 404, como una que no existe. `None` (el default): todos ven todas, como hoy, y
     #: el listado ni resuelve la sesión. Las rutas con id de venta de OTROS routers se cubren con `build_guarda_de_venta`.
     solo_sus_turnos: Callable[[dict], bool] | None = None
+    #: El servidor VALIDA el precio de cada línea en vez de guardar el que manda el cliente (ADR-049). **Prendida**, antes de
+    #: escribir nada: cada línea tiene que llevar `producto_id` (si no, 422); el `descuento` manual del pedido tiene que ser 0
+    #: (422: el ahorro de las promociones lo calcula el servidor); y el `precio` de cada línea tiene que ser el que sale de la
+    #: lista predeterminada activa (`erp.listas_precio.precios_por_producto`, el quiebre cuenta por producto, ADR-048) o, sin
+    #: lista o sin precio en ella, el plano del producto, con un centavo de tolerancia. Si alguna difiere: **409** con
+    #: `{detail: {mensaje, codigo: "precios_distintos", precios: [{indice, producto_id, variante_id, enviado, esperado}]}}` y no se escribe
+    #: nada (ni venta, ni stock, ni caja); el POS re-precia y le avisa al cajero. Una línea con `etiqueta` de balanza se valida
+    #: contra ella (`erp.precio_de_venta`); una etiqueta que no vale es 422. **Apagada (el default):** el motor guarda el
+    #: `precio` del cliente, como hoy (Contalibra y Restolibra no cambian, byte a byte).
+    validar_precios: bool = False
 
 
 def build_guarda_de_venta(
@@ -297,6 +313,42 @@ def _agregar_avisos(conn, venta: dict | None, venta_id: int) -> None:
         venta["avisos"] = avisos
 
 
+def _rechazo_por_precios(abrir: Conexion, payload: VentaPayload) -> JSONResponse | None:
+    """`OpcionesVentas.validar_precios` (ADR-049): `None` si el servidor está de acuerdo con el precio de todas las líneas; si
+    no, el 409 que corta la venta ANTES de escribir nada. 422 (`HTTPException`) si el pedido está mal armado: descuento manual,
+    línea sin producto o etiqueta de balanza que no vale.
+
+    El 409 es una `JSONResponse` y no una `HTTPException` porque su `detail` es un objeto (`{mensaje, codigo, precios}`) y se
+    quiere tal cual en el cuerpo. **`detail` objeto y no `precios` al lado:** el `ApiError` del cliente del kit (`libra-ui`) sólo
+    conserva el `detail` (como `detailData`; su texto es el `mensaje`), igual que los Términos pendientes: un `precios` suelto
+    en la raíz del cuerpo no le llegaría a ninguna pantalla."""
+    if payload.descuento > 0:
+        raise HTTPException(
+            422, "Esta caja no admite un descuento manual: el ahorro de las promociones lo calcula el servidor.")
+    # Las mismas líneas que `crear` guarda (con nombre y cantidad), cada una con su posición en el pedido original: es la
+    # que el POS usa para saber a cuál corregir.
+    lineas = [
+        {"indice": n, "nombre": i.nombre.strip(), "producto_id": i.producto_id, "variante_id": i.variante_id,
+         "qty": i.qty, "precio": max(0.0, i.precio), "etiqueta": i.etiqueta}
+        for n, i in enumerate(payload.items) if i.nombre.strip() and i.qty > 0
+    ]
+    if any(not (math.isfinite(linea["qty"]) and math.isfinite(linea["precio"])) for linea in lineas):
+        raise HTTPException(422, "La cantidad y el precio de cada ítem tienen que ser números finitos.")
+    with abrir() as conn:
+        try:
+            distintos = precio_de_venta.validar_precios(conn, lineas)
+        except ValueError as exc:  # LineaSinProducto, EtiquetaInvalida y la variante que no es del producto
+            raise HTTPException(422, str(exc)) from None
+    if not distintos:
+        return None
+    n = len(distintos)
+    return JSONResponse(status_code=409, content={"detail": {
+        "mensaje": f"Cambiaron los precios de {n} {'producto' if n == 1 else 'productos'}: revisá el total y volvé a cobrar.",
+        "codigo": "precios_distintos",
+        "precios": distintos,
+    }})
+
+
 def build_ventas_router(
     *,
     conexion: Conexion | None = None,
@@ -348,6 +400,9 @@ def build_ventas_router(
         ]
         if not items:
             raise HTTPException(422, "Debe agregar al menos un ítem.")
+
+        if opciones.validar_precios and (rechazo := _rechazo_por_precios(abrir, payload)) is not None:
+            return rechazo
 
         subtotal = round(sum(i["subtotal"] for i in items), 2)
         aplicadas: list[dict] | None = None
