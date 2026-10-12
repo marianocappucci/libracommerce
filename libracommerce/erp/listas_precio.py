@@ -59,6 +59,17 @@ def get_all_listas_precio(conn, solo_activas: bool = False) -> list[dict]:
     return [_lista_dict(r) for r in rows]
 
 
+def lista_predeterminada_activa(conn) -> int | None:
+    """El id de la lista marcada como predeterminada **y activa**, o `None` si no hay ninguna.
+
+    Es la misma que elige `resolve_price` cuando no recibe una lista (`is_default = 1 AND active = 1`) y la que el
+    POS de VentaLibra usa para cotizar el carrito; `erp.precio_de_venta` la usa para validar el precio de una venta.
+    `set_lista_precio_default` ya no deja marcar una inactiva, pero una lista default que después se desactiva sí
+    puede existir: ésa no cuenta."""
+    row = conn.execute("SELECT id FROM price_lists WHERE is_default = 1 AND active = 1").fetchone()
+    return row[0] if row else None
+
+
 def get_lista_de_cliente(conn, cliente_id: int) -> int | None:
     """El `lista_id` asignado al cliente, o `None` si no tiene ninguno.
 
