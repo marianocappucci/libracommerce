@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+from ..domain.inventory import DepositoInexistente
 from ..erp import claves, compras
 from . import fastapi as _fastapi
 from ._validacion import sin_booleanos
@@ -245,6 +246,8 @@ def build_compras_router(*, conexion: Conexion | None = None,
                 raise HTTPException(404, "purchase receipt not found") from e
             except compras.EstadoInvalido as e:
                 raise HTTPException(409, str(e)) from e
+            except DepositoInexistente as e:
+                raise HTTPException(422, str(e)) from e
             return _con_proveedor(conn, recepcion)
 
     return router

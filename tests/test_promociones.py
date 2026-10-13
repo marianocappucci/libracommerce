@@ -369,16 +369,11 @@ def test_una_cota_mal_escrita_tambien_se_rechaza_al_actualizar(client):
 
 
 def test_sin_en_ahora_es_la_hora_de_argentina_aunque_el_proceso_este_en_utc(client, monkeypatch):
-    """Un servidor en UTC a las 22:00Z (19:00 en Argentina) está DENTRO de una promo de 18 a 20 hs."""
-    from libracommerce.erp import promociones as modulo
+    """Un servidor en UTC a las 22:00Z (19:00 en Argentina) está DENTRO de una promo de 18 a 20 hs. El reloj es el del motor
+    (`hora.ahora_utc`, ADR-052)."""
+    from libracommerce import hora
 
-    class _RelojEnUtc(datetime.datetime):
-        @classmethod
-        def now(cls, tz=None):
-            instante = datetime.datetime(2026, 9, 28, 22, 0, 0, tzinfo=datetime.UTC)
-            return instante.astimezone(tz) if tz else instante.replace(tzinfo=None)
-
-    monkeypatch.setattr(modulo, "datetime", _RelojEnUtc)
+    monkeypatch.setattr(hora, "ahora_utc", lambda: datetime.datetime(2026, 9, 28, 22, 0, 0, tzinfo=datetime.UTC))
     pid = _producto(client, "Alfajor")
     _nxm(client, pid, desde="2026-09-28T18:00:00", hasta="2026-09-28T20:00:00")
     assert _calcular(client, [_linea(pid, 2)])["ahorro"] == 100.0

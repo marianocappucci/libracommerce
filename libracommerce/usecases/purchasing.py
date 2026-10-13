@@ -13,6 +13,7 @@ from decimal import Decimal
 from libracommerce.domain.inventory import StockMovement, StockMovementType
 from libracommerce.domain.purchasing import PurchaseOrderStatus, PurchaseReceipt, PurchaseReceiptStatus
 from libracommerce.ports.persistence import CommerceRepository
+from libracommerce.usecases.inventory import verificar_deposito
 
 
 def confirm_purchase_receipt(
@@ -24,11 +25,15 @@ def confirm_purchase_receipt(
     Cost update uses the received unit_cost as the new default_cost — a
     last-cost strategy, not a weighted average; nothing in the
     architecture spec calls for the latter.
+
+    `location_id` tiene que existir y estar activo (`DepositoInexistente`,
+    ADR-051), y se valida antes de guardar nada.
     """
     if receipt.status != PurchaseReceiptStatus.DRAFT:
         raise ValueError(
             f"Solo se puede confirmar una recepcion en estado draft (actual: {receipt.status})"
         )
+    verificar_deposito(repo, location_id)
     saved = repo.save_purchase_receipt(
         replace(receipt, status=PurchaseReceiptStatus.CONFIRMED, received_at=occurred_at)
     )

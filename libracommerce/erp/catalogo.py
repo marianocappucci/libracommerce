@@ -40,7 +40,12 @@ from libracommerce.domain.catalog import (
     ItemVariant,
     Unit,
 )
-from libracommerce.domain.inventory import Location
+from libracommerce.domain.inventory import (
+    DepositoInexistente,
+    Location,
+    exigir_default_activo,
+    exigir_deposito_activo,
+)
 from libracommerce.domain.scale import ScaleFormat, ScaleValueKind, parse_scale_barcode
 from libracommerce.usecases.inventory import StockInsuficienteError, TramoDeTransferencia, transfer_stock
 
@@ -127,25 +132,14 @@ def _codigo_repetido_como_error_de_dominio(codigo: str):
 # ── Depósitos ────────────────────────────────────────────────────────────
 
 
-class DepositoInexistente(ValueError):
-    """Un `deposito_id` (venta, devolución o transferencia) no existe o no
-    está activo en `locations`.
-
-    Se valida con `validar_deposito` —una sola función, ANTES de escribir
-    nada, en `erp.ventas.registrar_venta`/`devolver_items` y en
-    `transferir_stock` (origen Y destino)—: un depósito inventado no es un
-    conflicto con otra operación simultánea, es un dato del pedido que nunca
-    iba a dejar de fallar. Hereda de `ValueError` para que el 422 de
-    `web/ventas_router.py` y `web/catalogo_router.py` sea el mismo mecanismo
-    con el que ya rebotan `delete_deposito`/`update_deposito`.
-
-    🔴 **`add_movimiento_stock` (y por lo tanto `descontar_stock_venta`,
-    `transfer_stock`) NO valida esto por su cuenta** —confiar en la FK de
-    `stock_movements.location_id` dejaría pasar escrituras previas (la pata de
-    salida de una transferencia, por ejemplo) antes de reventar, y ese error
-    de FK no lo atrapa ningún `except ValueError` (sale como 500). Por eso la
-    validación va temprano, en cada caller que recibe un `deposito_id` de
-    afuera."""
+# `DepositoInexistente` (un `deposito_id` que no existe o no está activo) vive en `domain.inventory` desde ADR-051, porque lo levantan
+# también el repositorio y los casos de uso, que no pueden importar esta capa. Se reexporta con el mismo nombre
+# (`catalogo.DepositoInexistente`, `ventas.DepositoInexistente`): es la misma clase.
+#
+# Se valida con `validar_deposito` —una sola función, ANTES de escribir nada— en `erp.ventas.registrar_venta`/`devolver_items`, en
+# `transferir_stock` (origen Y destino) y, desde ADR-051, adentro de `erp.stock.add_movimiento_stock` (y por lo tanto de
+# `descontar_stock_venta`, `ajustar_stock` y la recepción): un movimiento hacia o desde un depósito inactivo ya no llega al ledger.
+# La validación temprana de cada caller sigue valiendo: rebota antes de escribir el resto de la operación.
 
 
 def _deposito_dict(row) -> dict:
@@ -183,22 +177,23 @@ def validar_deposito(conn, deposito_id: int | None) -> None:
     resuelve a un depósito existente y activo. `None` no se valida — es "no
     se especificó", el comportamiento de siempre.
 
-    Compartida por `erp.ventas.registrar_venta`/`devolver_items` y por
-    `transferir_stock` de este módulo: un solo criterio, un solo lugar donde
-    cambiarlo."""
+    Compartida por `erp.ventas.registrar_venta`/`devolver_items`, por
+    `transferir_stock` de este módulo y por `erp.stock.add_movimiento_stock`:
+    un solo criterio, y es el del dominio (`exigir_deposito_activo`, que usan
+    también los casos de uso de `usecases/`)."""
     if deposito_id is None:
         return
-    deposito = get_deposito(conn, deposito_id)
-    if deposito is None or not deposito["activo"]:
-        raise DepositoInexistente(
-            f"El depósito {deposito_id} no existe o no está activo."
-        )
+    exigir_deposito_activo(repositorio_de(conn).get_location(deposito_id), deposito_id)
 
 
 def get_default_deposito_id(conn) -> int | None:
-    row = conn.execute("SELECT id FROM locations WHERE is_default=1 LIMIT 1").fetchone()
+    """El depósito donde cae un movimiento sin `deposito_id`: el marcado por defecto, y si no hay ninguno (o el marcado está inactivo)
+    el activo de menor id. **Nunca un depósito inactivo** (ADR-051): desde que `save_location` no deja guardar un default inactivo
+    no debería pasar, pero una base de antes de esa regla puede tenerlo (LibraDesk desactivaba el default por `save_location`), y
+    cargarle stock en silencio a un depósito dado de baja era justo el defecto. `None` si no hay ningún depósito activo."""
+    row = conn.execute("SELECT id FROM locations WHERE is_default=1 AND active=1 LIMIT 1").fetchone()
     if not row:
-        row = conn.execute("SELECT id FROM locations ORDER BY id LIMIT 1").fetchone()
+        row = conn.execute("SELECT id FROM locations WHERE active=1 ORDER BY id LIMIT 1").fetchone()
     return row[0] if row else None
 
 
@@ -223,11 +218,12 @@ def create_deposito(
 
 def update_deposito(conn, did: int, nombre: str, descripcion: str, activo: int):
     """🔴 **No se puede desactivar el depósito por defecto** — levanta
-    `ValueError` (mismo mecanismo que `delete_deposito`, que ya rechaza
-    borrarlo). Sin esta guarda, `stock.py::add_movimiento_stock` seguía
-    resolviendo el default vía `get_default_deposito_id` —que no mira
-    `active`— y toda venta sin `deposito_id` explícito le seguía cargando
-    stock a un depósito que la pantalla mostraba como dado de baja.
+    `DepositoPorDefectoInactivo` (un `ValueError`, como `delete_deposito`, que
+    ya rechaza borrarlo). La regla es del dominio (`exigir_default_activo`) y
+    `repo.save_location` la aplica también por su cuenta (ADR-051): acá se
+    llama antes para que el rechazo no dependa del orden de las demás guardas.
+    Sin ella, toda venta sin `deposito_id` explícito le seguía cargando stock a
+    un depósito que la pantalla mostraba como dado de baja.
 
     🔴 **Tampoco el último depósito activo de una sucursal activa** (`_verificar_no_es_el_ultimo_deposito`):
     toda sucursal declara como mínimo un depósito donde vive su stock. Si el que se desactiva era el
@@ -236,21 +232,16 @@ def update_deposito(conn, did: int, nombre: str, descripcion: str, activo: int):
     location = repo.get_location(did)
     if location is None:
         return
-    if location.is_default and not activo:
-        raise ValueError(
-            "No se puede desactivar el depósito por defecto: primero hay que "
-            "marcar otro depósito como default."
-        )
+    nuevo = Location(
+        id=did, name=nombre, branch_id=location.branch_id,
+        location_type=location.location_type, active=bool(activo),
+        description=descripcion, is_default=location.is_default,
+    )
+    exigir_default_activo(nuevo)
     se_desactiva = location.active and not activo
     if se_desactiva:
         _verificar_no_es_el_ultimo_deposito(conn, location)
-    repo.save_location(
-        Location(
-            id=did, name=nombre, branch_id=location.branch_id,
-            location_type=location.location_type, active=bool(activo),
-            description=descripcion, is_default=location.is_default,
-        )
-    )
+    repo.save_location(nuevo)
     if location.branch_id is not None and (se_desactiva or (activo and not location.active)):
         _asegurar_deposito_predeterminado(conn, location.branch_id)
 
@@ -261,7 +252,10 @@ def set_default_deposito(conn, did: int):
     mira `active`, así que un default inactivo le seguiría cargando stock en
     silencio a un depósito dado de baja."""
     row = conn.execute("SELECT active FROM locations WHERE id=?", (did,)).fetchone()
-    if row is not None and not row[0]:
+    if row is None:
+        # Sin esto el `UPDATE ... SET is_default=0` de abajo dejaba al motor SIN depósito por defecto.
+        raise DepositoInexistente(f"El depósito {did} no existe o no está activo.")
+    if not row[0]:
         raise ValueError(
             "No se puede marcar como default un depósito inactivo: activalo primero."
         )

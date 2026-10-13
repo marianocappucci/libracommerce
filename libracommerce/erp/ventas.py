@@ -723,7 +723,7 @@ _COND_VENDIDO = (
 #: Un movimiento que YA repuso stock de esta venta por una devolución PARCIAL
 #: —no por la anulación entera—: el nuevo `devolver_items`
 #: (`reason_code='devolucion'`) o el viejo
-#: `libracommerce.usecases.sales.return_sale_items`
+#: `libracommerce.usecases.sales.return_sale_items` (retirado en ADR-053: las filas que dejó siguen en las bases)
 #: (`source_type='sale_return'`, `movement_type='return'`).
 _COND_DEVUELTO = (
     "reason_code='devolucion' "
@@ -798,7 +798,7 @@ def _repartir_devolucion(lotes_de_la_clave: dict[tuple, Decimal], cantidad: floa
 class VentaConDevoluciones(ValueError):
     """La venta ya tuvo una devolución —total o parcial, por el camino nuevo
     (`devolver_items`, que lo marca en `status_detail`) o el viejo
-    (`usecases.sales.return_sale_items`, que deja `sales.status` en
+    (`usecases.sales.return_sale_items`, retirado en ADR-053, que dejaba `sales.status` en
     `partially_returned`/`returned`)—: no se puede anular.
 
     Mismo criterio que el motor viejo: `usecases.sales.cancel_sale` sólo
@@ -984,6 +984,8 @@ def anular_venta(conn, vid: int, usuario_id: int | None = None,
             deposito_id=m["location_id"], variant_id=m["variant_id"],
             # El lote y el vencimiento de la fila que salió (`None` si salió sin lote: el INSERT de siempre).
             lot_code=lotes.lote_de_fila(m["lot_code"]), expires_at=lotes.vence_de_fila(m["expires_at"]),
+            # Deshace lo que el ledger ya tiene: el depósito pudo darse de baja después de la venta (ADR-051).
+            sobre_existencias=True,
         )
 
     pagos = [
@@ -1099,8 +1101,8 @@ def _reintegro_prorrateado(lineas, descuento_venta, ya_devuelto: dict[tuple, flo
     """Cuánto se reintegra por `pedido` (unidades por (ítem, variante)) cuando antes ya volvió `ya_devuelto`: lo
     **efectivamente pagado**, no el precio de lista (ADR-040).
 
-    La cuenta vive en `domain.sales.reintegro_prorrateado` (ADR-043), la misma que usa `usecases.sales.return_sale_items`:
-    acá sólo se traducen las filas SQL (`float` o `Decimal` según el motor) a `Decimal` por el texto. El ledger no dice
+    La cuenta vive en `domain.sales.reintegro_prorrateado` (ADR-043), la misma que usaba `usecases.sales.return_sale_items`
+    (retirado en ADR-053): acá sólo se traducen las filas SQL (`float` o `Decimal` según el motor) a `Decimal` por el texto. El ledger no dice
     de qué LÍNEA volvió lo ya devuelto, sólo de qué (ítem, variante): con dos líneas del mismo producto a precios
     distintos las unidades se valúan al promedio de la clave (con el mismo precio, lo de siempre)."""
     return reintegro_prorrateado(

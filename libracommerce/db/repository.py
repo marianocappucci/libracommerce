@@ -17,7 +17,13 @@ from libracommerce.domain.catalog import (
     Unit,
 )
 from libracommerce.domain.entities import Party, PartyType
-from libracommerce.domain.inventory import Branch, Location, StockMovement, StockMovementType
+from libracommerce.domain.inventory import (
+    Branch,
+    Location,
+    StockMovement,
+    StockMovementType,
+    exigir_default_activo,
+)
 from libracommerce.domain.purchasing import (
     PurchaseOrder,
     PurchaseOrderItem,
@@ -27,6 +33,7 @@ from libracommerce.domain.purchasing import (
     PurchaseReceiptStatus,
 )
 from libracommerce.domain.sales import Sale, SaleItem, SalePayment, SaleStatus
+from libracommerce.hora import ahora_local
 
 
 def _to_bool(value: int) -> bool:
@@ -425,11 +432,11 @@ class SqliteCommerceRepository:
     def set_setting(self, key: str, value: str) -> None:
         self._conn.execute(
             """
-            INSERT INTO commerce_settings (key, value) VALUES (?, ?)
+            INSERT INTO commerce_settings (key, value, updated_at) VALUES (?, ?, ?)
             ON CONFLICT(key) DO UPDATE
-                SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+                SET value = excluded.value, updated_at = excluded.updated_at
             """,
-            (key, value),
+            (key, value, ahora_local().isoformat(sep=" ", timespec="seconds")),
         )
         self._commit()
 
@@ -610,7 +617,7 @@ class SqliteCommerceRepository:
                 return None
             list_id = row[0]
 
-        moment = (at or datetime.now()).isoformat()
+        moment = (at or ahora_local()).isoformat()
         rows = self._conn.execute(
             """
             SELECT amount, min_quantity, branch_id, valid_from
@@ -681,6 +688,8 @@ class SqliteCommerceRepository:
     # locations
 
     def save_location(self, location: Location) -> Location:
+        # El depósito por defecto no se guarda inactivo, venga por la ERP, la web o directo (ADR-051).
+        exigir_default_activo(location)
         cur = self._conn.cursor()
         if location.id is None:
             cur.execute(

@@ -34,7 +34,8 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from .listas_precio import _ZONA_LOCAL, a_hora_local
+from ..hora import ahora_local
+from .listas_precio import a_hora_local
 
 TIPO_NXM = "nxm"
 TIPO_COMBO = "combo"
@@ -116,7 +117,7 @@ def crear_promocion(conn, *, nombre: str, tipo: str, items: list[dict], paga: fl
         "active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (nombre.strip(), tipo, paga if tipo == TIPO_NXM else None,
          precio if tipo == TIPO_COMBO else None, desde or None, hasta or None,
-         1 if activa else 0, datetime.now().isoformat(timespec="seconds")),
+         1 if activa else 0, ahora_local().isoformat(timespec="seconds")),
     )
     promocion_id = cur.lastrowid
     _guardar_items(conn, promocion_id, items)
@@ -207,7 +208,7 @@ def calcular(conn, lineas: list[dict], *, en: str = "") -> dict:
     # (UTC) una promoción de 18 a 20 hs se evaluaría 3 horas corrida, igual que el bug de precios.
     momento = (
         a_hora_local(datetime.fromisoformat(en)) if en
-        else datetime.now(_ZONA_LOCAL).replace(tzinfo=None)
+        else ahora_local()
     )
 
     disponible: dict[int, Decimal] = {}

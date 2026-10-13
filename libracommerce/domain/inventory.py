@@ -35,6 +35,42 @@ class Location:
     is_default: bool = False
 
 
+class DepositoInexistente(ValueError):
+    """Un `deposito_id` no existe o no está activo en `locations`.
+
+    La regla es una sola, la de `exigir_deposito_activo`, y la comparten los tres caminos que escriben stock (ADR-051): la capa ERP
+    (`erp.catalogo.validar_deposito`, `erp.stock.add_movimiento_stock`), los casos de uso del dominio (`usecases/`) y quien llame al
+    repositorio. Un depósito inventado no es un conflicto con otra operación simultánea, es un dato del pedido que nunca iba a dejar
+    de fallar. Hereda de `ValueError` para que el 422 de los routers sea el mismo mecanismo con el que ya rebotan
+    `delete_deposito`/`update_deposito`."""
+
+
+class DepositoPorDefectoInactivo(ValueError):
+    """Se intentó guardar el depósito POR DEFECTO como inactivo (ADR-051).
+
+    Un movimiento sin `deposito_id` cae en el por defecto: si estuviera dado de baja le seguiría cargando stock a un depósito que la
+    pantalla muestra apagado. Es un `ValueError` por la misma razón que `DepositoInexistente`."""
+
+
+#: El texto que ve quien intenta desactivar el depósito por defecto, venga por la ERP, por la web o por el repositorio.
+MENSAJE_DEFAULT_INACTIVO = (
+    "No se puede desactivar el depósito por defecto: primero hay que marcar otro depósito como default."
+)
+
+
+def exigir_default_activo(location: Location) -> None:
+    """Levanta `DepositoPorDefectoInactivo` si `location` es el depósito por defecto y no está activo. Se aplica a lo que se va a
+    GUARDAR (no a lo que se lee: una base con un default inactivo de antes de esta regla tiene que seguir pudiendo leerse)."""
+    if location.is_default and not location.active:
+        raise DepositoPorDefectoInactivo(MENSAJE_DEFAULT_INACTIVO)
+
+
+def exigir_deposito_activo(location: Location | None, location_id: int) -> None:
+    """Levanta `DepositoInexistente` si `location` (lo que resolvió `location_id`) no existe o no está activo."""
+    if location is None or not location.active:
+        raise DepositoInexistente(f"El depósito {location_id} no existe o no está activo.")
+
+
 @dataclass(frozen=True)
 class StockMovement:
     id: int | None

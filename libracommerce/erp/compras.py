@@ -35,6 +35,7 @@ from ..domain.purchasing import (
 )
 from ..usecases.purchasing import confirm_purchase_receipt
 from . import claves
+from .catalogo import validar_deposito
 
 
 class OrdenNoEncontrada(Exception):
@@ -286,8 +287,7 @@ def recibir_mercaderia(conn, *, supplier_party_id: int, deposito_id: int, items:
 
         if purchase_order_id is not None:
             _obtener_orden_domain(conn, purchase_order_id)  # 404 temprano si no existe
-        if not conn.execute("SELECT 1 FROM locations WHERE id = ?", (deposito_id,)).fetchall():
-            raise ValueError(f"el depósito {deposito_id} no existe")
+        validar_deposito(conn, deposito_id)   # existe y está activo (ADR-051): `DepositoInexistente`, un `ValueError` (422)
         for linea in lineas:
             if not conn.execute("SELECT 1 FROM catalog_items WHERE id = ?", (linea.item_id,)).fetchall():
                 raise ValueError(f"el producto {linea.item_id} no existe")

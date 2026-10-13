@@ -14,18 +14,19 @@ Cada función recibe la conexión; las formas de los dicts son las históricas.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from decimal import Decimal
 
 from libracommerce.db.repository import repositorio_de
 from libracommerce.domain.catalog import ItemPrice, PriceList
+from libracommerce.hora import ZONA_LOCAL, ahora_local
 
 #: "Sin restricción de fecha de inicio", para todo lo que este módulo escribe.
 _SIN_VIGENCIA = "2000-01-01T00:00:00"
 
-#: Argentina no tiene horario de verano desde 2009: un desfase fijo evita depender
-#: de que la imagen del contenedor traiga la base de zonas horarias.
-_ZONA_LOCAL = timezone(timedelta(hours=-3))
+#: La zona de Argentina vive en `libracommerce.hora` (ADR-052); se conserva el nombre de siempre porque lo importan `promociones` y
+#: `vencimientos`.
+_ZONA_LOCAL = ZONA_LOCAL
 
 
 def a_hora_local(momento: datetime) -> datetime:
@@ -335,7 +336,7 @@ def set_precio_vigente(conn, lista_id: int, producto_id: int, monto: float, *,
     """
     item_price = ItemPrice(
         id=None, item_id=producto_id, price_list_id=lista_id, amount=Decimal(str(monto)),
-        valid_from=datetime.fromisoformat(desde) if desde else datetime.now(),
+        valid_from=datetime.fromisoformat(desde) if desde else ahora_local(),
         valid_until=datetime.fromisoformat(hasta) if hasta else None,
         min_quantity=Decimal(str(cantidad_minima)) if cantidad_minima is not None else None,
         branch_id=sucursal_id,

@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 
-from libracommerce.domain.inventory import StockMovement, StockMovementType
+from libracommerce.domain.inventory import StockMovement, StockMovementType, exigir_deposito_activo
 from libracommerce.ports.persistence import CommerceRepository
 
 
@@ -63,6 +63,16 @@ class TramoDeTransferencia:
 #: Diferencia relativa por debajo de la cual la suma de los tramos cuenta como igual a la cantidad pedida (el ruido de
 #: `float` que `erp.lotes` ya descarta al planificar).
 _UMBRAL_DE_RUIDO = Decimal("1e-12")
+
+
+def verificar_deposito(repo: CommerceRepository, location_id: int) -> None:
+    """Levanta `DepositoInexistente` (un `ValueError`) si `location_id` no existe o no está activo (ADR-051).
+
+    Es la misma regla que `erp.catalogo.validar_deposito` —las dos llaman a `domain.inventory.exigir_deposito_activo`— para los
+    casos de uso que reciben un `location_id` de afuera: `confirm_sale`, `confirm_purchase_receipt` y `transfer_stock` la llaman
+    ANTES de escribir, así un depósito inventado o dado de baja no deja una venta, una recepción o la pata de salida a medias.
+    `cancel_sale` no la usa a propósito: repone en el depósito de donde salió cada movimiento, que pudo darse de baja después."""
+    exigir_deposito_activo(repo.get_location(location_id), location_id)
 
 
 def verificar_disponibilidad(
@@ -107,6 +117,9 @@ def transfer_stock(
 
     Devuelve el par (salida, entrada). Las dos filas y la lectura que las
     autoriza van en la misma transaccion: o quedan las dos o no queda ninguna.
+
+    El origen y el destino tienen que existir y estar activos (`verificar_deposito`,
+    ADR-051): `DepositoInexistente` antes de escribir nada.
 
     **Como se reconoce el par despues.** No hay tabla de transferencias, asi
     que la entrada apunta a la salida con `source_type="transfer"` y
@@ -156,6 +169,8 @@ def transfer_stock(
                 f"Los tramos de la transferencia ({sum((tr.cantidad for tr in tramos), Decimal(0))}) no suman la "
                 f"cantidad ({quantity})."
             )
+    verificar_deposito(repo, from_location_id)
+    verificar_deposito(repo, to_location_id)
     # Sin tramos: un unico par por la cantidad entera, sin lote (lo de siempre).
     a_escribir = tramos if tramos is not None else [TramoDeTransferencia(quantity)]
 
