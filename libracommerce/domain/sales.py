@@ -141,7 +141,7 @@ class LineaReintegro:
 
     `clave` es lo que identifica a la unidad que se devuelve: `(ítem, variante)`
     en el camino del ERP, donde el ledger no dice de qué línea volvió lo ya
-    devuelto, o la posición de la línea en `usecases.sales`, donde sí lo dice.
+    devuelto, o la posición de la línea, donde el ledger sí lo dice (lo hacía `usecases.sales.return_sale_items`, retirado en ADR-053).
     `None` marca una línea que nunca se devuelve (un servicio): entra en la
     suma de la venta, porque carga descuento, pero no tiene unidades que valuar.
     """
@@ -161,8 +161,8 @@ def reintegro_prorrateado(
     """Cuánto se reintegra por `pedido` (unidades por clave) cuando antes ya volvió `ya_devuelto`: lo
     **efectivamente pagado** por esas unidades, no su precio de lista (ADR-040, ADR-043).
 
-    Es la cuenta única de las dos devoluciones del motor: `erp.ventas.devolver_items` (filas SQL) y
-    `usecases.sales.return_sale_items` (dominio) la llaman con las mismas reglas.
+    Es la cuenta de la devolución del motor: `erp.ventas.devolver_items` (filas SQL) la llama traduciendo las filas a `Decimal`.
+    (La llamaba también `usecases.sales.return_sale_items`, retirado en ADR-053; la cuenta queda en el dominio, probada sola.)
 
     Misma semántica de totales que `erp.margen`: el neto de una línea es `quantity*unit_price - discount_amount`; del
     descuento de la venta sólo cuenta lo que las líneas no explican (`max(discount_total - Σ discount_amount, 0)`, con

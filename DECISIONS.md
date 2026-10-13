@@ -1491,7 +1491,7 @@ números y `. _ : -`, más estricta que la de `vencimientos`): unificarla cambia
 venta ya `devuelta`, misma clave con otras cantidades / otro depósito / otro medio (`ClaveReusada`), dos claves = dos devoluciones con el prorrateo de
 ADR-040, la clave es por venta, sin clave igual que antes (incluidas las referencias `@n`), cuenta corriente, clave inválida, dos hilos con la misma clave.
 `test_fefo_devolucion_transferencia_ajuste.py`: el par por lote con clave. `test_web_ventas.py`: 200 con `repetida`, 409 y 422. Los del reintento fallan si
-no se busca la clave y el de los hilos falla sin el bloqueo de la venta. La carrera en PostgreSQL no se probó acá (sin base de test); en SQLite la serializa la base.
+no se busca la clave y el de los hilos falla sin el bloqueo de la venta. La carrera en PostgreSQL no se probó acá (sin base de test); en SQLite la serializa la base. *(Actualización 2026-10-13: el test de los dos hilos ahora corre contra SQLite y PostgreSQL —usa `abrir_ventas`— y falla en los dos, 3 de 3 veces, si se saca el `UPDATE` de la venta.)*
 
 **No cubre.**
 - **Un reintento sin clave** (un cliente que no la manda) sigue siendo indistinguible de una segunda devolución.
@@ -1761,3 +1761,73 @@ el ajuste sin lote (absoluto, entrada, salida; marcado y sin marcar) anda sin la
 
 **Cómo se adopta.** Cortar tag (v0.57.0), subir el pin en VentaLibra y LibraClub y, en cada `app/commerce.py`, pasar `registrador_dbapi({**entidades_por_tabla(), "clients": "cliente"}, **opciones_del_registrador())` en lugar de `usuario=usuario_actual.get`. Los productos que no usan `RepositorioAuditado` (Contalibra, Restolibra) no cambian.
 
+
+
+## ADR-051 — El depósito por defecto no se desactiva en ninguna capa, y un movimiento de stock no toca un depósito inactivo (2026-10-13)
+
+**Problema** (pendiente B.4, medido el 2026-09-17). La guarda «no se puede desactivar el depósito por defecto» vivía sólo en la capa ERP/web (`catalogo.update_deposito`). Tres huecos sobre `develop` `53cf73a`:
+1. `repo.save_location` guardaba `active=False` sobre el default sin ninguna guarda. **Hay un consumidor que lo hace**: `libradesk` (`app/services/inventario.py:editar_deposito`) guarda `Location(active=activo, is_default=actual.is_default)`, así que un default apagado desde LibraDesk es posible hoy.
+2. `catalogo.get_default_deposito_id` no miraba `active`, y `erp.stock.add_movimiento_stock` (de donde cuelgan `descontar_stock_venta`, `ajustar_stock`, `salida_manual`, la recepción y los lotes) no validaba el depósito: un default inactivo seguía recibiendo stock, y un `deposito_id` explícito inactivo o inexistente llegaba al `INSERT` (si no existía, como `IntegrityError` de la FK, un 500).
+3. Los casos de uso viejos (`usecases/`) recibían un `location_id` sin validar: `confirm_sale`, `confirm_purchase_receipt` (la recepción vieja de tres pasos y `recibir_mercaderia` sólo miraba que existiera, no que estuviera activo) y `transfer_stock`.
+
+**Qué ya existía.** `catalogo.validar_deposito` y `DepositoInexistente` (ERP), usados por `registrar_venta`, `devolver_items`, `transferir_stock` y el ajuste del router; `update_deposito`/`set_default_deposito` con su guarda. Se reutiliza el mensaje y la clase; lo nuevo es llevar la regla al dominio.
+
+**Decisión.** La regla es del dominio y vive en un solo lugar, `domain/inventory.py`:
+- `exigir_default_activo(location)` → `DepositoPorDefectoInactivo` (un `ValueError`, con `MENSAJE_DEFAULT_INACTIVO`, el mismo texto de la ERP). **`repo.save_location` la aplica** (alta y modificación), de modo que ningún camino —ERP, web, un producto que guarda la `Location` directo— pueda guardar el default inactivo. `update_deposito` la llama también, antes de las otras guardas, para no depender del orden. Se aplica a lo que se GUARDA, nunca a lo que se lee: una base con un default inactivo heredado tiene que seguir abriéndose.
+- `exigir_deposito_activo(location, id)` → `DepositoInexistente`, que **se movió** de `erp/catalogo.py` a `domain/inventory.py` (se reexporta con el mismo nombre; `catalogo.DepositoInexistente` y `ventas.DepositoInexistente` son la misma clase). La usan `catalogo.validar_deposito` (ERP) y `usecases.inventory.verificar_deposito` (dominio): un solo criterio y un solo mensaje.
+- **`add_movimiento_stock` valida el depósito**: un `deposito_id` inexistente o inactivo es `DepositoInexistente` antes de escribir (hacia o desde: una salida de un depósito inactivo también). Sin `deposito_id`, el por defecto, y si no hay ninguno activo, `DepositoInexistente("No hay ningún depósito activo…")` en vez de un `NOT NULL`. Las validaciones tempranas de cada operación (`registrar_venta`, `devolver_items`, `transferir_stock`, el router de ajuste) siguen rebotando primero, antes de escribir el resto.
+- **Excepción deliberada: `sobre_existencias=True`**, para las tres operaciones que trabajan con existencias que YA están en el depósito, que pudo darse de baja después: `anular_venta` (repone donde salió la mercadería; negarse dejaría la venta sin poder anularse), `vencimientos.asignar_vencimiento` (reclasifica «sin lote» a un lote) y `vencimientos.dar_de_baja_lote` (la merma). Esta última es una decisión anterior (ADR-018: «las existencias de un depósito dado de baja siguen existiendo»; `test_la_entrada_exige_deposito_activo_pero_leer_asignar_y_mermar_siguen_valiendo` la fija) y el primer intento de este ADR —rechazar todo— la rompió. **Stock nuevo** (una entrada, un ajuste, una venta, una recepción) nunca lleva el flag. `cancel_sale` (dominio) tampoco valida, por lo mismo.
+- **`get_default_deposito_id` no devuelve nunca un inactivo**: el marcado por defecto si está activo; si no (o no hay marcado), el activo de menor id; si no hay ninguno, `None`.
+- **Los casos de uso validan antes de escribir**: `confirm_sale`, `confirm_purchase_receipt` y `transfer_stock` (origen y destino) llaman a `verificar_deposito`. `erp.compras.recibir_mercaderia` usa `validar_deposito` (existe **y está activo**); el router de `confirm` contesta 422.
+- Un hueco menor del mismo patrón, cerrado: `set_default_deposito` de un id que no existe levanta `DepositoInexistente` (antes el `UPDATE … is_default=0` dejaba al motor sin ningún default). (La baja de una sucursal que tiene el default ya estaba cubierta por `_verificar_baja_de_sucursal`: «el depósito por defecto de la instancia».)
+
+**Si una base ya tiene un default inactivo** (heredado de LibraDesk, o de antes de la guarda de la ERP): no se migra nada. El código lo ignora —los movimientos sin depósito van al activo de menor id— y sigue pudiéndose leer y editar; para repararlo, un administrador marca otro depósito como default. Medir una base: `SELECT id, name FROM locations WHERE is_default = 1 AND active = 0;`. Una `CHECK (NOT (is_default = 1 AND active = 0))` quedó afuera a propósito: la migración fallaría justo en las bases que tienen el problema.
+
+**Tests.** `tests/test_deposito_activo.py`, contra los dos motores: el repositorio no guarda el default inactivo (alta y modificación, con el mismo mensaje que la ERP) y sí uno que no es default; la baja de una sucursal con el default (fija lo que ya se frenaba); `set_default_deposito` de un id inexistente; un movimiento hacia o desde un depósito inactivo o inexistente (ajuste, salida manual, `descontar_stock_venta`); que asignar y dar de baja un lote siguen valiendo en uno inactivo lo fija el test existente de `test_carga_vencimientos.py`; la base con un default inactivo heredado; ningún depósito activo; `anular_venta` con el depósito dado de baja después; la recepción (`recibir`, 422 y `confirm`, 422); `confirm_sale`, `confirm_purchase_receipt` y `transfer_stock` (origen y destino) sin escribir nada.
+
+**No cubre.**
+- **No hay candado contra la carrera**: dos pedidos, uno desactivando el depósito y otro moviendo stock, pueden cruzarse (la validación y el `INSERT` no comparten un `SELECT … FOR UPDATE`). Es el mismo límite que ya tenían `registrar_venta` y `transferir_stock`.
+- El stock que un depósito tenía **antes** de apagarse queda ahí: apagar un depósito no lo traslada (ya era así).
+- Un producto que escribe `stock_movements` por SQL propio (no por `add_movimiento_stock` ni por el repositorio) no pasa por la regla. Medido con `git grep "INSERT INTO stock_movements"` sobre `origin/develop` de los ocho productos: ninguno, fuera de los tests; el único es el script de migración de este repo (`libracommerce/scripts/migrate_from_contalibra.py`).
+
+**Cómo se adopta.** Subir el pin; sin migración. Efectos visibles: LibraDesk al desactivar el default recibe el `ValueError` (su router ya lo traduce a 422); `libradesk` y `libraclub` pasan `location_id` a `confirm_purchase_receipt`/`confirm_sale` y ahora se rechaza uno inactivo.
+
+## ADR-052 — «Ahora» y «hoy» salen de un reloj único, `libracommerce.hora`: quedaban cuatro lecturas de la hora del sistema (2026-10-13)
+
+**Problema.** ADR-042 (reposición) y ADR-044 (ajustes, transferencias, margen) cerraron los `date.today()`. Releído el paquete con `git grep "date.today()\|datetime.now()\|datetime.utcnow()\|time.localtime"` sobre `develop` `53cf73a`: ya no queda ningún `date.today()`, pero sí cuatro `datetime.now()` sin zona (ADR-044 los había dejado afuera, «son un instante, no el día») y un reloj de SQL:
+- `db/repository.py:613` — `resolve_price` sin `at`: compara contra `valid_from`/`valid_until`, que están en hora local, con la hora del sistema. En un servidor en UTC, de 21 a 24 hs un precio vigente hasta las 23:00 ya figuraba vencido.
+- `erp/listas_precio.py:338` — `set_precio_vigente` sin `desde` escribe «ahora» como `valid_from`: en UTC quedaba tres horas en el futuro.
+- `erp/promociones.py:119` — `created_at` de una promoción.
+- `db/repository.py:430` — `set_setting` escribía `updated_at = CURRENT_TIMESTAMP`: UTC en SQLite, `timestamptz` con su formato en PostgreSQL (la migración 0011 había pasado los DEFAULT a hora de Argentina, pero este `UPDATE` los pisaba con otra cosa).
+(Más `promociones.py:210`, ya correcto pero con la zona repetida a mano.) Esto **no** era una discrepancia teórica: el contenedor desplegado tiene `TZ` de Argentina y por eso no se vio, igual que en ADR-042.
+
+**Qué ya existía.** `vencimientos.hoy_argentina()` (ADR-042/044) y `listas_precio._ZONA_LOCAL`/`a_hora_local`. No servían para la capa de base (`db/` no puede importar `erp/`), y `hoy_argentina` leía el reloj real por su cuenta, así que cada test tenía que fijarla aparte. `libracore.db.core._ar_now()` (que `ventas.py` ya usa) existe pero este motor no importa `libracore` en runtime salvo en los extras.
+
+**Decisión.**
+- **Módulo nuevo `libracommerce/hora.py`**, sin dependencias: `ZONA_LOCAL` (UTC-3 fijo), `ahora_utc()` —el **único** lugar que lee el reloj del sistema—, `ahora_local()` (hora de pared sin zona, la forma en que se guardan las vigencias) y `hoy_local()`. Los helpers llaman a `ahora_utc` a través del módulo: **fijar `hora.ahora_utc` en un test fija «ahora» y «hoy» en todo el motor**.
+- `hoy_argentina()` lee de `hora.ahora_utc` (misma firma, mismo resultado); `_ZONA_LOCAL` se conserva como nombre, apuntando a `hora.ZONA_LOCAL`. Las cuatro lecturas usan `ahora_local()`; `set_setting` pasa `updated_at` como parámetro, en el formato del DEFAULT (`YYYY-MM-DD HH:MM:SS`).
+- **Guard** (`tests/test_sin_reloj_del_sistema.py`): recorre el paquete con `ast` y falla ante `.today()`, `.utcnow()`, `.localtime()`, `.now()` sin zona (o con `None`) y relojes de SQL sin modificador (`CURRENT_TIMESTAMP`, `datetime('now')`). Un instante CON zona (`datetime.now(UTC)` de `compras_router` y `precio_de_venta`) no se marca. Lista `EXCEPCIONES` explícita, hoy **vacía**; el test también falla si una excepción deja de hacer falta, y hay tests del guard mismo (caza cada forma, deja pasar `now(UTC)` y los textos de documentación).
+
+**Tests.** `tests/test_hora_argentina.py`: con el reloj fijo a las 22:30 de Argentina (01:30Z del día siguiente): `ahora_local`, `hoy_local` y `hoy_argentina` dan el día de Argentina; el precio sin `desde` arranca 22:30; `resolve_price` sin `at` ve un precio que vence a las 23:00; la promoción y la preferencia se estampan 22:30; el ajuste de stock sin fecha queda con el día 14. El test de promociones del reloj en UTC (ADR-042) pasó a fijar `hora.ahora_utc`.
+
+**No cubre.**
+- Los `datetime.now(UTC)` de `compras_router` (instante de la recepción) quedan: son un instante con zona, y el ledger mezcla ese formato con las fechas locales sin zona desde siempre. Unificarlos es otra decisión (cambia el texto de `occurred_at` y el orden entre filas).
+- Las filas que ya se escribieron con la hora del sistema no se corrigen.
+- Los tests siguen pudiendo usar `date.today()` (el guard recorre sólo el paquete): siete módulos lo usan como fecha de sus fixtures (`HOY`). No se tocaron; si alguno es una bomba de 21 a 24 hs se ve corriendo la suite con el reloj del proceso en esa franja.
+
+**Cómo se adopta.** Subir el pin; sin migración, sin cambio para quien despliega con `TZ` de Argentina.
+
+## ADR-053 — Se retira `usecases.sales.return_sale_items`: ningún consumidor lo llama (2026-10-13)
+
+**Problema.** El camino viejo de devolución (`usecases.sales.return_sale_items`, sobre el dominio `Sale`) recibe un `location_id` sin validar, y ADR-043 (2026-10-10) ya había tenido que arreglarle la cuenta del reintegro porque seguía devolviendo precio de lista. Dos copias de una operación de plata que nadie ejerce son una deuda que se rompe en silencio.
+
+**Verificación de que es código muerto** (`git grep "return_sale_items"` y los usos de `libracommerce.usecases.*` sobre `origin/develop` y `origin/main` de todos los repos de `~/proyectos`, 2026-10-13): **ningún llamador** en `contalibra`, `restolibra`, `ventalibra`, `libradesk`, `libraclub`, `libracargo`, `gestiolibra`, `medlibra`, `libraedge`, `libracore`, `libra-panel` ni `libra-backoffice`. Las menciones son comentarios y tests de este repo. Quien usa `usecases` hoy: `libraclub` (`confirm_sale`), `libradesk` (`confirm_purchase_receipt`, `transfer_stock`, `verificar_disponibilidad`); `cancel_sale` tampoco tiene llamadores, y se deja (no era lo pedido).
+
+**Decisión.** Se **borra** `return_sale_items` y su ayudante `_devuelto_por_linea`. **No** se borra lo que lo rodea:
+- `domain.sales.reintegro_prorrateado` y `LineaReintegro` siguen: `erp.ventas.devolver_items` los usa (ADR-040). Sus tests, que pasaban por `return_sale_items`, se reescribieron directo sobre la función (`tests/test_reintegro_prorrateado.py`, mismos números).
+- La lectura de las filas `source_type='sale_return'` (`erp.ventas._COND_DEVUELTO`, `erp.margen`, el tope de `devolver_items`) **se queda**: son datos que el caso de uso pudo haber dejado en una base, y hay tests con filas armadas a mano (`test_erp_ventas.py`, `test_margen.py`).
+- ADR-043 queda como historia; su parte del dominio sigue vigente.
+
+**Tests.** Se borraron los de `test_usecases.py` sobre `return_sale_items` (los de `confirm_sale`, `cancel_sale` y la recepción siguen) y `test_margen.py` arma la devolución vieja a mano. Un test confirma que `usecases.sales` ya no la exporta.
+
+**Cómo se adopta.** Subir el pin; quien la importara (nadie, verificado) tiene que pasar a `erp.ventas.devolver_items`. Es un retiro de API pública de un motor 0.x: por eso el tag propuesto es una versión **menor** (v0.58.0).

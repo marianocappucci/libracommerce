@@ -1690,45 +1690,32 @@ def test_dos_lineas_del_mismo_producto_son_lo_mismo_que_una_con_la_suma(abrir_ve
         ventas.devolver_items(conn, vid, {a: 1.0, b: 2.0}, deposito, clave_operacion="k")
 
 
-def test_dos_pedidos_simultaneos_con_la_misma_clave_aplican_una_sola_vez(tmp_path):
+def test_dos_pedidos_simultaneos_con_la_misma_clave_aplican_una_sola_vez(abrir_ventas):
     """Dos hilos con la misma clave: el segundo espera la venta que tomó el primero y, al verla, contesta `repetida`. Sin el `UPDATE`
-    que toma la venta, los dos leen «no se aplicó» y reponen dos veces. (SQLite: la base serializa a los escritores; en PostgreSQL
-    el bloqueo es el de la fila de la venta.)"""
+    que toma la venta, los dos leen «no se aplicó» y reponen dos veces. Contra los DOS motores: en SQLite la base serializa a los
+    escritores; en PostgreSQL el bloqueo es el de la fila de la venta (ADR-041 decía que esa carrera no se había probado ahí)."""
     import threading
 
-    from conftest import _schema_de_producto
-    from libracore.db import core
+    abrir = abrir_ventas
+    vid, pid, linea, deposito = _venta_2x1(abrir)
+    resultados, errores = [], []
+    barrera = threading.Barrier(2)
 
-    core.configure(str(tmp_path / "carrera.db"))
-    conn = core.get_connection()
-    try:
-        _schema_de_producto(conn)
-    finally:
-        conn.close()
-    try:
-        abrir = core.get_connection
-        vid, pid, linea, deposito = _venta_2x1(abrir)
-        resultados, errores = [], []
-        barrera = threading.Barrier(2)
+    def pedir():
+        try:
+            barrera.wait(timeout=10)
+            resultados.append(_devolver_con_clave(abrir, vid, {linea: 1.0}, deposito, "carrera"))
+        except Exception as exc:  # noqa: BLE001 - se informa abajo
+            errores.append(exc)
 
-        def pedir():
-            try:
-                barrera.wait(timeout=10)
-                resultados.append(_devolver_con_clave(abrir, vid, {linea: 1.0}, deposito, "carrera"))
-            except Exception as exc:  # noqa: BLE001 - se informa abajo
-                errores.append(exc)
-
-        hilos = [threading.Thread(target=pedir) for _ in range(2)]
-        for h in hilos:
-            h.start()
-        for h in hilos:
-            h.join(timeout=60)
-        assert not errores, errores
-        assert sorted(r["repetida"] for r in resultados) == [False, True]
-        assert len(_filas_de_devolucion(abrir, vid)) == 1 and _reintegrado_en_caja(abrir) == 800.0 and _stock(abrir, pid) == 9.0
-    finally:
-        core._db_path = None
-        core._database_url = None
+    hilos = [threading.Thread(target=pedir) for _ in range(2)]
+    for h in hilos:
+        h.start()
+    for h in hilos:
+        h.join(timeout=60)
+    assert not errores, errores
+    assert sorted(r["repetida"] for r in resultados) == [False, True]
+    assert len(_filas_de_devolucion(abrir, vid)) == 1 and _reintegrado_en_caja(abrir) == 800.0 and _stock(abrir, pid) == 9.0
 
 
 # ── F4 (correcciones sobre la revisión): deposito_id también en devolver_items ──

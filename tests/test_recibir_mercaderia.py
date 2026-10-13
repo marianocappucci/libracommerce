@@ -23,7 +23,7 @@ from test_vencimientos import _columnas_de, _con_conexion, _crear_base_al_dia_de
 from test_web_compras import _app, _deposito, _producto, _proveedor
 
 from libracommerce.db.repository import SqliteCommerceRepository
-from libracommerce.erp import compras, stock, vencimientos
+from libracommerce.erp import catalogo, compras, stock, vencimientos
 
 destino = _vto.destino
 abrir_vto = _vto.abrir_vto
@@ -532,3 +532,22 @@ def test_init_schema_sigue_congelado_y_la_columna_es_solo_de_la_revision(destino
     con = _con_conexion(destino, lambda c: _columnas_de(c, "purchase_receipts"))
     assert "clave_operacion" not in sin
     assert con - sin == {"clave_operacion"}
+
+
+# ── ADR-051: el depósito tiene que estar ACTIVO ──────────────────────────
+
+
+def test_recibir_mercaderia_en_un_deposito_inactivo_se_rechaza_sin_gastar_la_clave(abrir_vto):
+    """La recepción idempotente (ADR-046) sólo miraba que el depósito EXISTIERA. Ahora tiene que estar activo, y el rechazo no deja
+    la recepción ni gasta la clave (se puede reintentar con otro depósito)."""
+    proveedor, producto, deposito, client = _escenario(abrir_vto)
+    with abrir_vto() as conn:
+        conn.execute("UPDATE locations SET active = 0 WHERE id = ?", (deposito,))
+        conn.commit()
+    cuerpo = _cuerpo(proveedor, deposito, producto, clave="rec-inactivo")
+    r = _recibir(client, cuerpo)
+    assert r.status_code == 422 and "no existe o no está activo" in r.json()["detail"], r.text
+    assert _contar(abrir_vto, "purchase_receipts") == 0 and _contar(abrir_vto, "stock_movements") == 0
+    with abrir_vto() as conn:
+        activo = catalogo.get_default_deposito_id(conn)
+    assert _recibir(client, {**cuerpo, "deposito_id": activo}).status_code == 200

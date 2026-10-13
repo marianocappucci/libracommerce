@@ -13,8 +13,8 @@ acreditar) no son ventas —el mismo criterio que `reportes.puerto_de_reportes(
 solo_confirmadas=True)`—. Las devoluciones no viven en `sale_items`: la venta sigue
 `confirmed` (`erp.ventas.devolver_items` sólo mueve `status_detail`, stock y caja),
 así que lo devuelto se resta leyendo el ledger de stock (`_devuelto_por_clave`), por
-las dos formas que tiene el motor de escribirlo (la nueva y la de `usecases.sales.
-return_sale_items`). Una línea devuelta a medias cuenta la parte que se quedó el
+las dos formas en que quedó escrito (la nueva y la de `usecases.sales.return_sale_items`, retirada
+en ADR-053 pero cuyas filas `sale_return` siguen leyéndose). Una línea devuelta a medias cuenta la parte que se quedó el
 cliente: unidades, ingreso y costo, en la misma proporción. Una línea devuelta entera
 no cuenta nada, tampoco sus avisos de costo (`costo_estimado`, `sin_costo`).
 
@@ -151,7 +151,8 @@ def _devuelto_por_clave(conn, desde: str, hasta: str) -> dict[tuple, Decimal]:
     `erp.ventas._COND_DEVUELTO`, pero atadas a `source_type` porque acá se junta con
     `sales` por `source_id`, que en otros orígenes es el id de otra tabla): la nueva
     (`devolver_items`: `reason_code='devolucion'`, `source_type='venta'`) y la de
-    `usecases.sales.return_sale_items` (`source_type='sale_return'`, `movement_type='return'`)."""
+    `usecases.sales.return_sale_items` (`source_type='sale_return'`, `movement_type='return'`; el caso de uso se retiró en
+    ADR-053, las filas que dejó siguen en las bases)."""
     donde, params = _filtro_de_ventas(desde, hasta)
     filas = conn.execute(
         f"""SELECT sm.source_id AS venta_id, sm.item_id, sm.variant_id,

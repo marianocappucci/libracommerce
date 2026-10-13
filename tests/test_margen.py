@@ -7,6 +7,7 @@ cómo se reparte el descuento de la venta."""
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 from decimal import Decimal
 
@@ -17,12 +18,13 @@ from fastapi.testclient import TestClient
 
 from libracommerce.db.repository import SqliteCommerceRepository
 from libracommerce.domain.catalog import CatalogItemType
-from libracommerce.domain.sales import Sale, SaleItem
+from libracommerce.domain.inventory import StockMovement, StockMovementType
+from libracommerce.domain.sales import Sale, SaleItem, SaleStatus
 from libracommerce.erp import catalogo, margen, stock, ventas
 from libracommerce.erp.vencimientos import (
     hoy_argentina,  # el «hoy» del motor (ADR-044): date.today() en un CI en UTC es mañana de 21 a 24 h
 )
-from libracommerce.usecases.sales import confirm_sale, return_sale_items
+from libracommerce.usecases.sales import confirm_sale
 from libracommerce.web.margen_router import build_margen_router
 
 D1, D2, D3 = "2026-09-01", "2026-09-02", "2026-09-03"
@@ -170,9 +172,9 @@ def test_una_devolucion_parcial_resta_unidades_ingreso_y_costo(abrir_ventas):
 
 
 def test_la_devolucion_del_camino_viejo_tambien_se_resta(abrir_ventas):
-    """`usecases.sales.return_sale_items` deja `sales.status` en `partially_returned` y el ledger con
-    `source_type='sale_return'`: la venta sigue siendo una venta, menos lo devuelto. Y esa venta trae el
-    snapshot de costo del dominio."""
+    """El caso de uso viejo `return_sale_items` (retirado en ADR-053) dejaba `sales.status` en `partially_returned` y el ledger
+    con `source_type='sale_return'`: esas filas siguen en las bases y la venta sigue siendo una venta, menos lo devuelto. Y esa
+    venta trae el snapshot de costo del dominio. La devolución vieja se arma a mano, tal como la dejaba."""
     abrir = abrir_ventas
     with abrir() as conn:
         yerba = _producto(conn, "Yerba", 100.0, 999.0)  # el costo de hoy NO es el de la venta
@@ -184,8 +186,12 @@ def test_la_devolucion_del_camino_viejo_tambien_se_resta(abrir_ventas):
         deposito = catalogo.get_default_deposito_id(conn)
         ahora = datetime.datetime(2026, 9, 1, 12, 0)
         confirmada = confirm_sale(repo, venta, deposito, ahora)
-        devuelta, _importe = return_sale_items(repo, confirmada, {0: Decimal("1")}, deposito, ahora)
-        assert devuelta.status.value == "partially_returned"
+        repo.append_stock_movement(StockMovement(
+            id=None, item_id=yerba, location_id=deposito, movement_type=StockMovementType.RETURN,
+            quantity_delta=Decimal("1"), occurred_at=ahora, source_type="sale_return", source_id=confirmada.id,
+            reason_code="0",  # la POSICIÓN de la línea devuelta
+        ))
+        repo.save_sale(dataclasses.replace(confirmada, status=SaleStatus.PARTIALLY_RETURNED))
         conn.commit()
 
     p = _por_nombre(_reporte(abrir, desde=D1, hasta=D3))["Yerba"]

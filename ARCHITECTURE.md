@@ -22,17 +22,18 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
 - **`domain/`** — el modelo de negocio puro, sin dependencias de I/O:
   `entities` (`Party`, roles y tipos), `catalog` (`CatalogItem`, `Category`,
   `Unit`, `PriceList`, `ItemPrice`, `ItemVariant`, `ItemCode`), `inventory`
-  (`Location`, `StockMovement`), `sales` (`Sale`, `SaleItem`, `SalePayment`, y la cuenta pura del reintegro prorrateado de una devolución, `reintegro_prorrateado`, ADR-040/043),
+  (`Location`, `StockMovement`, y las reglas del depósito: `exigir_default_activo` y `exigir_deposito_activo`, ADR-051), `sales` (`Sale`, `SaleItem`, `SalePayment`, y la cuenta pura del reintegro prorrateado de una devolución, `reintegro_prorrateado`, ADR-040/043),
   `purchasing` (`PurchaseOrder`, `PurchaseReceipt`), `scale` (lectura de códigos
   de balanza, `parse_scale_barcode`) y `presets` (rubros comerciales y sus ejes
   de variante).
+- **`hora.py`** — el reloj del motor (ADR-052): `ahora_utc` (el único que lee la hora del sistema), `ahora_local` y `hoy_local` en hora de Argentina. Un test (`test_sin_reloj_del_sistema`) impide leer el reloj por otro lado.
 - **`ports/`** — los contratos que el dominio necesita del exterior:
   `persistence.CommerceRepository` (la interfaz de almacenamiento) e
   `integrations.CommerceEventPublisher` / `SaleConfirmedEvent` (publicación de
   eventos de dominio).
 - **`usecases/`** — la capa de aplicación que orquesta dominio + puertos:
-  `sales` (`confirm_sale`, `cancel_sale`, `return_sale_items`), `inventory`
-  (`verificar_disponibilidad`, `transfer_stock`, error `StockInsuficienteError`),
+  `sales` (`confirm_sale`, `cancel_sale`), `inventory`
+  (`verificar_deposito`, `verificar_disponibilidad`, `transfer_stock`, error `StockInsuficienteError`),
   `purchasing` (`confirm_purchase_receipt`) y `presets`.
 - **`db/`** — un adaptador de persistencia concreto: `repository`
   (`SqliteCommerceRepository`), `schema` (`init_schema`), `migrations` (la cadena

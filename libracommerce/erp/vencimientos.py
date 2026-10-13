@@ -61,6 +61,7 @@ import datetime
 import uuid
 from decimal import Decimal, InvalidOperation
 
+from .. import hora
 from . import claves
 from .catalogo import validar_deposito
 from .listas_precio import _ZONA_LOCAL
@@ -108,7 +109,7 @@ class SinRevision(VencimientosError):
 
 def hoy_argentina(ahora: datetime.datetime | None = None) -> datetime.date:
     """La fecha de hoy en Argentina. `ahora` (para las pruebas) es un instante con zona; sin él, el reloj real."""
-    ahora = ahora or datetime.datetime.now(datetime.UTC)
+    ahora = ahora or hora.ahora_utc()
     return ahora.astimezone(_ZONA_LOCAL).date()
 
 
@@ -538,7 +539,9 @@ def asignar_vencimiento_a_saldo(conn, item_id: int, deposito_id: int, lot_code: 
     referencia = f"{nota.strip()} {marca}" if nota.strip() else f"Asignación de vencimiento {marca}"
     detalle = f"{referencia}: lote {lote}, vence {vence}"
     op = claves.marca(clave)
-    destino = {"usuario_id": usuario_id, "fecha": fecha, "deposito_id": deposito_id, "variant_id": variante_id}
+    # Reclasifica existencias que ya están ahí (de «sin lote» a un lote): sigue valiendo en un depósito dado de baja (ADR-051).
+    destino = {"usuario_id": usuario_id, "fecha": fecha, "deposito_id": deposito_id, "variant_id": variante_id,
+               "sobre_existencias": True}
     add_movimiento_stock(conn, item_id, "ajuste", -float(cant), f"{detalle} {_SALE_DE_SIN_LOTE} {op}", **destino)
     add_movimiento_stock(conn, item_id, "ajuste", float(cant), f"{detalle} (entra al lote) {op}",
                          lot_code=lote, expires_at=vence, **destino)
@@ -643,7 +646,8 @@ def dar_de_baja_lote(conn, item_id: int, deposito_id: int, lot_code: str | None,
     referencia = f"{referencia} {claves.marca(clave)}"
     add_movimiento_stock(conn, item_id, "merma", -float(cant), referencia, usuario_id=usuario_id,
                          fecha=fecha or hoy_argentina().isoformat(), deposito_id=deposito_id,
-                         variant_id=variante_id, lot_code=lote, expires_at=vence)
+                         variant_id=variante_id, lot_code=lote, expires_at=vence,
+                         sobre_existencias=True)   # da de baja lo que ya hay: vale en un depósito dado de baja (ADR-051)
     return {"producto_id": item_id, "deposito_id": deposito_id, "variante_id": variante_id, "lote": lote,
             "vence": vence, "cantidad": _num(cant), "saldo_restante": _num(saldo - cant),
             "repetida": False}

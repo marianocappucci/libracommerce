@@ -338,6 +338,8 @@ def test_sin_lote_ni_vencimiento_el_insert_es_el_de_siempre(abrir_vto):
                                    usuario_id=7, deposito_id=deposito)
         stock.add_movimiento_stock(g, pid, "entrada", 5, "carga", fecha="2026-09-11", deposito_id=deposito,
                                    lot_code=None, expires_at=None)
+    # Sólo los INSERT: antes de escribir, `add_movimiento_stock` lee el depósito para validarlo (ADR-051).
+    g.ejecutado = [e for e in g.ejecutado if e[0].lstrip().startswith("INSERT")]
     assert [s for s, _ in g.ejecutado] == [_INSERT_DE_SIEMPRE, _INSERT_DE_SIEMPRE]
     assert g.ejecutado[0][1] == (pid, None, deposito, "sale", -2, "2026-09-10T00:00:00", "venta", 9, "Venta ID 9",
                                  7, "venta")

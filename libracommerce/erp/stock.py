@@ -28,8 +28,10 @@ from datetime import datetime as _datetime
 from decimal import Decimal
 from typing import Any
 
+from libracommerce.domain.inventory import DepositoInexistente
+
 from . import lotes
-from .catalogo import get_default_deposito_id
+from .catalogo import get_default_deposito_id, validar_deposito
 from .hooks import SIN_GANCHOS, Hooks
 from .lotes import MAX_LARGO_LOTE, normalizar_lote, normalizar_vencimiento  # noqa: F401  (se reexportan)
 
@@ -87,6 +89,20 @@ def _tipo_de_row(movement_type: str, reason_code: str | None) -> str:
 # puede importar este módulo y los dos las necesitan); se reexportan acá con el mismo nombre.
 
 
+def _deposito_del_movimiento(conn, deposito_id: int | None, sobre_existencias: bool) -> int:
+    """El depósito donde se escribe un movimiento, ya validado (ADR-051). Sin `deposito_id`, el por defecto (que
+    `get_default_deposito_id` nunca devuelve inactivo). Con `deposito_id`, tiene que existir y estar activo, salvo que el
+    movimiento trabaje sobre existencias que YA están ahí (`sobre_existencias`)."""
+    if deposito_id is None:
+        resuelto = get_default_deposito_id(conn)
+        if resuelto is None:
+            raise DepositoInexistente("No hay ningún depósito activo donde mover el stock.")
+        return resuelto
+    if not sobre_existencias:
+        validar_deposito(conn, deposito_id)
+    return deposito_id
+
+
 def add_movimiento_stock(conn, producto_id: int, tipo: str, cantidad: float,
                          referencia: str = "", fecha: str = "",
                          venta_id: int | None = None,
@@ -94,7 +110,8 @@ def add_movimiento_stock(conn, producto_id: int, tipo: str, cantidad: float,
                          deposito_id: int | None = None,
                          variant_id: int | None = None,
                          lot_code: str | None = None,
-                         expires_at: _date | _datetime | str | None = None):
+                         expires_at: _date | _datetime | str | None = None,
+                         sobre_existencias: bool = False):
     """Agrega un movimiento. cantidad positiva = entrada, negativa = salida.
 
     Un movimiento de cantidad 0 se ignora: `stock_movements` tiene
@@ -108,6 +125,18 @@ def add_movimiento_stock(conn, producto_id: int, tipo: str, cantidad: float,
     carácter el de siempre. `lot_code` se recorta y no puede quedar vacío (`normalizar_lote`); `expires_at` se
     guarda como `'AAAA-MM-DD'` (`normalizar_vencimiento`). Un valor inválido es un `ValueError` **antes** de
     escribir nada. No cambian el stock total: sólo lo parten en el ledger.
+
+    🔴 **El depósito tiene que existir y estar activo** (ADR-051): un `deposito_id` inexistente o inactivo levanta
+    `DepositoInexistente` (un `ValueError`) antes de escribir, y sin `deposito_id` se usa el por defecto activo (si no hay
+    ninguno activo, también `DepositoInexistente`). Vale para `descontar_stock_venta`, `ajustar_stock`, la recepción y todo lo
+    que pasa por acá; las operaciones que ya validaban antes (`registrar_venta`, `devolver_items`, `transferir_stock`) siguen
+    rebotando en su lugar, antes de escribir el resto.
+
+    `sobre_existencias=True` es para las operaciones que trabajan con existencias que YA están en ese depósito, que puede haberse
+    dado de baja después: deshacer una venta (`anular_venta` repone donde salió la mercadería; negarse la dejaría sin poder
+    anularse), reasignar un lote (`vencimientos.asignar_vencimiento`) y dar de baja un lote (`vencimientos.dar_de_baja_lote`:
+    «las existencias de un depósito dado de baja siguen existiendo», ADR-018). Stock NUEVO (una entrada, un ajuste, una venta,
+    una recepción) nunca lo lleva: ése sólo entra a un depósito activo.
     """
     if not cantidad:
         return
@@ -128,7 +157,7 @@ def add_movimiento_stock(conn, producto_id: int, tipo: str, cantidad: float,
     # silencio con "no vino ninguno" y lo mandaría al default. Verificado:
     # ningún test ni caller del motor usa 0 como "sin depósito" (búsqueda en
     # `tests/` y `libracommerce/`, 2026-09-15).
-    _deposito = deposito_id if deposito_id is not None else get_default_deposito_id(conn)
+    _deposito = _deposito_del_movimiento(conn, deposito_id, sobre_existencias)
     if _lote is not None or _vence is not None:
         conn.execute(
             """INSERT INTO stock_movements
