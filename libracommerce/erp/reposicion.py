@@ -30,11 +30,14 @@ venta de mostrador lo trae en NULL; se usa `sales.branch_id` cuando viene y, si 
 (`margen._sucursal_de_las_ventas`). Una venta sin ninguna de las dos no entra en ninguna sucursal, sí en el total.
 
 **En camino.** Las líneas de las órdenes de compra **abiertas**: cantidad pedida menos recibida, sin bajar de 0 por
-línea. Abierta es todo menos `received` y `cancelled`, **`draft` incluido**: este motor no tiene ninguna operación que
-pase una orden a `sent` (nace `draft` y sólo `confirmar_recepcion` la mueve, a `partial`/`received`), así que la orden
-que ya se le pidió al proveedor está en `draft`. Costo: una orden abandonada en borrador cuenta como pedido. Con
-`sucursal_id` cuentan las de esa sucursal **y las que no tienen sucursal** (`purchase_orders.branch_id` es opcional,
-y no saber a dónde va no es motivo para pedirlo dos veces); esa parte se informa aparte (`en_camino_sin_sucursal`).
+línea. Abierta es todo menos `received` y `cancelled`: `draft`, `sent` y `partial`. Una orden cancelada (`erp.compras.cancelar_orden`)
+no cuenta. **El borrador es ambiguo, y por eso es una opción (ADR-056):** `draft` es un papel de trabajo que alguien todavía no mandó (se pasa a
+`sent` con `erp.compras.enviar_orden`), pero hasta v0.58 el motor no tenía cómo enviarla, así que la orden que ya se le había pedido al proveedor
+seguía en `draft`. Con `contar_borradores=True` (el default, el comportamiento de siempre) un borrador resta de lo sugerido como si ya
+estuviera pedido; con `False` **no resta**: `en_camino` sólo suma las `sent` y `partial`, y los borradores se informan aparte en `en_borrador`
+(cantidad pendiente de las órdenes `draft`, con cualquiera de las dos opciones). Costo del default: una orden abandonada en borrador cuenta
+como pedido. Con `sucursal_id` cuentan las de esa sucursal **y las que no tienen sucursal** (`purchase_orders.branch_id` es opcional,
+y no saber a dónde va no es motivo para pedirlo dos veces); esa parte se informa aparte (`en_camino_sin_sucursal`, que sigue a `en_camino`).
 La mercadería se recibe por depósito, así que lo pedido y lo recibido se descuentan sin mirar a cuál.
 
 **El sesgo por quiebres, y lo que se hace.** Un producto sin stock no vende, y dividir por `N` subestima su
@@ -133,14 +136,14 @@ MOTIVOS = ("bajo_minimo", "por_rotacion", "ambos")
 
 # El orden que puede pedirse a la lista y al CSV (ADR-037): las columnas de la pantalla de reposición. Sin pedirlo, el
 # de urgencia de `sugerencia_reposicion`.
-ORDENES = ("nombre", "codigo", "stock", "en_camino", "stock_minimo", "unidades_vendidas", "rotacion_diaria",
+ORDENES = ("nombre", "codigo", "stock", "en_camino", "en_borrador", "stock_minimo", "unidades_vendidas", "rotacion_diaria",
            "cobertura_dias", "sugerido", "motivo", "proveedor", "factor_estacional", "por_vencer")
 SENTIDOS = ("asc", "desc")
 # `motivo` se ordena como se lee en la pantalla («Bajo el mínimo», «Bajo el mínimo y por rotación», «Por rotación»),
 # no por el código.
 _RANGO_MOTIVO = {"bajo_minimo": 0, "ambos": 1, "por_rotacion": 2}
 
-#: Las órdenes que todavía no llegaron: todo menos `received` y `cancelled` (ver "En camino" en el docstring).
+#: Las órdenes que todavía no llegaron: todo menos `received` y `cancelled` (ver "En camino" en el docstring). `draft` es la que `contar_borradores` decide.
 _ESTADOS_EN_CAMINO = ("draft", "sent", "partial")
 #: Con menos días de muestra que estos, se divide por estos (ver "El sesgo por quiebres").
 _MIN_DIAS_DE_MUESTRA = 7
@@ -263,10 +266,13 @@ def _depositos(conn, sucursal_id: int | None) -> set[int]:
     return {f["id"] for f in conn.execute(sql, params).fetchall()}
 
 
-def _en_camino(conn, sucursal_id: int | None) -> tuple[dict[int, Decimal], dict[int, Decimal]]:
-    """`(en_camino, de_ese_en_camino_sin_sucursal)` por producto. Ver "En camino" en el docstring del módulo."""
+def _en_camino(conn, sucursal_id: int | None, contar_borradores: bool = True) -> tuple[dict[int, Decimal], dict[int, Decimal], dict[int, Decimal]]:
+    """`(en_camino, de_ese_en_camino_sin_sucursal, en_borrador)` por producto. Ver "En camino" en el docstring del módulo.
+
+    `en_borrador` es lo pendiente de las órdenes `draft`, siempre. `en_camino` las incluye con `contar_borradores=True` (el comportamiento de siempre)
+    y no con `False`; `en_camino_sin_sucursal` es la parte de `en_camino` de las órdenes sin sucursal."""
     filas = conn.execute(
-        f"""SELECT poi.item_id, po.branch_id, poi.quantity_ordered, poi.quantity_received
+        f"""SELECT poi.item_id, po.branch_id, po.status, poi.quantity_ordered, poi.quantity_received
             FROM purchase_order_items poi
             JOIN purchase_orders po ON po.id = poi.purchase_order_id
             WHERE po.status IN ({",".join("?" for _ in _ESTADOS_EN_CAMINO)})""",
@@ -274,14 +280,20 @@ def _en_camino(conn, sucursal_id: int | None) -> tuple[dict[int, Decimal], dict[
     ).fetchall()
     total: dict[int, Decimal] = {}
     sin_sucursal: dict[int, Decimal] = {}
+    borrador: dict[int, Decimal] = {}
     for f in filas:
         if sucursal_id is not None and f["branch_id"] not in (None, sucursal_id):
             continue
         pendiente = max(_dec(f["quantity_ordered"]) - _dec(f["quantity_received"]), _CERO)
+        es_borrador = f["status"] == "draft"
+        if es_borrador:
+            borrador[f["item_id"]] = borrador.get(f["item_id"], _CERO) + pendiente
+            if not contar_borradores:
+                continue
         total[f["item_id"]] = total.get(f["item_id"], _CERO) + pendiente
         if f["branch_id"] is None:
             sin_sucursal[f["item_id"]] = sin_sucursal.get(f["item_id"], _CERO) + pendiente
-    return total, sin_sucursal
+    return total, sin_sucursal, borrador
 
 
 def _lotes_con_fecha(conn, ids: set[int], depositos: set[int]) -> dict[int, list[tuple[datetime.date, Decimal]]]:
@@ -393,18 +405,20 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
                           categoria: str | None = None, producto_id: int | None = None,
                           solo_a_pedir: bool = True, descontar_vencido: bool = True, proveedor_id: int | None = None,
                           estacionalidad: bool = False, descontar_por_vencer: bool = False,
-                          hoy: datetime.date | None = None) -> list[dict]:
+                          contar_borradores: bool = True, hoy: datetime.date | None = None) -> list[dict]:
     """Qué pedir, por producto, del más urgente al menos (menor cobertura primero, luego mayor `sugerido`; los
     que no tienen rotación, al final). Cada fila: `producto_id`, `codigo`, `nombre`, `unidad`, `categoria`, `stock`,
     `vencido`, `por_vencer`, `proveedor_id`, `proveedor`, `en_camino`, `en_camino_sin_sucursal`, `stock_minimo`, `stock_minimo_propio`, `unidades_vendidas`, `dias_con_stock`, `rotacion_diaria`,
     `cobertura_dias` (`None` sin rotación), `sugerido`, `motivo` (`bajo_minimo`, `por_rotacion`, `ambos`, o `None`
     si no hay nada que pedir), `sin_ventas`, `posible_quiebre`, `variantes` y `factor_estacional` (`None` si `estacionalidad` está apagada o no hay historia). Ver el docstring del módulo.
 
+    Cada fila trae además `en_borrador`: lo pendiente de las órdenes de compra en borrador, aparte de `en_camino`.
+
     `solo_a_pedir` (el default) deja sólo los de `sugerido > 0`. `descontar_vencido` (el default) resta del stock lo
     que está en lotes vencidos. `stock_minimo` es el piso ya resuelto: con `sucursal_id`, el mínimo propio de esa sucursal si lo tiene (`stock_minimo_propio=True`) y si no el global; sin
     `sucursal_id`, siempre el global (ADR-024). `estacionalidad` (apagada por default) ajusta la proyección por lo que pasó hace un año. `descontar_por_vencer` (apagado por default, ADR-025) resta además del stock utilizable lo que, de los
     lotes que vencen dentro del horizonte, no llega a venderse antes (`por_vencer`; 0 sin la opción; un producto sin ventas pierde completo lo que vence dentro del horizonte, y con un mínimo > 0 se
-    sugiere reponerlo). `hoy` es para las pruebas: el default es la fecha
+    sugiere reponerlo). `contar_borradores` (prendido por default, ADR-056) hace que las órdenes en borrador resten de lo sugerido como si ya estuvieran pedidas; con `False` no restan (ver "En camino" en el módulo). `hoy` es para las pruebas: el default es la fecha
     de Argentina (`hoy_argentina`), no la del sistema. Levanta `ValueError` con un parámetro fuera de rango o una `sucursal_id` que no existe.
     No commitea (no escribe)."""
     _entero_en_rango("dias_rotacion", dias_rotacion, MAX_DIAS_ROTACION)
@@ -451,7 +465,7 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
 
     lotes = _lotes_con_fecha(conn, ids, depositos) if descontar_vencido or descontar_por_vencer else {}
     vencidos = _vencido(lotes, hoy) if descontar_vencido else {}
-    en_camino, en_camino_sin_sucursal = _en_camino(conn, sucursal_id)
+    en_camino, en_camino_sin_sucursal, en_borrador = _en_camino(conn, sucursal_id, contar_borradores)
     variantes = {
         f["item_id"]: f["n"]
         for f in conn.execute(
@@ -514,6 +528,7 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
             "vencido": _cantidad(vencido, informe), "por_vencer": _cantidad(_techo(por_vencer, escala), escala),
             "en_camino": _cantidad(pedido, informe),
             "en_camino_sin_sucursal": _cantidad(en_camino_sin_sucursal.get(pid, _CERO), informe),
+            "en_borrador": _cantidad(en_borrador.get(pid, _CERO), informe),
             "stock_minimo": _cantidad(minimo, informe), "stock_minimo_propio": minimo_propio,
             "unidades_vendidas": _cantidad(unidades, informe),
             "dias_con_stock": dias_con_stock, "rotacion_diaria": _cantidad(unidades / dias_de_muestra, informe),

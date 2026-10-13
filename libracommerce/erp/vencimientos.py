@@ -220,6 +220,9 @@ def _dias(vence: str | None, hoy: datetime.date) -> int | None:
 # ── La marca «vence» ─────────────────────────────────────────────────────
 
 
+_NO_SE_MARCA_UN_SERVICIO = "un servicio no tiene inventario: no se le puede marcar vencimiento"
+
+
 def marcar_vence(conn, item_id: int, vence: bool) -> dict:
     """Marca (o desmarca) a un producto como perecedero. Sólo eso: no escribe movimientos ni cambia stock. Un
     producto sin marcar no aparece en `proximos_a_vencer` y es lo que son todos hasta que alguien lo pide.
@@ -234,8 +237,16 @@ def marcar_vence(conn, item_id: int, vence: bool) -> dict:
     if vence and producto["item_type"] == "service":
         # Sólo MARCAR un servicio es un error: desmarcarlo limpia una marca que no debería tener (un producto marcado
         # que se editó a servicio), y tiene que poder hacerse.
-        raise ReglaDeNegocio("un servicio no tiene inventario: no se le puede marcar vencimiento")
-    conn.execute("UPDATE catalog_items SET tracks_expiry = ? WHERE id = ?", (1 if vence else 0, item_id))
+        raise ReglaDeNegocio(_NO_SE_MARCA_UN_SERVICIO)
+    if vence:
+        # ADR-057: la lectura de arriba NO alcanza, porque otra transacción puede estar pasando este producto a servicio (`catalogo.update_producto`) justo ahora, y
+        # entonces el `UPDATE` incondicional marcaba un servicio. La condición va EN el `UPDATE`: el tipo se lee dentro de la escritura, con la fila ya tomada. En
+        # PostgreSQL, si la edición a servicio todavía no confirmó, este `UPDATE` espera su candado y, cuando confirma, vuelve a evaluar el `WHERE` contra la fila
+        # nueva (READ COMMITTED): ya es un servicio, no coincide y no escribe nada. En SQLite toda escritura ya se serializa.
+        if conn.execute("UPDATE catalog_items SET tracks_expiry = 1 WHERE id = ? AND item_type <> 'service'", (item_id,)).rowcount == 0:
+            raise ReglaDeNegocio(_NO_SE_MARCA_UN_SERVICIO)
+    else:
+        conn.execute("UPDATE catalog_items SET tracks_expiry = 0 WHERE id = ?", (item_id,))
     return {"producto_id": item_id, "vence": vence}
 
 

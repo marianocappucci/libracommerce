@@ -97,7 +97,7 @@ class OpcionesCompras:
     """Lo que un producto le agrega a Compras. Sin nada, el router funciona con `proveedor_id == party_id` y sin
     restricción extra de quién escribe.
 
-    - `autorizar_escritura`: quién crea órdenes/recepciones, agrega líneas y confirma (una `Depends(...)`, como
+    - `autorizar_escritura`: quién crea órdenes/recepciones, agrega líneas, confirma, **envía y cancela órdenes** (ADR-055) (una `Depends(...)`, como
       `OpcionesCajas.autorizar_escritura`). La lectura queda con la protección con la que el producto monte el
       router entero.
     - `numerador(conn) -> str`: la numeración de una orden nueva (`"OC-000001"`). Default: `MAX(id)+1`, sin lock —
@@ -167,6 +167,28 @@ def build_compras_router(*, conexion: Conexion | None = None,
                 raise HTTPException(409, str(e)) from e
             return _con_proveedor(conn, orden)
 
+    def _transicion(operacion, orden_id: int):
+        with abrir() as conn:
+            try:
+                orden = operacion(conn, orden_id)
+            except compras.OrdenNoEncontrada as e:
+                raise HTTPException(404, "purchase order not found") from e
+            except compras.EstadoInvalido as e:
+                raise HTTPException(409, str(e)) from e
+            return _con_proveedor(conn, orden)
+
+    @router.post("/purchase-orders/{orden_id}/enviar", dependencies=escribe)
+    def enviar_orden(orden_id: int):
+        """`draft` -> `sent` (ADR-055): ya se le pidió al proveedor. Idempotente: enviar una orden ya enviada la devuelve igual. 409 si la orden ya
+        recibió mercadería o está cancelada. Tiene la misma guarda de escritura que el resto de Compras (`OpcionesCompras.autorizar_escritura`)."""
+        return _transicion(compras.enviar_orden, orden_id)
+
+    @router.post("/purchase-orders/{orden_id}/cancelar", dependencies=escribe)
+    def cancelar_orden(orden_id: int):
+        """`draft` o `sent` -> `cancelled` (ADR-055). Idempotente: cancelar una orden ya cancelada la devuelve igual. 409 si la orden ya recibió
+        mercadería (`partial` o `received`). Una cancelada no cuenta como «en camino» en la reposición ni recibe mercadería."""
+        return _transicion(compras.cancelar_orden, orden_id)
+
     # ── Recepciones ────────────────────────────────────────────────────
 
     @router.post("/purchase-receipts", dependencies=escribe)
@@ -180,6 +202,8 @@ def build_compras_router(*, conexion: Conexion | None = None,
                 )
             except compras.OrdenNoEncontrada as e:
                 raise HTTPException(404, "purchase order not found") from e
+            except compras.EstadoInvalido as e:
+                raise HTTPException(409, str(e)) from e            # la orden está cancelada
             return _con_proveedor(conn, recepcion)
 
     @router.get("/purchase-receipts")
@@ -228,6 +252,8 @@ def build_compras_router(*, conexion: Conexion | None = None,
                 raise HTTPException(404, "purchase order not found") from e
             except compras.SinRevision as e:
                 raise HTTPException(503, str(e)) from e
+            except compras.EstadoInvalido as e:
+                raise HTTPException(409, str(e)) from e            # la orden está cancelada
             except claves.ClaveReusada as e:
                 # La clave ya se aplicó con otros datos: es otra recepción y necesita otra clave.
                 raise HTTPException(409, str(e)) from e

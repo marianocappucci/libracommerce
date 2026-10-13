@@ -731,6 +731,38 @@ _COND_DEVUELTO = (
 )
 
 
+class SinRevision(Exception):
+    """503: a la base le falta la revisión `0007_devoluciones_de_servicio` del motor (la tabla `sale_service_returns`), y la devolución pide devolver un servicio."""
+
+
+def tiene_devoluciones_de_servicio(conn) -> bool:
+    """Si la base tiene la revisión `0007_devoluciones_de_servicio` (la tabla `sale_service_returns`, ADR-054). Se sondea por metadatos (`PRAGMA table_info`, que el adaptador de
+    PostgreSQL traduce a `information_schema`) y no con un `SELECT` de la tabla: en PostgreSQL un `SELECT` fallido aborta la transacción entera."""
+    return bool(conn.execute("PRAGMA table_info(sale_service_returns)").fetchall())
+
+
+def _servicios_entre(conn, item_ids) -> set[int]:
+    """Los ids, entre `item_ids`, que son servicios del catálogo (`item_type = 'service'`): no tienen inventario, y devolverlos no escribe stock (ADR-054)."""
+    ids = sorted({i for i in item_ids if i is not None})
+    if not ids:
+        return set()
+    marcadores = ",".join("?" for _ in ids)
+    return {f[0] for f in conn.execute(
+        f"SELECT id FROM catalog_items WHERE item_type = 'service' AND id IN ({marcadores})", ids).fetchall()}
+
+
+def _devuelto_de_servicios(conn, vid: int) -> dict[tuple, float]:
+    """Lo ya devuelto de los servicios de la venta, `{(ítem, variante): cantidad}`: el equivalente, para un servicio, de las filas `devolucion` del ledger (que un servicio no
+    tiene). Vacío si la base no tiene la revisión `0007` (no se devolvió ningún servicio por este camino)."""
+    if not tiene_devoluciones_de_servicio(conn):
+        return {}
+    devuelto: dict[tuple, float] = {}
+    for f in conn.execute("SELECT item_id, variant_id, quantity FROM sale_service_returns WHERE sale_id=? ORDER BY id", (vid,)).fetchall():
+        k = (f["item_id"], f["variant_id"])
+        devuelto[k] = devuelto.get(k, 0.0) + float(f["quantity"])
+    return devuelto
+
+
 def _movimientos_de_venta(conn, vid: int, condicion_sql: str) -> list:
     # `ORDER BY id`: el orden de escritura, que es el de la reposición de `anular_venta` (antes dependía del orden físico
     # de la tabla). `lot_code` y `expires_at` (ADR-018, A-4 PR-2) son el bucket de origen de cada fila.
@@ -950,6 +982,7 @@ def anular_venta(conn, vid: int, usuario_id: int | None = None,
         venta["status"] in ("returned", "partially_returned")
         or venta["estado"] in ("devuelta", "devuelta_parcial")
         or _movimientos_de_venta(conn, vid, _COND_DEVUELTO)
+        or _devuelto_de_servicios(conn, vid)
     ):
         raise VentaConDevoluciones(
             "La venta tiene devoluciones: no se puede anular; devolvé el "
@@ -1029,8 +1062,8 @@ def _referencia_de_la_operacion(vid: int, clave_op: str) -> str:
 
 
 def _devolucion_de_la_clave(conn, vid: int, clave_op: str) -> dict[tuple, float]:
-    """Lo que ya repuso, en el stock de la venta, una devolución con esta clave: `{(ítem, variante, depósito): cantidad}`; vacío si
-    la clave es nueva para esta venta. La marca `[op:<clave>]` va al final de la nota de cada fila `devolucion` que escribe
+    """Lo que ya repuso, en el stock de la venta, una devolución con esta clave (y lo que devolvió de sus servicios, que no tienen stock: ADR-054):
+    `{(ítem, variante, depósito): cantidad}`; vacío si la clave es nueva para esta venta. La marca `[op:<clave>]` va al final de la nota de cada fila `devolucion` que escribe
     `devolver_items`; se compara **literal** al final de la nota (un texto libre no la imita) y sólo entre las filas de ESTA venta: la
     clave es única por venta, y la misma clave sobre otra venta es otra operación. Las filas `merma` del par de un perecedero también
     la llevan, pero no se cuentan: la reposición ya está en la `devolucion` de cada tramo."""
@@ -1043,6 +1076,14 @@ def _devolucion_de_la_clave(conn, vid: int, clave_op: str) -> dict[tuple, float]
         if str(f["note"] or "").endswith(marca):
             k = (f["item_id"], f["variant_id"], f["location_id"])
             repuesto[k] = repuesto.get(k, 0.0) + float(f["quantity_delta"])
+    if tiene_devoluciones_de_servicio(conn):
+        # Los servicios no escriben stock (ADR-054): su rastro de esta clave está en `sale_service_returns`, con la misma marca al final de la nota.
+        for f in conn.execute(
+            "SELECT item_id, variant_id, location_id, quantity, note FROM sale_service_returns WHERE sale_id=? ORDER BY id", (vid,),
+        ).fetchall():
+            if str(f["note"] or "").endswith(marca):
+                k = (f["item_id"], f["variant_id"], f["location_id"])
+                repuesto[k] = repuesto.get(k, 0.0) + float(f["quantity"])
     return {k: round(v, 6) for k, v in repuesto.items()}
 
 
@@ -1150,8 +1191,15 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
 
     `devoluciones` mapea el **id de `sale_items`** (no la posición: acá, a
     diferencia del `Sale` del dominio, la línea sí tiene un id estable) a la
-    cantidad que vuelve. Una línea de servicio no se devuelve: anular la
-    venta entera.
+    cantidad que vuelve. Una línea sin producto del catálogo (ítem libre) no se
+    devuelve: anular la venta entera. **Un servicio del catálogo sí** (ADR-054):
+    se reintegra su importe prorrateado y baja el tope por (ítem, variante) como
+    cualquier línea, y cuenta para `vendido_total`/`devuelto_total` y para el
+    estado (`devuelta` / `devuelta_parcial`), pero **no escribe stock**: un
+    servicio no tiene inventario y la venta tampoco lo descontó (`_es_servicio`).
+    Lo devuelto queda en `sale_service_returns` (revisión `0007`; sin ella,
+    `SinRevision` sólo si se pide devolver un servicio) y respeta la
+    `clave_operacion` igual que las filas del ledger.
 
     🔑 **El tope es por (ítem, variante), no por línea**: `disponible` se
     calcula sumando la cantidad vendida de TODAS las líneas con esa clave,
@@ -1266,6 +1314,13 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
         raise ValueError("No se indicó ninguna línea a devolver")
 
     lineas = _lineas_de_la_venta(conn, vid)
+    # ADR-054: un servicio del catálogo (`item_type = 'service'`, una línea `kind='product'` en la venta) no tiene inventario: se reintegra su importe, baja su tope y cuenta para
+    # el estado de la venta, pero NO se escribe stock (la venta tampoco lo descontó: `_es_servicio`). Lo devuelto queda en `sale_service_returns` (revisión 0007).
+    servicios = _servicios_entre(conn, [li["item_id"] for li in lineas.values() if li["kind"] == "product"])
+    if (servicios and not tiene_devoluciones_de_servicio(conn)
+            and any(i in lineas and lineas[i]["item_id"] in servicios for i in devoluciones)):
+        raise SinRevision("Falta la revisión 0007_devoluciones_de_servicio del motor: corré `libracommerce-migrar upgrade` "
+                          "(--prefijo del producto) antes de devolver un servicio.")
     # Vendido por clave: la SUMA de todas las líneas con ese (ítem, variante),
     # no la de una sola — dos líneas del mismo producto comparten el pozo.
     vendido_por_clave: dict[tuple, float] = {}
@@ -1296,6 +1351,8 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
         lotes.tomar_productos(conn, a_tomar)
     devueltas = _movimientos_de_venta(conn, vid, _COND_DEVUELTO)
     ya_devuelto = _acumular(devueltas, con_deposito=False)
+    for k, devuelto in _devuelto_de_servicios(conn, vid).items():
+        ya_devuelto[k] = ya_devuelto.get(k, 0.0) + devuelto
     lotes_por_clave = (
         _lotes_a_devolver(
             vendidas, devueltas,
@@ -1347,6 +1404,13 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
                 f"quedan {disponible} sin devolver"
             )
         pedido_por_clave[clave] = pedido_por_clave.get(clave, 0.0) + cantidad
+        if linea["item_id"] in servicios:
+            conn.execute(
+                "INSERT INTO sale_service_returns (sale_id, item_id, variant_id, location_id, quantity, note, created_by, occurred_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (vid, linea["item_id"], linea["variant_id"], deposito_id, cantidad, f"Devolución venta ID {vid}{sello}", usuario_id, fecha),
+            )
+            continue
         tramos = _repartir_devolucion(lotes_por_clave[clave], cantidad) if clave in lotes_por_clave else []
         con_lote = any(lote is not None or vence is not None for lote, vence, _ in tramos)
         if not con_lote:

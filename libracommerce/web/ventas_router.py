@@ -29,6 +29,7 @@ instala cualquier producto que monte ventas.
 
 from __future__ import annotations
 
+import datetime
 import logging
 import math
 import sqlite3
@@ -140,8 +141,12 @@ class VentaPayload(BaseModel):
     #: único que mandan Contalibra y Restolibra hoy) es el comportamiento de
     #: siempre: el motor resuelve el depósito por defecto.
     deposito_id: int | None = None
+    #: **La sucursal por la que el POS cotizó los precios** (ADR-058). Sólo la lee `OpcionesVentas.validar_precios`: un POS que la manda declara que sabe de precios por
+    #: sucursal, y entonces el servidor valida cada línea contra el precio de la sucursal de la venta (`OpcionesVentas.sucursal_de_la_venta`, que por default sale del
+    #: depósito); uno que no la manda (`None`, el default, y lo único que mandan los POS anteriores) se valida contra el precio general, como hasta ahora. No se guarda.
+    sucursal_id: int | None = None
 
-    _no_son_booleanos = sin_booleanos("descuento", "cliente_id", "deposito_id")
+    _no_son_booleanos = sin_booleanos("descuento", "cliente_id", "deposito_id", "sucursal_id")
 
 
 class DevolucionLinea(BaseModel):
@@ -199,6 +204,16 @@ def _stock_siempre() -> bool:
     return True
 
 
+def sucursal_del_deposito(conn, payload: VentaPayload) -> int | None:
+    """La sucursal de la venta, por default: la del depósito del que sale (`locations.branch_id`; sin `deposito_id`, el depósito por defecto). `None` si el depósito
+    no pertenece a ninguna sucursal (o no existe: eso lo rechaza la venta con su 422). Es el default de `OpcionesVentas.sucursal_de_la_venta`."""
+    deposito = payload.deposito_id if payload.deposito_id is not None else catalogo.get_default_deposito_id(conn)
+    if deposito is None:
+        return None
+    fila = conn.execute("SELECT branch_id FROM locations WHERE id = ?", (deposito,)).fetchone()
+    return fila[0] if fila is not None else None
+
+
 @dataclass(frozen=True)
 class OpcionesVentas:
     #: Si la venta descuenta stock. Los productos lo atan al módulo `stock`.
@@ -238,10 +253,10 @@ class OpcionesVentas:
     guardar_costo: bool = False
     #: Avisos de vencimiento (ADR-018, A-4 PR-3, opt-in). **Prendida:** `POST /api/ventas` y `GET /api/ventas/{id}`
     #: agregan la clave `avisos` a la respuesta **sólo si hay alguno** (`erp.lotes.avisos_de_venta`: lote vencido, por
-    #: vencer —15 días— y faltante sin lote; `hoy` es la fecha de Argentina, no la de la venta), y existe
+    #: vencer —15 días— y faltante sin lote; `hoy` es la fecha de Argentina al crear la venta y la fecha de la venta al reabrirla, ADR-057), y existe
     #: `POST /api/ventas/plan-salida`: una LECTURA pura (no escribe ni bloquea) que dice de qué lote saldría cada línea
     #: (`erp.lotes.planificar_salida`) para que el POS confirme ANTES de cobrar. **Apagada (el default):** las respuestas
-    #: son byte a byte las de hoy, la ruta no existe (404) y no figura en `/openapi.json` (Contalibra y Restolibra no
+    #: son byte a byte las de hoy, la ruta no existe (404, ADR-057) y no figura en `/openapi.json` (Contalibra y Restolibra no
     #: cambian). Sin gate de plan ni permisos propios: el producto monta el router con sus dependencias.
     con_avisos_de_vencimiento: bool = False
     #: A quién se le limitan las ventas a las de **sus turnos** de caja (ADR-038): recibe el usuario de la sesión y dice si
@@ -253,12 +268,21 @@ class OpcionesVentas:
     #: escribir nada: cada línea tiene que llevar `producto_id` (si no, 422); el `descuento` manual del pedido tiene que ser 0
     #: (422: el ahorro de las promociones lo calcula el servidor); y el `precio` de cada línea tiene que ser el que sale de la
     #: lista predeterminada activa (`erp.listas_precio.precios_por_producto`, el quiebre cuenta por producto, ADR-048) o, sin
-    #: lista o sin precio en ella, el plano del producto, con un centavo de tolerancia. Si alguna difiere: **409** con
+    #: lista o sin precio en ella, el plano del producto, con un centavo de tolerancia (por sucursal si el POS la declara, ADR-058; ver `sucursal_de_la_venta`). Si alguna difiere: **409** con
     #: `{detail: {mensaje, codigo: "precios_distintos", precios: [{indice, producto_id, variante_id, enviado, esperado}]}}` y no se escribe
     #: nada (ni venta, ni stock, ni caja); el POS re-precia y le avisa al cajero. Una línea con `etiqueta` de balanza se valida
     #: contra ella (`erp.precio_de_venta`); una etiqueta que no vale es 422. **Apagada (el default):** el motor guarda el
     #: `precio` del cliente, como hoy (Contalibra y Restolibra no cambian, byte a byte).
     validar_precios: bool = False
+    #: **El precio de la sucursal** (ADR-058). Con `validar_precios`, la lista de precios puede tener un precio propio de una sucursal (`item_prices.branch_id`) y el POS
+    #: cotiza con `sucursal_id` (`POST /api/listas-precio/{id}/precios`). Qué sucursal rige para ESTA venta lo decide esta costura: `(conn, payload) -> int | None`, por
+    #: default la del depósito del que sale (`sucursal_del_deposito`). No es el `sucursal_id` del pedido a ciegas: el servidor no le cree al cliente a qué sucursal
+    #: pertenece su depósito. Se usa **sólo si el POS declaró `VentaPayload.sucursal_id`** (o si `exigir_precio_de_sucursal` está prendida): un POS anterior, que cotiza el
+    #: precio general, sigue validándose contra el general y no recibe de golpe un 409. Un producto con otra regla (p. ej. la sucursal del cajero) pasa la suya.
+    sucursal_de_la_venta: Callable[[Any, VentaPayload], int | None] = sucursal_del_deposito
+    #: Cierra la transición del precio por sucursal (ADR-058): el servidor valida contra el precio de la sucursal de la venta **aunque el POS no la haya declarado**.
+    #: Default `False`; se prende cuando ningún POS viejo queda en pie. Sin ella, quien omite `sucursal_id` elige el precio general.
+    exigir_precio_de_sucursal: bool = False
 
 
 def build_guarda_de_venta(
@@ -296,8 +320,20 @@ def build_guarda_de_venta(
     return guarda
 
 
-def _agregar_avisos(conn, venta: dict | None, venta_id: int) -> None:
-    """Agrega `avisos` a la venta **sólo si hay alguno** (sin avisos la respuesta es la de siempre)."""
+def _fecha_de_la_venta(venta: dict) -> datetime.date | None:
+    """El día de una venta ya guardada (`fecha`: `AAAA-MM-DD`, con o sin hora), o `None` si no se puede leer."""
+    try:
+        return datetime.date.fromisoformat(str(venta.get("fecha") or "")[:10])
+    except ValueError:
+        return None
+
+
+def _agregar_avisos(conn, venta: dict | None, venta_id: int, *, a_la_fecha_de_la_venta: bool = False) -> None:
+    """Agrega `avisos` a la venta **sólo si hay alguno** (sin avisos la respuesta es la de siempre).
+
+    `a_la_fecha_de_la_venta` (ADR-057): el «hoy» contra el que se miden los lotes es el DÍA DE LA VENTA y no el de hoy. Al reabrir una venta vieja (`GET /{vid}`) un lote
+    que estaba vigente cuando se vendió figuraba `lote_vencido` meses después: un aviso que la venta nunca tuvo. En `POST /api/ventas` la venta se acaba de hacer y el
+    «hoy» es el de siempre (la fecha de Argentina), que es lo que el cajero necesita saber ahora, venga como venga la `fecha` del pedido."""
     if venta is None:
         return
     # 🔴 **Falla ABIERTO.** En `POST /api/ventas` esto corre DESPUÉS del commit de la venta y del descuento de stock: si el cálculo de
@@ -305,7 +341,8 @@ def _agregar_avisos(conn, venta: dict | None, venta_id: int) -> None:
     # venta y cobro) o, en el cobro por QR, perdería el id de la venta pendiente (hallazgo de Codex, 2026-10-01). Un aviso es un
     # complemento informativo: si no se puede calcular se omite, se registra el error y se devuelve la venta confirmada.
     try:
-        avisos = lotes.avisos_de_venta(conn, venta_id)
+        hoy = _fecha_de_la_venta(venta) if a_la_fecha_de_la_venta else None
+        avisos = lotes.avisos_de_venta(conn, venta_id, hoy=hoy)
     except Exception:  # noqa: BLE001 -- deliberadamente amplio: nada de esto puede ocultar una venta ya registrada
         _log.warning("No se pudieron calcular los avisos de vencimiento de la venta %s; se omiten", venta_id, exc_info=True)
         return
@@ -313,10 +350,13 @@ def _agregar_avisos(conn, venta: dict | None, venta_id: int) -> None:
         venta["avisos"] = avisos
 
 
-def _rechazo_por_precios(abrir: Conexion, payload: VentaPayload) -> JSONResponse | None:
+def _rechazo_por_precios(abrir: Conexion, payload: VentaPayload, opciones: OpcionesVentas) -> JSONResponse | None:
     """`OpcionesVentas.validar_precios` (ADR-049): `None` si el servidor está de acuerdo con el precio de todas las líneas; si
     no, el 409 que corta la venta ANTES de escribir nada. 422 (`HTTPException`) si el pedido está mal armado: descuento manual,
     línea sin producto o etiqueta de balanza que no vale.
+
+    **Con precio por sucursal (ADR-058)**, las líneas se comparan contra el precio de la sucursal de la venta cuando el POS la declaró (`payload.sucursal_id`) o la
+    opción `exigir_precio_de_sucursal` está prendida; el 409 lleva entonces `sucursal_id` (la que usó el servidor) para que el POS cotice por ésa.
 
     El 409 es una `JSONResponse` y no una `HTTPException` porque su `detail` es un objeto (`{mensaje, codigo, precios}`) y se
     quiere tal cual en el cuerpo. **`detail` objeto y no `precios` al lado:** el `ApiError` del cliente del kit (`libra-ui`) sólo
@@ -335,18 +375,23 @@ def _rechazo_por_precios(abrir: Conexion, payload: VentaPayload) -> JSONResponse
     if any(not (math.isfinite(linea["qty"]) and math.isfinite(linea["precio"])) for linea in lineas):
         raise HTTPException(422, "La cantidad y el precio de cada ítem tienen que ser números finitos.")
     with abrir() as conn:
+        sucursal_id = (opciones.sucursal_de_la_venta(conn, payload)
+                       if payload.sucursal_id is not None or opciones.exigir_precio_de_sucursal else None)
         try:
-            distintos = precio_de_venta.validar_precios(conn, lineas)
+            distintos = precio_de_venta.validar_precios(conn, lineas, sucursal_id=sucursal_id)
         except ValueError as exc:  # LineaSinProducto, EtiquetaInvalida y la variante que no es del producto
             raise HTTPException(422, str(exc)) from None
     if not distintos:
         return None
     n = len(distintos)
-    return JSONResponse(status_code=409, content={"detail": {
+    detalle = {
         "mensaje": f"Cambiaron los precios de {n} {'producto' if n == 1 else 'productos'}: revisá el total y volvé a cobrar.",
         "codigo": "precios_distintos",
         "precios": distintos,
-    }})
+    }
+    if sucursal_id is not None:
+        detalle["sucursal_id"] = sucursal_id
+    return JSONResponse(status_code=409, content={"detail": detalle})
 
 
 def build_ventas_router(
@@ -401,7 +446,7 @@ def build_ventas_router(
         if not items:
             raise HTTPException(422, "Debe agregar al menos un ítem.")
 
-        if opciones.validar_precios and (rechazo := _rechazo_por_precios(abrir, payload)) is not None:
+        if opciones.validar_precios and (rechazo := _rechazo_por_precios(abrir, payload, opciones)) is not None:
             return rechazo
 
         subtotal = round(sum(i["subtotal"] for i in items), 2)
@@ -508,7 +553,7 @@ def build_ventas_router(
 
                 venta["promociones"] = promos.promociones_de_venta(conn, vid)
             if venta and opciones.con_avisos_de_vencimiento:
-                _agregar_avisos(conn, venta, vid)
+                _agregar_avisos(conn, venta, vid, a_la_fecha_de_la_venta=True)
         if not venta:
             raise HTTPException(404, "Venta no encontrada")
         return venta
@@ -542,6 +587,14 @@ def build_ventas_router(
                     return lotes.planificar_salida(conn, items, payload.deposito_id, hooks=opciones.hooks)
                 except ValueError as exc:
                     raise HTTPException(422, str(exc)) from None
+
+    else:
+
+        @router.post("/plan-salida", include_in_schema=False)
+        def plan_salida_apagado():
+            """Con la opción apagada la ruta no existe: sin esto el POST caía en `GET /{vid}`, que captura el path y contestaba 405 (ADR-057). Es un 404 como el de cualquier
+            ruta que el router no tiene, con el mismo cuerpo, y no figura en `/openapi.json`."""
+            raise HTTPException(404, "Not Found")
 
     @router.post("/{vid}/anular", dependencies=gate_anular + guarda_venta)
     def anular(vid: int, user: dict = Depends(usuario)):
@@ -585,6 +638,10 @@ def build_ventas_router(
                 # La clave ya se aplicó a esta venta con otros datos: es otra devolución y necesita otra clave.
                 conn.rollback()
                 raise HTTPException(409, str(exc)) from None
+            except ventas.SinRevision as exc:
+                # Falta la revisión 0007 y se pidió devolver un servicio (ADR-054): 503 con el comando, como las demás revisiones del motor.
+                conn.rollback()
+                raise HTTPException(503, str(exc)) from None
             except ventas.DepositoInexistente as exc:
                 # Explícito y no sólo cubierto por el `except ValueError` de
                 # abajo (que también lo atraparía, por herencia): así queda

@@ -9,8 +9,10 @@ lo que el servidor calcula.
 La regla es **la del POS, repetida en el servidor**:
 
 - Hay una lista predeterminada activa: el precio de la línea es el de `precios_por_producto` (el quiebre cuenta por
-  producto, ADR-048), al momento de ahora y sin sucursal —el POS cotiza sin `sucursal_id`—. Si la lista no tiene precio
-  para ese producto, rige el precio plano (`catalog_items.default_sale_price`), igual que en la pantalla.
+  producto, ADR-048), al momento de ahora y **con la sucursal que se pida** (`sucursal_id`, ADR-058; sin ella, el precio
+  general, que es lo que cotizaba el POS cuando todavía no sabía de sucursales). Un precio propio de la sucursal gana
+  sobre el general; sin precio propio, rige el general. Si la lista no tiene precio para ese producto, rige el precio
+  plano (`catalog_items.default_sale_price`), igual que en la pantalla.
 - No hay lista predeterminada activa: el precio plano. La variante no tiene precio propio (ADR-045).
 - Una línea con `etiqueta` (el EAN-13 crudo de la balanza) se valida contra lo que dice la etiqueta, con el formato del
   comercio (`catalogo.get_formato_balanza`, la misma `commerce_settings` que usa `escanear`): **por importe**, el precio
@@ -96,12 +98,13 @@ def _esperado_por_etiqueta(conn, linea: dict, esperado: float) -> float:
     return esperado
 
 
-def validar_precios(conn, lineas: list[dict], *, en: str = "") -> list[dict]:
+def validar_precios(conn, lineas: list[dict], *, en: str = "", sucursal_id: int | None = None) -> list[dict]:
     """Compara el precio de cada línea con el que calcula el servidor y devuelve las que no coinciden.
 
     `lineas` es `[{indice, nombre, producto_id, variante_id, qty, precio, etiqueta?}]`; `indice` es la posición de la
     línea en el pedido original (lo que el POS usa para saber a cuál corregir). `en` es el momento de la cotización (ISO;
-    vacío = ahora). Devuelve `[]` si todas coinciden, o `[{indice, producto_id, variante_id, enviado, esperado}]`.
+    vacío = ahora). `sucursal_id` es la sucursal por la que se cotiza (ADR-058): con ella rige el precio propio de esa
+    sucursal en la lista si lo hay y, si no, el general; `None` (el default) es el precio general de siempre. Devuelve `[]` si todas coinciden, o `[{indice, producto_id, variante_id, enviado, esperado}]`.
     **Lectura pura**: no escribe nada.
 
     Un producto que no existe no se valida (no hay precio que esperar): lo rechaza `crear_venta_directa` con su 422.
@@ -125,8 +128,8 @@ def validar_precios(conn, lineas: list[dict], *, en: str = "") -> list[dict]:
         cotizadas = lp.precios_por_producto(
             conn, lista_id,
             [{"producto_id": c["producto_id"], "variante_id": c["variante_id"], "cantidad": c["qty"]} for c in conocidas],
-            # Sin sucursal, como el POS: si éste cotizara por sucursal, el servidor tiene que hacer lo mismo (ADR-049).
-            sucursal_id=None, en=en or datetime.now(UTC).isoformat(),
+            # La misma sucursal por la que cotiza el POS (ADR-049: lo que el POS cotiza, el servidor lo valida; ADR-058: ahora con sucursal).
+            sucursal_id=sucursal_id, en=en or datetime.now(UTC).isoformat(),
         )
         de_lista = {linea["indice"]: cotizada["precio"] for linea, cotizada in zip(conocidas, cotizadas, strict=True)}
 

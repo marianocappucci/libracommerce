@@ -145,7 +145,7 @@ def _filtro_de_ventas(desde: str, hasta: str) -> tuple[str, list]:
 
 
 def _devuelto_por_clave(conn, desde: str, hasta: str) -> dict[tuple, Decimal]:
-    """Lo devuelto por (venta, ítem, variante), del ledger de stock.
+    """Lo devuelto por (venta, ítem, variante), del ledger de stock (y, para los servicios, que no tienen stock, de `sale_service_returns`: ADR-054).
 
     Las dos formas en que el motor anota una devolución (mismo criterio que
     `erp.ventas._COND_DEVUELTO`, pero atadas a `source_type` porque acá se junta con
@@ -165,7 +165,20 @@ def _devuelto_por_clave(conn, desde: str, hasta: str) -> dict[tuple, Decimal]:
             GROUP BY sm.source_id, sm.item_id, sm.variant_id""",
         params,
     ).fetchall()
-    return {(f["venta_id"], f["item_id"], f["variant_id"]): _dec(f["devuelto"]) for f in filas}
+    devuelto = {(f["venta_id"], f["item_id"], f["variant_id"]): _dec(f["devuelto"]) for f in filas}
+    if conn.execute("PRAGMA table_info(sale_service_returns)").fetchall():
+        # Lo devuelto de un SERVICIO no está en el ledger (no tiene inventario, ADR-054) sino en `sale_service_returns`: sin esto el margen de un servicio devuelto no bajaría.
+        for f in conn.execute(
+            f"""SELECT r.sale_id AS venta_id, r.item_id, r.variant_id, SUM(r.quantity) AS devuelto
+                FROM sale_service_returns r
+                JOIN sales s ON s.id = r.sale_id
+                WHERE {donde}
+                GROUP BY r.sale_id, r.item_id, r.variant_id""",
+            params,
+        ).fetchall():
+            clave = (f["venta_id"], f["item_id"], f["variant_id"])
+            devuelto[clave] = devuelto.get(clave, _CERO) + _dec(f["devuelto"])
+    return devuelto
 
 
 def _lineas_netas(conn, desde: str, hasta: str):

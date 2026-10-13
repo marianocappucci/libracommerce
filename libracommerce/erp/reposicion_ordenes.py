@@ -2,8 +2,7 @@
 
 Cierra el circuito de la reposición: lo que `erp.reposicion.sugerencia_reposicion` dice que hay que pedir se convierte en **una orden de
 compra en `draft` por proveedor habitual** (`catalog_items.supplier_party_id`, ADR-021), con una línea por producto. **Nunca envía ni
-confirma nada**: una orden en borrador es un papel de trabajo que una persona revisa, ajusta y manda; el motor ni siquiera tiene una operación
-que pase una orden a `sent`.
+confirma nada**: una orden en borrador es un papel de trabajo que una persona revisa, ajusta y manda (`erp.compras.enviar_orden`, ADR-055).
 
 **Qué se pide.** Exactamente el `sugerido` de la reposición con los mismos parámetros (los que se le pasan a esta función son los de
 `sugerencia_reposicion`), siempre `solo_a_pedir`. `producto_ids` acota a esos productos; uno que no tiene nada que pedir se informa en `omitidos`.
@@ -18,7 +17,9 @@ marca (`costo_cero`) para que la persona lo complete. Sin IVA (`tax_rate` 0): se
 repetirla vuelve a calcular; es inofensivo porque no escribió nada. Cuando sí crea, el reintento exacto devuelve también lo que no se pidió (`sin_proveedor`, `omitidos`).
 
 **No se duplica.** Las órdenes en borrador cuentan como «en camino» en la reposición (ADR-017), así que generar dos veces seguidas la segunda no
-encuentra nada que pedir. Además `clave_operacion` (obligatoria) hace idempotente un reintento exacto: se estampa `[op:<clave>]` en las
+encuentra nada que pedir. **Aunque la pantalla las deje de contar** (`contar_borradores=False`, ADR-056: la vista ya no resta los borradores de lo sugerido), la generación
+**las sigue mirando siempre**: calcula con `contar_borradores=True`, así que un producto con un borrador abierto no vuelve a entrar en otra orden. Por eso `contar_borradores` es
+un parámetro que esta función acepta (la pantalla manda los mismos que ve) pero no cambia lo que crea ni entra en la huella de la clave. Además `clave_operacion` (obligatoria) hace idempotente un reintento exacto: se estampa `[op:<clave>]` en las
 `notes` de cada orden creada, y una clave ya usada devuelve esas mismas órdenes (`repetida: true`) sin crear otras. Las devuelve **tal como están ahora** (estado, líneas, total): si se
 recibió o se editó alguna entre el pedido y el reintento, el reintento lo refleja; lo que se promete es que no se crea nada nuevo, no una foto congelada.
 
@@ -177,9 +178,11 @@ def generar_ordenes_borrador(conn, *, clave_operacion, producto_ids: list[int] |
     clave ya usada. `topes` (`{producto_id: cantidad}`) es lo que la persona vio y confirmó: la cantidad de cada línea es el **menor** entre el
     sugerido de ahora y su tope, así que si entre la vista previa y el pedido el stock bajó y el sugerido subió, la orden no se pasa de lo confirmado
     (si bajó, se pide menos); un producto sin tope se pide por el sugerido. `parametros` son los de `sugerencia_reposicion` (`dias_rotacion`, `dias_cobertura`, `plazo_entrega_dias`, `sucursal_id`,
-    `categoria`, `proveedor_id` —un `party_id`—, `descontar_vencido`, `estacionalidad`, `descontar_por_vencer`: la orden sale con el mismo ajuste que se ve); `solo_a_pedir` no se acepta. `ValueError` con un parámetro inválido o
+    `categoria`, `proveedor_id` —un `party_id`—, `descontar_vencido`, `estacionalidad`, `descontar_por_vencer`: la orden sale con el mismo ajuste que se ve; `contar_borradores` se acepta y se ignora: los borradores siempre cuentan acá, para no duplicar); `solo_a_pedir` no se acepta. `ValueError` con un parámetro inválido o
     una `clave_operacion` mal formada (`ClaveReusada`, que es un `ValueError`, si la clave ya se usó con otros datos); `reposicion.SinRevision` sin la `0004`. No commitea."""
     clave = _clave(clave_operacion)
+    # Los borradores SIEMPRE cuentan al generar (ver "No se duplica" arriba): la opción de la pantalla no cambia lo que se crea, así que tampoco la huella.
+    parametros = {k: v for k, v in parametros.items() if k != "contar_borradores"}
     if "solo_a_pedir" in parametros:
         raise ValueError("solo_a_pedir no se acepta: las órdenes salen siempre de lo que hay que pedir")
     if not reposicion.tiene_proveedor(conn):
@@ -224,7 +227,7 @@ def generar_ordenes_borrador(conn, *, clave_operacion, producto_ids: list[int] |
                 break
         return {"ordenes": [_vista(conn, o) for o, _ in previas], "sin_proveedor": sin_prov, "omitidos": omit, "repetida": True}
 
-    filas = reposicion.sugerencia_reposicion(conn, solo_a_pedir=True, hoy=hoy, **parametros)
+    filas = reposicion.sugerencia_reposicion(conn, solo_a_pedir=True, contar_borradores=True, hoy=hoy, **parametros)
     omitidos: list[int] = []
     if producto_ids is not None:
         pedidos = set(producto_ids)

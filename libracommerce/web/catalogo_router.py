@@ -966,6 +966,12 @@ def build_stock_router(
             if payload.modo == "absoluto":
                 if payload.cantidad < 0:
                     raise HTTPException(422, "El stock no puede fijarse en un valor negativo.")
+                if opciones.por_deposito and deposito_id is None:
+                    # ADR-057: sin depósito, `ajustar_stock` compara el total de TODOS los depósitos y escribe la diferencia en el por defecto: con más
+                    # de uno activo, «fijar el stock en 5» movía lo que había en otro depósito. Con uno solo no hay a dónde equivocarse (igual que siempre).
+                    if sum(1 for d in catalogo.get_all_depositos(conn) if d["activo"]) > 1:
+                        raise HTTPException(
+                            422, "Indicá el depósito: hay más de un depósito activo y un conteo absoluto sin depósito no dice dónde se cuenta.")
                 try:
                     stock.ajustar_stock(conn, pid, payload.cantidad, referencia, usuario_id=usuario_id, fecha=fecha,
                                         **destino, **lote)

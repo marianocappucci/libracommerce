@@ -1295,8 +1295,8 @@ def test_avisos_apagado_las_respuestas_y_el_openapi_son_los_de_hoy(abrir_fefo):
     assert "avisos" not in apagado.get(f"/api/ventas/{vid}").json()
     assert apagado.get(f"/api/ventas/{vid}").content == r.content       # POST y GET son los mismos bytes de siempre
     assert prendido.get(f"/api/ventas/{vid}").json()["avisos"]          # con la opción SÍ hay avisos
-    # La ruta no existe: lo único que queda es `GET /{vid}`, que captura el path (405 para un POST, como hoy).
-    assert apagado.post("/api/ventas/plan-salida", json={"items": []}).status_code == 405
+    # La ruta no existe: 404 como cualquier otra que el router no tiene (ADR-057; antes caía en `GET /{vid}`, que captura el path, y daba 405).
+    assert apagado.post("/api/ventas/plan-salida", json={"items": []}).status_code == 404
     apagado_openapi = apagado.get("/openapi.json").content
     assert b"plan-salida" not in apagado_openapi and b"PlanSalida" not in apagado_openapi
     assert b"avisos" not in apagado_openapi
@@ -1332,8 +1332,10 @@ def test_avisos_de_un_lote_vencido_por_vencer_y_faltante_sin_lote(abrir_fefo):
         {**base, "tipo": "lote_vencido", "lote": "VIEJO", "vence": VENCIDO, "dias_para_vencer": -20, "cantidad": 2},
         {**base, "tipo": "por_vencer", "lote": "PRONTO", "vence": "2026-10-05", "dias_para_vencer": 5, "cantidad": 3},
     ]
-    # El mismo aviso en el detalle de la venta.
-    assert cliente.get(f"/api/ventas/{r.json()['id']}").json()["avisos"] == avisos
+    # El detalle de la venta mide los lotes contra el DÍA DE LA VENTA (ADR-057), no contra hoy. Esta venta es del 2026-09-10 (`FECHA_VENTA`) y el «hoy» de la prueba es el 09-30:
+    # a esa fecha VIEJO vencía ese mismo día (por vencer, no vencido) y PRONTO (10-05) estaba a 25 días, afuera de la ventana de 15. El POST, que acaba de hacerse, usa el día de hoy.
+    en_su_dia = cliente.get(f"/api/ventas/{r.json()['id']}").json()["avisos"]
+    assert en_su_dia == [{**base, "tipo": "por_vencer", "lote": "VIEJO", "vence": VENCIDO, "dias_para_vencer": 0, "cantidad": 2}]
     # El faltante: lo que ningún lote ni el «sin lote» tenía.
     pid2 = _producto(abrir_fefo, "Leche", lotes_=(("L1", LEJOS, 2),))
     r2 = _post_venta(cliente, pid2, 5)

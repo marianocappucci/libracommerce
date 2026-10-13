@@ -42,6 +42,8 @@ _CAMPOS = [
     "motivo", "sin_ventas", "posible_quiebre", "variantes", "plazo_entrega_dias", "plazo_propio", "stock_maximo",
     "limitado_por_maximo", "proveedor_id", "proveedor", "factor_estacional", "stock_minimo_propio", "por_vencer",
 ]
+#: Con `contar_borradores=false` (ADR-056) los borradores no están en `en_camino`, y el CSV los muestra aparte. Con el default la columna no existe: el CSV es el de siempre, byte a byte.
+_CAMPOS_SIN_BORRADORES = [*_CAMPOS, "en_borrador"]
 
 
 def _atajar(operacion):
@@ -81,7 +83,8 @@ def build_reposicion_router(
     (`true` por default: sólo los de `sugerido > 0`) y `descontar_vencido` (`true` por default: lo que está en lotes
     vencidos no cuenta como stock) y `proveedor_id` (sólo los productos de ese proveedor habitual, ADR-021) y `estacionalidad` (`false` por default: ajusta la proyección por lo que
     pasó hace un año, ADR-023) y `descontar_por_vencer` (`false` por default: resta además del stock lo que, de los lotes que vencen dentro del horizonte, no llega a venderse antes, ADR-025;
-    cada fila trae `por_vencer`) y `orden` (una de `erp.reposicion.ORDENES`, las columnas de la pantalla) con `sentido` (`asc` por
+    cada fila trae `por_vencer`) y `contar_borradores` (`true` por default: una orden en borrador resta de lo sugerido como si ya estuviera pedida; con `false` no resta y su cantidad
+    se ve aparte, en `en_borrador`, ADR-056; la respuesta repite el parámetro, para que quien la lee sepa que el motor lo soporta; cada fila trae `en_borrador` siempre, y el CSV sólo con `false`, con el default es el de siempre) y `orden` (una de `erp.reposicion.ORDENES`, las columnas de la pantalla) con `sentido` (`asc` por
     default, o `desc`): la lista y el CSV salen en ese orden, lo que no tiene valor al final (ADR-037); sin `orden`, el de urgencia. `resolver_proveedor(conn, proveedor_id) -> party_id` y
     `proveedor_de(conn, party_id) -> proveedor_id` son los mismos ganchos que `OpcionesCompras`, para un producto cuyos proveedores no son el `party_id`
     del motor (VentaLibra): el `proveedor_id` del filtro y el de cada fila hablan en los ids del producto. Sin ellos, identidad. Un parámetro inválido, o una sucursal que no existe, es 422.
@@ -93,7 +96,8 @@ def build_reposicion_router(
     def _reporte(dias_rotacion: int, dias_cobertura: int, plazo_entrega_dias: int, sucursal_id: int | None,
                  categoria: str | None, producto_id: int | None, solo_a_pedir: bool,
                  descontar_vencido: bool, proveedor_id: int | None, estacionalidad: bool,
-                 descontar_por_vencer: bool, orden: str | None, sentido: str, hoy: datetime.date) -> list[dict]:
+                 descontar_por_vencer: bool, contar_borradores: bool, orden: str | None, sentido: str,
+                 hoy: datetime.date) -> list[dict]:
         try:
             with abrir() as conn:
                 party_id = resolver_proveedor(conn, proveedor_id) if proveedor_id is not None else None
@@ -102,7 +106,7 @@ def build_reposicion_router(
                     plazo_entrega_dias=plazo_entrega_dias, sucursal_id=sucursal_id, categoria=categoria or None,
                     producto_id=producto_id, solo_a_pedir=solo_a_pedir,
                     descontar_vencido=descontar_vencido, proveedor_id=party_id, estacionalidad=estacionalidad,
-                    descontar_por_vencer=descontar_por_vencer, hoy=hoy,
+                    descontar_por_vencer=descontar_por_vencer, contar_borradores=contar_borradores, hoy=hoy,
                 )
                 # El `proveedor_id` de cada fila, en los ids del producto.
                 filas = [dict(f, proveedor_id=proveedor_de(conn, f["proveedor_id"]) if f["proveedor_id"] is not None else None)
@@ -119,16 +123,16 @@ def build_reposicion_router(
                 sucursal_id: int | None = None, categoria: str | None = None, producto_id: int | None = None,
                 solo_a_pedir: bool = True, descontar_vencido: bool = True,
                 proveedor_id: int | None = None, estacionalidad: bool = False, descontar_por_vencer: bool = False,
-                orden: str | None = None, sentido: str = "asc"):
+                contar_borradores: bool = True, orden: str | None = None, sentido: str = "asc"):
         productos = _reporte(dias_rotacion, dias_cobertura, plazo_entrega_dias, sucursal_id, categoria, producto_id,
-                             solo_a_pedir, descontar_vencido, proveedor_id, estacionalidad, descontar_por_vencer, orden, sentido,
-                             reloj())
+                             solo_a_pedir, descontar_vencido, proveedor_id, estacionalidad, descontar_por_vencer,
+                             contar_borradores, orden, sentido, reloj())
         return {
             "dias_rotacion": dias_rotacion, "dias_cobertura": dias_cobertura,
             "plazo_entrega_dias": plazo_entrega_dias, "sucursal_id": sucursal_id, "categoria": categoria,
             "producto_id": producto_id, "solo_a_pedir": solo_a_pedir, "descontar_vencido": descontar_vencido,
             "proveedor_id": proveedor_id, "estacionalidad": estacionalidad,
-            "descontar_por_vencer": descontar_por_vencer,
+            "descontar_por_vencer": descontar_por_vencer, "contar_borradores": contar_borradores,
             "resumen": {
                 "productos": len(productos),
                 "a_pedir": sum(1 for p in productos if p["sugerido"] > 0),
@@ -146,11 +150,12 @@ def build_reposicion_router(
                  sucursal_id: int | None = None, categoria: str | None = None, producto_id: int | None = None,
                  solo_a_pedir: bool = True, descontar_vencido: bool = True,
                  proveedor_id: int | None = None, estacionalidad: bool = False, descontar_por_vencer: bool = False,
-                 orden: str | None = None, sentido: str = "asc"):
+                 contar_borradores: bool = True, orden: str | None = None, sentido: str = "asc"):
         hoy = reloj()
         productos = _reporte(dias_rotacion, dias_cobertura, plazo_entrega_dias, sucursal_id, categoria, producto_id,
-                             solo_a_pedir, descontar_vencido, proveedor_id, estacionalidad, descontar_por_vencer, orden, sentido, hoy)
-        return _csv(productos, _CAMPOS, f"reposicion_{hoy.isoformat()}.csv")
+                             solo_a_pedir, descontar_vencido, proveedor_id, estacionalidad, descontar_por_vencer,
+                             contar_borradores, orden, sentido, hoy)
+        return _csv(productos, _CAMPOS if contar_borradores else _CAMPOS_SIN_BORRADORES, f"reposicion_{hoy.isoformat()}.csv")
 
     return router
 
@@ -272,6 +277,8 @@ class GenerarOrdenes(BaseModel):
     descontar_vencido: bool = True
     estacionalidad: bool = False
     descontar_por_vencer: bool = False
+    #: Se acepta para que la pantalla mande los mismos parámetros que ve, pero no cambia lo que se crea: al generar, los borradores siempre cuentan (ADR-056).
+    contar_borradores: bool = True
 
     _no_son_booleanos = sin_booleanos("dias_rotacion", "dias_cobertura", "plazo_entrega_dias", "sucursal_id", "proveedor_id", "producto_ids", "topes")
 
