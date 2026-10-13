@@ -572,10 +572,11 @@ def test_devolucion_de_una_venta_con_receta_repone_el_plato_y_no_los_insumos(abr
     assert (_stock(abrir_ledger, insumo), _stock(abrir_ledger, plato)) == (18.5, 1.0)
 
 
-def test_devolucion_de_un_servicio_del_catalogo_repone_stock_de_un_servicio(abrir_ledger):
-    """Comportamiento sorprendente, fijado tal cual: una línea con un servicio DEL CATÁLOGO queda en `sale_items` como
-    `kind='product'` (el `kind` sólo mira si hay `producto_id`), la venta no escribe stock (`_es_servicio`) pero
-    `devolver_items` la trata como producto y escribe +1 de `devolucion` sobre un ítem sin inventario."""
+def test_devolucion_de_un_servicio_del_catalogo_no_escribe_stock(abrir_ledger):
+    """INVERTIDO en ADR-054 (antes `..._repone_stock_de_un_servicio`). Una línea con un servicio DEL CATÁLOGO queda en `sale_items`
+    como `kind='product'` (el `kind` sólo mira si hay `producto_id`) y la venta no escribe stock (`_es_servicio`): devolverlo tampoco.
+    Antes `devolver_items` la trataba como producto y escribía +1 de `devolucion` sobre un ítem sin inventario. Ahora reintegra el
+    importe y baja el tope, pero el ledger queda vacío y el servicio sigue sin stock (el detalle, en `test_devolver_servicio.py`)."""
     with abrir_ledger() as conn:
         servicio = catalogo.create_producto(conn, "Flete", precio_venta=500.0, tipo="servicio")
         conn.commit()
@@ -584,12 +585,11 @@ def test_devolucion_de_un_servicio_del_catalogo_repone_stock_de_un_servicio(abri
     (linea,) = _lineas(abrir_ledger, vid)
     with abrir_ledger() as conn:
         assert _ledger(conn) == []                 # la venta no escribió nada
-    _devolver(abrir_ledger, vid, {linea: 1.0}, dep, usuario_id=7)
+    resultado = _devolver(abrir_ledger, vid, {linea: 1.0}, dep, usuario_id=7)
+    assert resultado["importe"] == 500.0
     with abrir_ledger() as conn:
-        assert _ledger(conn) == [
-            ("return", 1.0, dep, servicio, None, "devolucion", "venta", vid, None, None, f"Devolución venta ID {vid}",
-             7, "2026-09-20T00:00:00", None),
-        ]
+        assert _ledger(conn) == []                 # la devolución tampoco
+    assert _stock(abrir_ledger, servicio) == 0.0
 
 
 # ═══════════════════════════════════════════════════════ La transferencia ═

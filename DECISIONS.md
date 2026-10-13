@@ -471,6 +471,7 @@ depósito; **sólo sugiere**, no genera la orden de compra. Sin migración ni sc
 - **En camino.** Cantidad pedida menos recibida por línea, sin bajar de 0, sobre las órdenes que no son `received` ni
   `cancelled`. **`draft` cuenta**: el motor no tiene ninguna operación que pase una orden a `sent` (nace `draft`, y
   `confirmar_recepcion` la deja `partial` o `received`), así que la que ya se le pidió al proveedor está en `draft`.
+  ✅ **Desde v0.59.0 (ADR-055 y ADR-056)** sí hay `enviar_orden` / `cancelar_orden`, y `contar_borradores=false` deja de restarlos (con `true`, el default, queda como acá).
   Con `sucursal_id` entran las de esa sucursal **y las sin sucursal** (`purchase_orders.branch_id` es opcional; no
   saber a dónde va no es motivo para pedirlo dos veces), y esa parte se informa aparte (`en_camino_sin_sucursal`).
 - **El sesgo por quiebres.** Un producto sin stock no vende y dividir por N subestima su rotación. Del ledger de los
@@ -492,7 +493,7 @@ borrador; estacionalidad (una ventana de N días no distingue un diciembre); el 
 suben y bajan el saldo no se distinguen), depende de que el ledger esté bien cargado, y un producto que estuvo sin
 stock casi toda la ventana rota sobre pocos días (piso de 7). La bandera avisa; no reemplaza el criterio de quien
 pide. (2) `min_stock` es global al producto, no por sucursal: con varias sucursales el piso se aplica igual a cada una.
-(3) Una orden abandonada en `draft` cuenta como pedida. (4) Un comercio que no lleva stock en el ledger no tiene qué
+(3) Una orden abandonada en `draft` cuenta como pedida (✅ opcional desde ADR-056: `contar_borradores=false`). (4) Un comercio que no lleva stock en el ledger no tiene qué
 sugerir (todo sale con stock 0), y sus ventas sin depósito con sucursal no entran en ninguna sucursal. (5) La rotación
 usa el «hoy» del servidor, no el de Argentina. (6) Un producto con receta (Restolibra) se sugiere por sus ventas, no
 por el consumo de sus insumos.
@@ -724,7 +725,7 @@ producto vienen después y se apoyan en estos dos contratos. Aditivo, sin tocar 
   `GET /api/vencimientos/productos/{id}/lotes` (`producto.vence`); `GET /api/stock/{pid}` y la respuesta del ajuste siguen con el
   `producto` sin `vence` (prender eso sería una opción más en `OpcionesStock`). La entrada con lote no avisa si el mismo
   código ya existe con otra fecha.
-> **Nota 2026-09-30 (límite conocido, severidad media):** la validación «un servicio no puede tener vencimiento» en la edición de un producto lee la marca antes de guardar y no bloquea la fila; una edición a `servicio` concurrente con otra petición que marca el mismo producto puede dejar un servicio marcado. No daña datos: `registrar_entrada_con_lote` y `asignar_vencimiento_a_saldo` rechazan todo lo que no sea `item_type='product'` (409), así que un servicio marcado no recibe stock con lote, y se puede desmarcar con `vence: false`. Cerrarlo de verdad exige bloquear la fila durante el guardado de la edición (camino compartido con los tres productos, fuera de alcance) o una restricción en la base.
+> **Nota 2026-09-30 (límite conocido, severidad media):** la validación «un servicio no puede tener vencimiento» en la edición de un producto lee la marca antes de guardar y no bloquea la fila; una edición a `servicio` concurrente con otra petición que marca el mismo producto puede dejar un servicio marcado. No daña datos: `registrar_entrada_con_lote` y `asignar_vencimiento_a_saldo` rechazan todo lo que no sea `item_type='product'` (409), así que un servicio marcado no recibe stock con lote, y se puede desmarcar con `vence: false`. Cerrarlo de verdad exige bloquear la fila durante el guardado de la edición (camino compartido con los tres productos, fuera de alcance) o una restricción en la base. ✅ **Cerrado en ADR-057 (v0.59.0):** `update_producto` suelta la marca al pasar a servicio dentro de su transacción y `marcar_vence` lleva la condición en el `UPDATE`.
 
 **Nota (2026-09-30) — A-4 PR-2: FEFO en la venta y lote en la anulación.** La venta y la anulación de un producto marcado
 dejan de pasar por el bucket «sin lote». Lo que se decidió y se hizo:
@@ -843,7 +844,7 @@ siguen el lote. Estado intermedio que termina acá: el PR-2 solo existía en `de
   una lista vacía, una cantidad no positiva o no finita, un producto o depósito inexistente), para que el POS confirme antes de
   cobrar. Apagada, las respuestas son byte a byte las de hoy y la ruta no existe ni figura en `/openapi.json` (un test lo
   compara). 🔵 Apagada, `POST /api/ventas/plan-salida` responde **405 y no 404**: es lo que ya pasaba hoy, porque `GET /{vid}`
-  captura ese path. Sin gate de plan ni permisos propios: el producto monta el router con sus dependencias.
+  captura ese path. ✅ **Ahora es 404 (ADR-057, v0.59.0).** Sin gate de plan ni permisos propios: el producto monta el router con sus dependencias.
 - **Efectos visibles.** (1) Una devolución de un marcado suma una fila `merma` por cada tramo en `GET /api/stock/movimientos`
   (con el `venta_id` de la venta). (2) Una transferencia de N lotes son N filas en `get_transferencias`. (3) El ajuste de un marcado
   con lotes escribe filas con lote. (4) La `salida` y la `merma` manuales de un marcado escriben una fila por lote en vez de una. (5) El stock de un perecedero devuelto no vuelve: la reposición sugerida ve `stock` más bajo
@@ -860,12 +861,12 @@ marquen productos. Margen y reposición leen lo mismo (un test compara un marcad
   devolución repone el plato, que nunca tuvo stock; los lotes de los insumos no vuelven ni van a merma. Un test lo fija. Es un
   pendiente de Restolibra, no de VentaLibra.
 - 🔴 **`ajustar_stock` sin `deposito_id`** compara el total de TODOS los depósitos y escribe en el depósito por defecto
-  (preexistente). Para un marcado con el stock repartido, el FEFO corre sobre ese depósito (donde se escribe), y puede dejar su
+  (preexistente). ✅ **Cerrado en el router por ADR-057 (v0.59.0):** con `por_deposito` y más de un depósito activo, el ajuste absoluto sin depósito es 422. Para un marcado con el stock repartido, el FEFO corre sobre ese depósito (donde se escribe), y puede dejar su
   «sin lote» en negativo aunque otro depósito tenga lotes. Quien ajusta un producto con varios depósitos tiene que pasar
   `deposito_id`; no se cambió porque alteraría el camino de los productos sin marcar. Un test lo fija.
 - 🔵 `listar_ventas` y `erp.reportes._rango` filtran `sales.occurred_on <= hasta` sobre texto libre: una venta con hora del día `hasta`
   queda afuera (el margen lo evita con `_filtro_de_ventas`). Preexistente, no se tocó. ✅ **Arreglado el 2026-10-09** (ADR-039).
-- 🔵 La edición de un producto no es atómica respecto de un código duplicado (ver la nota de la carga). Preexistente, no se tocó.
+- 🔵 La edición de un producto no es atómica respecto de un código duplicado (ver la nota de la carga). Preexistente, no se tocó. ✅ **Arreglado en ADR-028** (`update_producto` guarda el producto y su código en una transacción).
 - **Variantes en el ajuste y la salida manual (revisión de Codex).** `ajustar_stock` compara el total del depósito, variantes incluidas,
   pero el FEFO sólo planifica la variante del movimiento: sin `variant_id`, la NULL. Un ajuste «a 5» de un producto con 10 en un lote de
   la variante A escribía −5 «sin lote» de la variante NULL y dejaba el lote de A en 10. Ahora, para un producto MARCADO, un
@@ -880,7 +881,7 @@ marquen productos. Margen y reposición leen lo mismo (un test compara un marcad
   desmarcado con lotes en el ledger transfiere y ajusta «sin lote» como uno sin marcar; al volver a marcarlo, por FEFO otra vez (hay test).
   La devolución y la anulación, en cambio, siguen lo que dice la venta.
 - 🔵 Los avisos del `GET` de una venta usan «hoy» (Argentina), no la fecha de la venta: un lote que estaba vigente al vender
-  puede figurar vencido al consultar meses después. Una venta anulada conserva sus avisos (son historia).
+  puede figurar vencido al consultar meses después. Una venta anulada conserva sus avisos (son historia). ✅ **Arreglado en ADR-057 (v0.59.0):** el detalle mide contra el día de la venta (el `POST` que la crea sigue usando el de hoy).
 - 🔵 Con `tramos`, `transfer_stock` devuelve sólo el par del primer tramo; quien necesite todos los lee del ledger.
 - 🔵 El plan de salida es una simulación sobre el estado de ahora: otra venta concurrente puede cambiar el resultado antes de cobrar.
   No valida `hooks.validar_deposito` (necesita turno): sólo que el depósito exista y esté activo.
@@ -928,6 +929,11 @@ siguen «sin lote»**: el saldo «sin lote» negativo heredado mantiene la guard
 concilie con el conteo físico. Si el producto usa alguno de los caminos (a)–(c), el saldo de sus lotes puede volver a sobreestimarse.
 La guarda de stock total y de saldo «sin lote» negativo de la nota del 2026-09-30 sigue en pie.
 > **Nota 2026-10-01 (hallazgo de Codex sobre el montaje en VentaLibra):** `_agregar_avisos` corre en `POST /api/ventas` DESPUÉS del commit de la venta y del descuento de stock; si el cálculo de los avisos fallaba, la respuesta era un error aunque la venta ya estaba registrada, y el POS reintentaba el cobro (venta y cobro duplicados) o, en el cobro por QR, perdía el id de la venta pendiente. Ahora **falla abierto**: se omite `avisos`, se registra el error y se devuelve la venta confirmada (v0.30.1). Un aviso es un complemento informativo y nunca puede ocultar una venta ya registrada.
+
+> **Nota 2026-10-13 — estado de los límites de este ADR (v0.59.0).** Al revisar los límites que quedaron escritos acá, cada uno quedó en uno de tres estados. (Los relevamientos los citan con letras que este ADR no lleva; se identifican por su texto.)
+> - ✅ **Resueltos:** la edición de un producto no atómica con un código duplicado (**ADR-028**); el filtro de fecha de `listar_ventas` y `_rango` (**ADR-039**); «Recibir mercadería» sin idempotencia, pedido al kit (**ADR-046**); el aviso ámbar fijo de Vencimientos que ya no era cierto (kit `libra-ui` **v0.117.2**); el ajuste con lote por API sin guarda (**ADR-047**, `autorizar_lotes`); el ajuste absoluto sin depósito, los avisos del `GET` con la fecha de hoy, el `plan-salida` apagado que daba 405 y la carrera servicio / marca `vence` (**ADR-057**); y, aunque no estaba escrito acá, que devolver un servicio escribía stock (**ADR-054**).
+> - 🔵 **Aceptados sin código** (ADR-057): las cantidades de más de ~15 dígitos significativos (`float`); marcar o desmarcar `vence` durante una venta del mismo producto; los caminos viejos sin FEFO (`usecases.sales`, `transfer_stock` directo, `add_movimiento_stock` con cantidad negativa sin lote, los scripts de migración).
+> - ⏳ **Siguen abiertos:** `devolver_items` no es receta-aware (pendiente de Restolibra); lo anterior a A-4 sigue «sin lote» hasta conciliarlo con el conteo físico (la guarda de `dar_de_baja_lote`); `transfer_stock` con `tramos` devuelve sólo el par del primer tramo; la transferencia y el ajuste siguen la marca ACTUAL; el plan de salida es una simulación sobre el estado de ahora.
 
 ## ADR-019 — Reposición v2: lo que está en un lote vencido no cuenta como stock (2026-10-01)
 
@@ -1731,7 +1737,7 @@ el ajuste sin lote (absoluto, entrada, salida; marcado y sin marcar) anda sin la
 
 **No cubre.**
 - **Una etiqueta de balanza no se puede autenticar.** El EAN-13 es público y el dígito verificador no se controla: un cliente que arma una etiqueta falsa de $0,01 para un producto de balanza por importe la pasa. La validación protege de precios viejos, de pantallas desactualizadas y de errores, **no** de un cliente deliberadamente falso con una sesión válida de cajero. Cerrarlo pide otra cosa (una balanza que firme, o el importe cruzado contra el precio por kilo y el peso real).
-- **El precio por sucursal** (`item_prices.branch_id`): el POS no lo usa hoy y, por eso, el servidor tampoco. Si el POS empieza a mandar `sucursal_id`, hay que sumarle a la opción una costura que lo resuelva desde el depósito de la venta; hasta entonces, un precio cargado por sucursal no se cobra en el POS ni se valida.
+- **El precio por sucursal** (`item_prices.branch_id`): el POS no lo usa hoy y, por eso, el servidor tampoco. Si el POS empieza a mandar `sucursal_id`, hay que sumarle a la opción una costura que lo resuelva desde el depósito de la venta; hasta entonces, un precio cargado por sucursal no se cobra en el POS ni se valida. ✅ **Resuelto en ADR-058 (v0.59.0):** `VentaPayload.sucursal_id` y la costura `OpcionesVentas.sucursal_de_la_venta`.
 - **Lo que no entra por `POST /api/ventas` no se valida.** La venta que llega por la sincronización offline (`integrations.libraedge.apply_confirmed_sale_operation`, `docs/OFFLINE_SYNC.md`) se materializa por otro camino y conserva los precios con los que se vendió sin conexión; lo mismo cualquier caso de uso que llame a `erp.ventas` sin pasar por el router. Es lo razonable (la venta ya ocurrió al precio que tenía el nodo), pero es un límite: la opción cubre la API del POS, no toda escritura de ventas.
 - **Cada etiqueta puede usarse más de una vez**: el servidor no recuerda las que ya vendió.
 - Contalibra y Restolibra no cambian: no prenden la opción.
@@ -1831,3 +1837,110 @@ el ajuste sin lote (absoluto, entrada, salida; marcado y sin marcar) anda sin la
 **Tests.** Se borraron los de `test_usecases.py` sobre `return_sale_items` (los de `confirm_sale`, `cancel_sale` y la recepción siguen) y `test_margen.py` arma la devolución vieja a mano. Un test confirma que `usecases.sales` ya no la exporta.
 
 **Cómo se adopta.** Subir el pin; quien la importara (nadie, verificado) tiene que pasar a `erp.ventas.devolver_items`. Es un retiro de API pública de un motor 0.x: por eso el tag propuesto es una versión **menor** (v0.58.0).
+
+## ADR-054 — Devolver un servicio del catálogo no escribe stock: se reintegra el importe y lo devuelto queda en `sale_service_returns` (revisión 0007, 2026-10-13)
+
+**Problema.** Una línea con un servicio del catálogo (`catalog_items.item_type = 'service'`) queda en `sale_items` como `kind = 'product'` (el `kind` sólo mira si hay `producto_id`). La venta no escribe stock para ella (`erp.stock._es_servicio` en `descontar_stock_venta`), pero `erp.ventas.devolver_items` la trataba como un producto: escribía `+q` de `devolucion` sobre un ítem que no tiene inventario, y el servicio aparecía con stock (`get_stock_actual` > 0, una fila en `GET /api/stock/movimientos`). `tests/test_ledger_sin_marcar.py` lo fijaba como «comportamiento sorprendente». Decisión del humano (2026-10-13): **reintegrar el importe sin tocar stock**.
+
+**Qué ya existía.** `_es_servicio` y su criterio en la venta; el reintegro prorrateado (ADR-040), la `clave_operacion` (ADR-041) y el estado `devuelta` / `devuelta_parcial` de `devolver_items`; y el precedente de una tabla que crea una revisión y que el código sondea por metadatos (`item_branch_min_stock`, 0005; `purchase_receipts.clave_operacion`, 0006).
+
+**El problema escondido: el tope no tenía de dónde salir.** Todo lo que `devolver_items` sabe de «lo ya devuelto» sale del **ledger**: el tope por (ítem, variante), el reintegro prorrateado (que resta lo ya devuelto), el estado de la venta, la idempotencia por clave (la marca `[op:<clave>]` va en la nota de la fila) y la guarda de `anular_venta`; el margen resta lo devuelto leyendo las mismas filas. Sin escribir nada en el ledger, un servicio devuelto no dejaba rastro: se podía devolver la misma línea una y otra vez (cobrando de más), el reintento con clave de una devolución de sólo servicio reintegraba otra vez (no había fila que lo reconociera) y una venta mixta (servicio + producto) no llegaba nunca a `devuelta`. «Baja el tope» exige un lugar donde escribir.
+
+**Decisión.**
+- **Un servicio devuelto no llama a `add_movimiento_stock`.** `stock_movements` no se toca: ni una fila, ni siquiera un par `+q`/`−q` que se anule (tiene `CHECK (quantity_delta <> 0)`, y un par sería igual «tocar el stock»).
+- **Tabla nueva `sale_service_returns`** (revisión Alembic `0007_devoluciones_de_servicio`, aditiva y vacía): `id`, `sale_id`, `item_id`, `variant_id`, `location_id` (el depósito de la operación, sólo para comparar contra la clave), `quantity` (> 0), `note` (con la marca `[op:<clave>]` al final, como las filas del ledger), `created_by`, `occurred_at`. Una fila por línea de servicio devuelta e intento. La escribe sólo `devolver_items`. Creada con `op.create_table`: el mismo código en SQLite y PostgreSQL. `init_schema()` sigue congelado (la tabla no existe hasta migrar).
+- **Lo que la lee**, para que un servicio se comporte como cualquier otra línea salvo en el stock: el tope por (ítem, variante) y `ya_devuelto` (el reintegro prorrateado resta lo ya devuelto); el estado — `vendido_total` cuenta las líneas de servicio y `devuelto_total` suma lo devuelto de ellas, así que una venta mixta queda `devuelta_parcial` mientras falte cualquier cosa y `devuelta` recién cuando volvió **todo** (con servicio y producto, en cualquier orden o en una llamada); la idempotencia por clave (`_devolucion_de_la_clave` suma las filas de servicios con la misma marca, y un reintento contesta `repetida: true` con el mismo importe, o `ClaveReusada` si cambian cantidades, depósito o medio de pago); la guarda `VentaConDevoluciones` de `anular_venta`; y `margen._devuelto_por_clave` (un servicio devuelto baja unidades e ingreso, y devuelto entero sale del reporte).
+- **Sin la revisión.** `tiene_devoluciones_de_servicio(conn)` sondea por metadatos (`PRAGMA table_info`). Una base sin la 0007 se comporta como antes para todo lo que no sea **pedir devolver un servicio**: ahí, `ventas.SinRevision` (503 en `POST /api/ventas/{id}/devolver`, con el comando `libracommerce-migrar upgrade`) **antes de escribir nada**, ni siquiera el producto de la misma llamada. Devolver productos de una venta que tiene servicios, listar, anular y el margen siguen andando.
+- **Una línea sin producto del catálogo** (ítem libre, sin `item_id`) sigue sin poder devolverse: «anular la venta entera».
+
+**Alternativa descartada: sin migración.** Escribir `+q` en el ledger como siempre y otra fila `−q` que lo anule (neto 0, como el par `devolucion` + `merma` de un perecedero, ADR-018) resolvería el stock sin tabla, pero deja dos filas de ruido por cada devolución en la pantalla de movimientos de un ítem sin inventario, y no cumple «no escribe stock». Si no se quiere migrar, es el plan B: se saca la tabla y `devolver_items` vuelve a escribir esas dos filas; el resto (tope, estado, clave, margen) ya sale del ledger.
+
+**Historia que no se corrige.** Las devoluciones de servicios hechas **antes** de esta versión dejaron su `+q` en el ledger: esas filas siguen contando como devuelto (el tope y el margen las leen como siempre, y se suman a las de la tabla), así que nada se devuelve dos veces; el stock fantasma de esos servicios queda hasta que alguien lo ajuste.
+
+**Tests.** `tests/test_devolver_servicio.py` (SQLite y PostgreSQL): el ledger vacío y el servicio sin stock; el tope; el prorrateo de a poco; la venta mixta en los dos órdenes y en una llamada; la clave (reintento, otras cantidades, otro depósito, y la devolución de sólo servicio); `anular_venta`; el margen; la base sin la 0007 (503, sin escribir, y el producto se sigue devolviendo); el router; y la revisión (datos previos, idempotencia, bajada). El `test_devolucion_de_un_servicio_del_catalogo_...` de `test_ledger_sin_marcar.py` se invirtió (ledger vacío).
+
+**No cubre.** `devolver_items` sigue sin ser receta-aware (ADR-018). Ningún producto se enteró: la API de `POST /api/ventas/{id}/devolver` no cambia de forma.
+
+**Cómo se adopta.** Subir el pin (tag propuesto **v0.59.0**, menor) y **correr `libracommerce-migrar upgrade` en el deploy**, antes de que nadie devuelva un servicio; sin migrar, sólo esa operación falla (503 con el comando).
+
+## ADR-055 — Órdenes de compra: `POST …/purchase-orders/{id}/enviar` y `…/cancelar` (2026-10-13)
+
+**Problema.** El motor tenía los cinco estados de una orden (`draft`, `sent`, `partial`, `received`, `cancelled`) pero **ninguna operación** que la pasara a `sent` o a `cancelled`: nacía `draft` y sólo una recepción la movía (`partial` / `received`). ADR-017 tuvo que contar el borrador como «en camino» porque «la orden que ya se le pidió al proveedor está en `draft`», y una orden equivocada no se podía anular (el kit no tenía qué botón mostrar).
+
+**Decisión.** Dos transiciones y el modelo de estados escrito en `erp.compras`:
+
+    draft ──enviar_orden──▶ sent ──(recepción)──▶ partial ──(recepción)──▶ received
+      │                      │
+      └──── cancelar_orden ──┴──▶ cancelled
+
+- **`enviar_orden`** (`POST /api/purchase-orders/{id}/enviar`): `draft` → `sent`, y registra `ordered_at` (la primera vez; un segundo envío no lo pisa). **Idempotente:** enviar una `sent` no escribe nada y devuelve la orden. 409 desde `partial`, `received` o `cancelled`.
+- **`cancelar_orden`** (`POST /api/purchase-orders/{id}/cancelar`): `draft` o `sent` → `cancelled`. **Idempotente** sobre una `cancelled`. **409 desde `partial` y `received`**: ya entró mercadería, y deshacerlo no es cancelar la orden sino devolverle al proveedor (una decisión que el modelo de estados no tiene y que no se inventa acá).
+- **Una `UPDATE … WHERE status IN (…)` y no «leer, cambiar y guardar»**: `save_purchase_order` reescribe todas las líneas, y con una recepción que se confirma a la vez habría pisado `quantity_received`. La condición en el `WHERE` hace de candado en PostgreSQL (READ COMMITTED vuelve a evaluarla con la fila ya tomada) y en SQLite todo se serializa. Si no actualizó nada, se vuelve a leer para decidir entre idempotente, 409 o 404.
+- **Una cancelada no recibe.** Sin esto, `confirm_purchase_receipt` recalculaba el estado de la orden de la recepción y una cancelada «resucitaba» como `partial` / `received`. Ahora `crear_recepcion`, `recibir_mercaderia` (después de buscar la clave: el reintento de una recepción ya hecha sigue contestando lo de la primera vez) y `confirmar_recepcion` (una recepción creada antes de cancelar) levantan `EstadoInvalido` → 409. `agregar_linea_orden` ya rechazaba todo menos `draft` / `sent`.
+- **Una cancelada no cuenta como «en camino»** en la reposición (ya era así: `_ESTADOS_EN_CAMINO` no la incluye; ahora hay forma de llegar a ese estado). Ver ADR-056.
+- **La guarda es la de escribir Compras:** ambas rutas llevan `OpcionesCompras.autorizar_escritura` (la misma `Depends(...)` de crear, agregar líneas y confirmar; sin ella, como siempre, pasa cualquiera que pase el gate del router). **No hay una costura nueva**: si un producto quisiera que enviar sea de otro rol que cancelar, es una opción más; hoy ninguno lo pide.
+
+**Tests** (`tests/test_ordenes_enviar_cancelar.py`, SQLite y PostgreSQL): las transiciones y que no pierdan las líneas; `ordered_at`; la idempotencia de las dos; los 409 (enviar una cancelada o una recibida, cancelar una recibida y una parcial); el 404; la guarda; que una cancelada no reciba por ninguna de las tres rutas; y que no agregue líneas.
+
+**No cubre.** No hay «reabrir» una cancelada. Enviar no avisa al proveedor por ningún medio (es un estado, no un mail). Una orden sin líneas se puede enviar.
+
+**Cómo se adopta.** Subir el pin (v0.59.0). Sin migración. El kit suma los botones **Enviar** y **Cancelar** en el detalle de la compra (`CompraDetalle`).
+
+## ADR-056 — Reposición: `contar_borradores` y `en_borrador` (2026-10-13)
+
+**Problema.** Hasta v0.58 una orden de compra en `draft` restaba de lo sugerido como si ya estuviera pedida (ADR-017): no había forma de enviarla, así que la que ya se le había pedido al proveedor seguía en `draft`. Con `enviar_orden` (ADR-055) un borrador es un papel de trabajo todavía no mandado, y quien quiere ver qué falta pedir de verdad necesita poder dejar de restarlo. Decisión del humano, **opción C**: las dos cosas, con un interruptor.
+
+**Decisión.**
+- **Cada fila trae `en_borrador`:** lo pendiente (pedido menos recibido, sin bajar de 0 por línea) de las órdenes `draft`, aparte de `en_camino`. Siempre, con cualquiera de las dos opciones.
+- **`contar_borradores: bool = True`** en `sugerencia_reposicion` y `?contar_borradores=` en `GET /api/reportes/reposicion` y su `/export`. Con `true` (el default) es **exactamente el comportamiento de siempre**: el borrador está en `en_camino` y resta; los tests de `test_reposicion.py` pasan sin tocarlos. Con `false`, `en_camino` sólo suma `sent` y `partial` (y `en_camino_sin_sucursal` lo sigue), los borradores no restan y se ven en `en_borrador`. Una `cancelled` no cuenta con ninguna de las dos.
+- **El eco:** la respuesta repite `contar_borradores`, como `estacionalidad` y `descontar_por_vencer`, para que el kit sepa si el motor lo soporta (un motor viejo no lo devuelve).
+- **`generar_ordenes_borrador` los sigue mirando siempre:** calcula con `contar_borradores=True` aunque la pantalla no los reste, así que un producto con un borrador abierto no vuelve a entrar en otra orden (generar dos veces con `false` no duplica; si el borrador se cancela, vuelve a pedirse). El parámetro se acepta en el cuerpo de `POST …/reposicion/ordenes` (la pantalla manda los mismos que ve) y no entra en la huella de la clave: no cambia lo que se crea.
+- **El CSV** (`/export`) sale **como siempre** con `true` (ni una columna de más: tres tests comparan el encabezado) y, con `false`, suma `en_borrador` al final: es el caso en que los borradores no están en `en_camino` y hace falta verlos. `en_borrador` también es una columna ordenable (`ORDENES`).
+
+**Tests** (`tests/test_borradores_en_la_reposicion.py`, SQLite y PostgreSQL): con `true` nada cambia y `en_borrador` aparece; con `false` un borrador de 10 no cambia el sugerido (8) y `en_borrador` = 10; enviadas y parciales cuentan con las dos; una mezcla; una cancelada no resta con ninguna; la sucursal; generar dos veces con `false` no duplica (ni con un borrador hecho a mano) y vuelve a pedir si se cancela; la huella; el router de generar; el eco, el 422, el orden y el CSV.
+
+**Cómo se adopta.** Subir el pin (v0.59.0), sin migración. El kit suma la columna **En borrador** y el interruptor «Contar borradores como pedidos» en Reposición (detectando el motor por el eco del parámetro); VentaLibra decide el default de su pantalla.
+
+## ADR-057 — Cuatro límites de ADR-018 cerrados: ajuste absoluto sin depósito, avisos con la fecha de la venta, `plan-salida` apagado y la carrera servicio / vencimiento (2026-10-13)
+
+**1. Ajuste absoluto sin depósito → 422.** `ajustar_stock` sin `deposito_id` compara el total de **todos** los depósitos y escribe la diferencia en el depósito por defecto (límite de ADR-018, PR-3): con 10 en uno y 6 en otro, «fijar en 5» escribía −11 en el principal y dejaba el otro intacto. En `POST /api/stock/{pid}/ajuste`, con `OpcionesStock.por_deposito` y `modo="absoluto"` sin `deposito_id`, si hay **más de un depósito activo** responde **422** «Indicá el depósito: …». Con un solo depósito activo (un depósito dado de baja no cuenta) es igual que siempre; los otros modos (entrada, salida, merma) no cambian; sin `por_deposito` (Contalibra, Restolibra) tampoco. `erp.stock.ajustar_stock` no se toca (llamado directo conserva su comportamiento).
+
+**2. Los avisos de una venta reabierta se miden en el día de la venta.** `GET /api/ventas/{id}` calculaba `avisos` contra el día de **hoy**: una venta de hace un mes con un lote que vencía a los diez días mostraba `lote_vencido` aunque estaba vigente al vender. `_agregar_avisos` recibe ahora `a_la_fecha_de_la_venta` y el detalle pasa el día de `ventas.fecha` (con o sin hora; si no se puede leer, cae a hoy). **`POST /api/ventas` no cambia** (la venta se acaba de hacer y el cajero necesita saber el estado de hoy, venga como venga la `fecha` del pedido): para una venta cargada con retraso, POST y GET difieren a propósito. Sigue fallando abierto (ADR-018, 2026-10-01).
+
+**3. `POST /api/ventas/plan-salida` con la opción apagada es 404, no 405.** Sin la ruta, el path lo capturaba `GET /{vid}` y un `POST` daba 405. Ahora el router registra, sólo con `con_avisos_de_vencimiento` apagada, un `POST /plan-salida` que contesta `404 {"detail": "Not Found"}`, fuera de `/openapi.json` (que sigue sin mencionarla). `GET /plan-salida` sigue cayendo en `/{vid}` (422: no es un número), como hoy.
+
+**4. Carrera «editar a servicio» vs «marcar vence».** Un servicio no puede estar marcado. El router lo rechazaba leyendo la marca **antes** de guardar, y `marcar_vence` leía el tipo antes de escribir: una edición a servicio concurrente con una marca dejaba un servicio marcado (límite de severidad media de ADR-018, 2026-09-30). Ahora: (a) `catalogo.update_producto` pone `tracks_expiry = 0` al pasar a servicio **dentro de su transacción** (si la base tiene la 0002); (b) `vencimientos.marcar_vence(…, True)` lleva la condición en el `UPDATE` (`… WHERE id = ? AND item_type <> 'service'`) y rechaza (`ReglaDeNegocio`, 409) si no actualizó nada. En PostgreSQL, si la edición todavía no confirmó, el `UPDATE` de la marca espera el candado de la fila y, al confirmar la edición, vuelve a evaluar el `WHERE` contra el servicio y no coincide. Desmarcar un servicio sigue pudiendo hacerse.
+
+**Aceptado sin código** (se documenta, no se endurece): (i) las cantidades con más de ~15 dígitos significativos pueden perder una unidad al pasar por `float` (la columna y la API trabajan con `float`; no es un caso de comercio real); (ii) marcar o desmarcar `vence` **durante** una venta del mismo producto puede dejar esa venta con o sin lote (no pierde ni duplica stock; cerrarlo exige bloquear todos los productos de la venta, con costo para Contalibra y Restolibra); (iii) los caminos viejos sin FEFO (`usecases.sales.confirm_sale` / `cancel_sale`, `usecases.inventory.transfer_stock` directo, `add_movimiento_stock` con cantidad negativa sin lote, los scripts de migración) siguen escribiendo «sin lote»: lo dice la tabla de ADR-018 y quien los use tiene que saberlo.
+
+**Tests.** `tests/test_ajuste_absoluto_sin_deposito.py`, `tests/test_avisos_fecha_de_la_venta.py` y `tests/test_servicio_y_vencimiento.py` (incluida la carrera con dos conexiones en PostgreSQL); en `test_fefo_devolucion_transferencia_ajuste.py` se invirtieron el 405 (ahora 404) y el «mismo aviso en el detalle».
+
+**Cómo se adopta.** Subir el pin (v0.59.0), sin migración. El kit tiene que mandar `deposito_id` en el ajuste absoluto cuando hay varios depósitos (ya lo hace la pantalla por depósito).
+
+## ADR-058 — El precio de venta por sucursal en la validación: `VentaPayload.sucursal_id` y `OpcionesVentas.sucursal_de_la_venta` (2026-10-13)
+
+**Problema.** ADR-049 dejó anotado en «No cubre»: «el precio por sucursal (`item_prices.branch_id`): el POS no lo usa hoy y, por eso, el servidor tampoco. Si el POS empieza a mandar `sucursal_id`, hay que sumarle a la opción una costura que lo resuelva desde el depósito de la venta». El humano decidió hacerlo completo (2026-10-13); ésta es la parte del motor. La cotización ya aceptaba la sucursal (`POST /api/listas-precio/{id}/precios` y `GET …/precio` con `sucursal_id`, ADR-048): lo que faltaba era que la **validación** hiciera la misma cuenta.
+
+**Qué ya existía.** `listas_precio.precios_por_producto(…, sucursal_id=)` y `resolve_price(…, branch_id=)`: entre los precios vigentes elige el **más específico** (el de la sucursal antes que el general, después el quiebre de cantidad más alto) y, si la sucursal no tiene precio propio, cae al general. `catalogo.get_deposito_de_venta` / `locations.branch_id` ligan un depósito a su sucursal. La venta **no persiste** su sucursal (`crear_venta` no escribe `sales.branch_id`; `margen._sucursal_de_las_ventas` la deduce del depósito).
+
+**El riesgo de la transición.** Si el servidor pasara a validar contra la sucursal del depósito de golpe, un POS que todavía cotiza **sin** sucursal (una pantalla con el bundle viejo abierto en el navegador, o simplemente el kit sin actualizar) y vende desde un depósito de una sucursal con precio propio recibiría un 409; y su «re-preciar» volvería a cotizar el general: un 409 que no se cura sin recargar la pantalla. Se evaluaron tres salidas: (1) aceptar los dos precios (el de la sucursal y el general) mientras dure la transición — descartada: deja al cliente elegir el más barato siempre, que es justo lo que la validación quiere impedir; (2) una opción del producto que active todo, con default apagado — sirve para cerrar, pero obliga a coordinar el deploy del kit con el del producto al instante; (3) **que la validación se guíe por lo que el POS declaró**. Se eligió la 3, con la 2 como llave para cerrar.
+
+**Decisión.**
+- **`VentaPayload.sucursal_id: int | None = None`**: la sucursal por la que el POS cotizó. No se guarda, y se ignora si `validar_precios` está apagada (aparece, eso sí, como campo opcional del cuerpo en el OpenAPI de todos los productos). Un POS que la manda declara que sabe de precios por sucursal; uno que no (`None`, lo único que mandaban los POS anteriores) se valida **exactamente como hasta v0.58**: contra el precio general (`sucursal_id=None`).
+- **`OpcionesVentas.sucursal_de_la_venta: (conn, payload) -> int | None`**, la costura. Default `sucursal_del_deposito`: la sucursal del depósito del que sale la venta (`locations.branch_id`; sin `deposito_id`, la del depósito por defecto; `None` si el depósito no tiene sucursal). **El servidor no le cree al pedido a qué sucursal pertenece su depósito:** la `sucursal_id` declarada solo *activa* la regla; el valor lo decide la costura. Un producto con otra regla (la sucursal del cajero, por ejemplo) pasa la suya.
+- **`erp.precio_de_venta.validar_precios(conn, lineas, *, en="", sucursal_id=None)`** acepta la sucursal y la pasa a `precios_por_producto`. `_rechazo_por_precios` la obtiene de la costura **cuando el POS la declaró** (o cuando la opción de abajo está prendida).
+- **`OpcionesVentas.exigir_precio_de_sucursal: bool = False`**: cierra la transición. Prendida, el servidor valida contra la sucursal de la venta **aunque el POS no la haya declarado**. Se prende cuando ningún POS viejo queda en pie; mientras está apagada, quien omite `sucursal_id` elige el precio general (como siempre pudo).
+- **El 409** suma `sucursal_id` dentro del `detail` (la que usó el servidor) **sólo cuando se validó por sucursal**: sin sucursal el cuerpo es byte a byte el de antes (un test lo fija), y el kit puede mostrar o recotizar por esa sucursal.
+
+**Los casos pedidos** (`tests/test_precio_de_venta_por_sucursal.py`, SQLite y PostgreSQL): (a) **sin precio de sucursal** nada cambia, declare o no la sucursal; (b) **con precio de sucursal y un POS que la manda**: 200 al precio de la sucursal, 409 al general (con el esperado y sin escribir nada); (c) **un depósito de otra sucursal** (o sin sucursal): rige el general, y un pedido que dice «Centro» pero vende desde un depósito de «Norte» se valida contra Norte; (d) **un POS viejo sin `sucursal_id`** vendiendo desde un depósito con precio propio: sigue validando contra el general, no se rompe (y tampoco puede colar el precio de la sucursal sin declararla). Además: `exigir_precio_de_sucursal`, la costura propia, el default de la costura, la ida y vuelta cotización → validación, el quiebre de cantidad conviviendo con el precio de sucursal, y las promociones.
+
+**Promociones.** `erp.promociones.calcular` **no mira la sucursal**: trabaja con el precio de cada línea, que con la validación prendida es el ya validado (el de la sucursal si corresponde), y el ahorro (2x1, 3x2, combo) se calcula sobre ese precio — un 2x1 de un producto a 90 en Centro ahorra una unidad a 90. No hace falta pasarle la sucursal. Una promoción de combo tiene un precio cerrado propio, igual en todas las sucursales.
+
+**No cubre.**
+- **Las promociones no se limitan por sucursal** (`promotions` no tiene `branch_id`): una promoción vale en todas. Sería una columna y una revisión aparte.
+- **La balanza por importe** (`etiqueta`) sigue valiendo lo que dice la etiqueta, estés en la sucursal que estés (ADR-049): la etiqueta manda sobre cualquier lista. Por peso, el precio por unidad de peso sí sale de la lista de la sucursal.
+- La venta no guarda su sucursal (no se agregó `sales.branch_id`): se sigue deduciendo del depósito.
+- La sincronización offline (LibraEdge) conserva el precio con el que se vendió sin conexión (ADR-049).
+- Si `exigir_precio_de_sucursal` está apagada, un cliente armado a mano elige el precio general omitiendo `sucursal_id`: es la contrapartida de no romper a los POS viejos, y se cierra con esa opción.
+
+**Cómo se adopta.** Subir el pin (v0.59.0), sin migración. **VentaLibra:** el POS manda `sucursal_id` en la cotización (que ya la aceptaba) **y** en `POST /api/ventas`, y maneja `sucursal_id` en el `detail` del 409; cuando todos los POS lo hacen, prende `exigir_precio_de_sucursal=True`. El kit suma el select de sucursal en el alta de un precio vigente («Nueva promoción»), que ya llama al endpoint con `sucursal_id`.

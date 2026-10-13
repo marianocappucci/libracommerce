@@ -1033,7 +1033,20 @@ def update_producto(conn, pid: int, nombre: str, codigo: str, descripcion: str,
             metadata = {k: v for k, v in anterior.metadata.items() if k != "estacion"} | nuevo.metadata
             nuevo = replace(nuevo, purchasable=anterior.purchasable, tax_profile=anterior.tax_profile, metadata=metadata)
         repo.save_catalog_item(nuevo)
+        if item_type == "service":
+            _soltar_el_vencimiento_de_un_servicio(conn, pid)
         _set_codigo(repo, conn, pid, codigo)
+
+
+def _soltar_el_vencimiento_de_un_servicio(conn, pid: int) -> None:
+    """Un producto que pasa a servicio deja de ser perecedero (ADR-057): un servicio no tiene inventario, así que no puede quedar con `tracks_expiry = 1`. Va **dentro de la
+    transacción de la edición**, junto con el cambio de tipo: quien marque el producto a la vez (`vencimientos.marcar_vence`) o lo ve todavía como producto, y su `UPDATE` espera
+    el candado de esta fila y al confirmarse vuelve a mirar el tipo, o ya lo ve servicio y sin marca. Antes la marca sólo se rechazaba en el router (409) leyéndola ANTES de
+    guardar, y una edición a servicio concurrente con una marca dejaba un servicio marcado. Una base sin la revisión `0002` no tiene la columna: no hay nada que soltar."""
+    from .vencimientos import tiene_revision
+
+    if tiene_revision(conn):
+        conn.execute("UPDATE catalog_items SET tracks_expiry = 0 WHERE id = ? AND tracks_expiry <> 0", (pid,))
 
 
 def delete_producto(conn, pid: int):

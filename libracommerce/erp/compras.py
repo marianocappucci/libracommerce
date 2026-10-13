@@ -33,6 +33,7 @@ from ..domain.purchasing import (
     PurchaseReceiptItem,
     PurchaseReceiptStatus,
 )
+from ..hora import ahora_local
 from ..usecases.purchasing import confirm_purchase_receipt
 from . import claves
 from .catalogo import validar_deposito
@@ -151,13 +152,72 @@ def agregar_linea_orden(conn, orden_id: int, *, item_id: int, quantity_ordered: 
     return _orden_dict(repositorio_de(conn).save_purchase_order(actualizada))
 
 
+# ── Enviar y cancelar una orden (ADR-055) ───────────────────────────────────
+#
+# El modelo de estados de una orden (`PurchaseOrderStatus`), con quién mueve cada flecha:
+#
+#     draft ──enviar_orden──▶ sent ──(recepción)──▶ partial ──(recepción)──▶ received
+#       │                      │
+#       └──── cancelar_orden ──┴──▶ cancelled
+#
+# `partial` y `received` sólo los mueve una recepción confirmada (`usecases.purchasing.confirm_purchase_receipt`): ya entró mercadería, y deshacerlo no es una
+# transición de la orden sino una devolución al proveedor. Por eso una orden con algo recibido no se cancela (409), y una cancelada no recibe (409).
+# Cada transición es UN `UPDATE ... WHERE status IN (...)` y no «leer, cambiar y guardar»: `save_purchase_order` reescribe todas las líneas, y con una recepción
+# que se confirma a la vez habría pisado lo recibido. La condición en el `WHERE` hace de candado: si otra operación cambió el estado entre la lectura y la
+# escritura, no se actualiza nada y se vuelve a mirar.
+
+
+def _transicion(conn, orden_id: int, a: PurchaseOrderStatus, desde: tuple[PurchaseOrderStatus, ...], *,
+                ordenada_el: datetime | None = None) -> dict:
+    """Pasa la orden a `a` si está en alguno de los estados `desde`. Si ya estaba en `a`, no escribe nada y devuelve la orden (idempotente). `OrdenNoEncontrada`
+    si no existe; `EstadoInvalido` desde cualquier otro estado."""
+    marcadores = ",".join("?" for _ in desde)
+    sets, params = "status = ?", [a.value]
+    if ordenada_el is not None:
+        # `ordered_at` se escribe una sola vez: cuándo se mandó por primera vez.
+        sets += ", ordered_at = COALESCE(ordered_at, ?)"
+        params.append(ordenada_el.isoformat())
+    cur = conn.execute(f"UPDATE purchase_orders SET {sets} WHERE id = ? AND status IN ({marcadores})",
+                       [*params, orden_id, *[e.value for e in desde]])
+    if cur.rowcount == 0:
+        actual = _obtener_orden_domain(conn, orden_id).status          # `OrdenNoEncontrada` si no existe
+        if actual != a:
+            raise EstadoInvalido(f"la orden {orden_id} está en estado '{actual.value}': {_QUE_NO_SE_PUEDE[a]}")
+    conn.commit()
+    return obtener_orden(conn, orden_id)
+
+
+_QUE_NO_SE_PUEDE = {
+    PurchaseOrderStatus.SENT: "sólo se envía una orden en borrador",
+    PurchaseOrderStatus.CANCELLED: "sólo se cancela una orden en borrador o enviada, sin mercadería recibida",
+}
+
+
+def enviar_orden(conn, orden_id: int) -> dict:
+    """Pasa una orden de `draft` a `sent`: ya se le pidió al proveedor. Registra `ordered_at` (la primera vez). **Idempotente:** enviar una orden que ya está `sent`
+    no escribe nada y la devuelve. `EstadoInvalido` (409) desde `partial`, `received` o `cancelled`; `OrdenNoEncontrada` (404). Confirma la transacción."""
+    return _transicion(conn, orden_id, PurchaseOrderStatus.SENT, (PurchaseOrderStatus.DRAFT,), ordenada_el=ahora_local())
+
+
+def cancelar_orden(conn, orden_id: int) -> dict:
+    """Pasa una orden de `draft` o `sent` a `cancelled`. Una cancelada no cuenta como «en camino» en la reposición ni recibe mercadería. **Idempotente:**
+    cancelar una orden ya `cancelled` no escribe nada y la devuelve. `EstadoInvalido` (409) desde `partial` o `received` (ya entró mercadería: no se cancela);
+    `OrdenNoEncontrada` (404). Confirma la transacción."""
+    return _transicion(conn, orden_id, PurchaseOrderStatus.CANCELLED, (PurchaseOrderStatus.DRAFT, PurchaseOrderStatus.SENT))
+
+
+def _exigir_orden_abierta_para_recibir(orden: PurchaseOrder) -> None:
+    if orden.status == PurchaseOrderStatus.CANCELLED:
+        raise EstadoInvalido(f"la orden {orden.id} está cancelada: no se le puede recibir mercadería")
+
+
 # ── Recepciones ──────────────────────────────────────────────────────────
 
 
 def crear_recepcion(conn, *, supplier_party_id: int, purchase_order_id: int | None = None,
                     document_reference: str | None = None) -> dict:
     if purchase_order_id is not None:
-        _obtener_orden_domain(conn, purchase_order_id)  # 404 temprano si no existe
+        _exigir_orden_abierta_para_recibir(_obtener_orden_domain(conn, purchase_order_id))  # 404 temprano si no existe; 409 si está cancelada
     recepcion = PurchaseReceipt(
         id=None, supplier_party_id=supplier_party_id, items=(),
         purchase_order_id=purchase_order_id, document_reference=document_reference,
@@ -200,6 +260,10 @@ def confirmar_recepcion(conn, recepcion_id: int, *, location_id: int, occurred_a
         raise EstadoInvalido(f"la recepción {recepcion_id} no está en borrador (status={recepcion.status})")
     if not recepcion.items:
         raise EstadoInvalido("no se puede confirmar una recepción sin líneas")
+    if recepcion.purchase_order_id is not None:
+        orden = repositorio_de(conn).get_purchase_order(recepcion.purchase_order_id)
+        if orden is not None:
+            _exigir_orden_abierta_para_recibir(orden)     # se pudo cancelar la orden después de crear esta recepción
     confirmada = confirm_purchase_receipt(repositorio_de(conn), recepcion, location_id, occurred_at)
     return _recepcion_dict(confirmada)
 
@@ -286,7 +350,7 @@ def recibir_mercaderia(conn, *, supplier_party_id: int, deposito_id: int, items:
             return _recepcion_repetida(conn, previa[0], pedido)
 
         if purchase_order_id is not None:
-            _obtener_orden_domain(conn, purchase_order_id)  # 404 temprano si no existe
+            _exigir_orden_abierta_para_recibir(_obtener_orden_domain(conn, purchase_order_id))  # 404 temprano si no existe; 409 si está cancelada
         validar_deposito(conn, deposito_id)   # existe y está activo (ADR-051): `DepositoInexistente`, un `ValueError` (422)
         for linea in lineas:
             if not conn.execute("SELECT 1 FROM catalog_items WHERE id = ?", (linea.item_id,)).fetchall():

@@ -234,9 +234,10 @@ def test_ajuste_de_stock(mundo):
     ok = lambda n: {"modo": "entrada", "cantidad": 2, "factor": 1, "deposito_id": w.dep1}  # noqa: E731
     _verificar(w.client, w.abrir, "POST", f"/api/stock/{w.p1}/ajuste", ok,
                [("cantidad",), ("factor",), ("deposito_id",), ("variant_id",)])
-    # El conteo en cero es legítimo (`0` numérico); `false` no es un cero.
-    assert w.client.post(f"/api/stock/{w.p2}/ajuste", json={"modo": "absoluto", "cantidad": 0}).status_code == 200
-    assert w.client.post(f"/api/stock/{w.p2}/ajuste", json={"modo": "absoluto", "cantidad": False}).status_code == 422
+    # El conteo en cero es legítimo (`0` numérico); `false` no es un cero. Con `deposito_id`: el conteo absoluto sin depósito, con varios depósitos activos, es 422 por otra
+    # razón (ADR-057), y este test es del booleano.
+    assert w.client.post(f"/api/stock/{w.p2}/ajuste", json={"modo": "absoluto", "cantidad": 0, "deposito_id": w.dep1}).status_code == 200
+    assert w.client.post(f"/api/stock/{w.p2}/ajuste", json={"modo": "absoluto", "cantidad": False, "deposito_id": w.dep1}).status_code == 422
 
 
 # ═══════════════════════════════════════════════════ Ventas

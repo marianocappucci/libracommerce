@@ -154,6 +154,10 @@ producto, `DEFAULT 0`) y un índice `stock_movements(item_id, location_id, lot_c
 congelado, **esa columna no existe en una base que sólo corrió el arranque**: `erp.vencimientos` lo dice
 (`SinRevision`, 503 en el router) en vez de fallar con un error de SQL.
 
+Las revisiones siguientes siguen el mismo criterio (aditivas, idempotentes, y el código sondea por metadatos si existen): `0003` y `0004` (parámetros y proveedor
+por producto de la reposición), `0005` (`item_branch_min_stock`), `0006` (`purchase_receipts.clave_operacion`, ADR-046) y `0007_devoluciones_de_servicio`
+(`sale_service_returns`, ADR-054: lo devuelto de un servicio, que no tiene stock en el ledger).
+
 ## Capas ERP y web (P9)
 
 El plan P9 (`wiki/analyses/migracion-p9-capa-comercial-libracommerce.md`) mueve
