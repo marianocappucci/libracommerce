@@ -17,7 +17,10 @@ más grupos el stock total de un producto/depósito no cambia (`get_stock_actual
 - `proximos_a_vencer`: el reporte por lote, de lo que vence dentro de `dias` (15 por defecto, tope 365) y lo ya vencido.
 - `asignar_vencimiento_a_saldo`: le pone lote y vencimiento a saldo que hoy no lo tiene, con un **par** de filas de
   ajuste (una negativa sin lote y una positiva con lote, misma referencia).
-- `dar_de_baja_lote`: la merma de un lote concreto, sin dejar su saldo negativo.
+- `dar_de_baja_lote`: la merma de un lote concreto, sin dejar su saldo negativo. Guarda el costo vigente del producto en el movimiento y
+  lo devuelve (`costo_unitario`, `costo_total`, ADR-059).
+- `conciliacion_sin_lote` / `conciliar_sin_lote` (ADR-060): el saldo «sin lote» NEGATIVO heredado de antes de A-4, repartido entre los lotes
+  que lo respaldan (un par aditivo de ajustes por tramo).
 - `registrar_entrada_con_lote` (carga de vencimientos, 2026-09-30): una entrada manual de stock **nuevo** (+cantidad)
   con lote y vencimiento, para cargar mercadería que ya está en el depósito o que no vino por una compra. A diferencia
   de `asignar_vencimiento_a_saldo` no mueve nada del «sin lote»: suma stock real.
@@ -66,12 +69,14 @@ from . import claves
 from .catalogo import validar_deposito
 from .listas_precio import _ZONA_LOCAL
 from .lotes import CERO as _CERO
+from .lotes import _orden_fefo
 from .lotes import dec as _dec
 from .lotes import lote_de_fila as _lote_de_fila
+from .lotes import plan_fefo as _plan_fefo
 from .lotes import saldo_limpio as _saldo
 from .lotes import saldos_por_bucket as _saldos
 from .lotes import vence_de_fila as _vence_de_fila
-from .stock import add_movimiento_stock, normalizar_lote, normalizar_vencimiento
+from .stock import add_movimiento_stock, costo_vigente, importe, normalizar_lote, normalizar_vencimiento
 
 DIAS_AVISO = 15
 #: Tope de la anticipación del aviso: un año.
@@ -480,7 +485,7 @@ def _movimientos_de_la_operacion(conn, item_id: int, clave: str) -> list:
     patron = "%" + marca.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     filas = conn.execute(
         "SELECT id, item_id, location_id, variant_id, movement_type, reason_code, quantity_delta, lot_code, expires_at, "
-        "note "
+        "note, unit_cost "
         "FROM stock_movements WHERE item_id = ? AND note LIKE ? ESCAPE '\\' ORDER BY id",
         (item_id, patron),
     ).fetchall()
@@ -612,7 +617,12 @@ def dar_de_baja_lote(conn, item_id: int, deposito_id: int, lot_code: str | None,
     `ReglaDeNegocio` si hay **saldo «sin lote» negativo** en ese depósito y variante (salidas sin conciliar: hasta A-4 las
     ventas no bajan el lote, su saldo puede estar sobreestimado y mermarlo descontaría dos veces lo vendido). Esas
     comprobaciones van después de buscar la clave: un reintento (`repetida`) no se ve afectado por ellas. No exige que el producto esté marcado. Devuelve `{producto_id, deposito_id,
-    variante_id, lote, vence, cantidad, saldo_restante, repetida}`."""
+    variante_id, lote, vence, cantidad, saldo_restante, costo_unitario, costo_total, sin_costo, repetida}`.
+
+    🔑 **Importe de la merma (ADR-059).** El movimiento guarda el costo vigente del producto (`stock_movements.unit_cost`, una foto: si el costo
+    cambia después, la merma conserva el viejo). `costo_unitario` / `costo_total` (`cantidad × costo`, 2 decimales) son `None` y `sin_costo`
+    es `True` si el producto no tenía costo cargado. Un reintento (`repetida`) devuelve el costo que se guardó la primera vez, no el de hoy.
+    El motor no decide quién ve estos importes: el producto los filtra por rol (los tres nombres llevan `costo`)."""
     clave = claves.normalizar_clave(clave_operacion)
     lote = normalizar_lote(lot_code) if lot_code is not None else None
     vence = normalizar_vencimiento(expires_at) if expires_at is not None else None
@@ -643,7 +653,7 @@ def dar_de_baja_lote(conn, item_id: int, deposito_id: int, lot_code: str | None,
     if saldos.get((None, None), _CERO) < 0:
         raise ReglaDeNegocio(
             "hay salidas sin lote sin conciliar en este depósito: el saldo del lote puede estar sobreestimado; "
-            "conciliá con el conteo físico antes de dar de baja"
+            "conciliá con el conteo físico antes de dar de baja (o repartí el negativo entre los lotes con `conciliar_sin_lote`)"
         )
     total = sum(saldos.values(), _CERO)
     if total < cant:
@@ -655,13 +665,24 @@ def dar_de_baja_lote(conn, item_id: int, deposito_id: int, lot_code: str | None,
     if nota.strip():
         referencia += f" — {nota.strip()}"
     referencia = f"{referencia} {claves.marca(clave)}"
+    costo = costo_vigente(conn, item_id)   # ADR-059: la foto del costo de ESTE momento; `None` si el producto no tiene costo cargado
     add_movimiento_stock(conn, item_id, "merma", -float(cant), referencia, usuario_id=usuario_id,
                          fecha=fecha or hoy_argentina().isoformat(), deposito_id=deposito_id,
                          variant_id=variante_id, lot_code=lote, expires_at=vence,
-                         sobre_existencias=True)   # da de baja lo que ya hay: vale en un depósito dado de baja (ADR-051)
+                         sobre_existencias=True,   # da de baja lo que ya hay: vale en un depósito dado de baja (ADR-051)
+                         unit_cost=costo)
     return {"producto_id": item_id, "deposito_id": deposito_id, "variante_id": variante_id, "lote": lote,
             "vence": vence, "cantidad": _num(cant), "saldo_restante": _num(saldo - cant),
-            "repetida": False}
+            **_costo_de_la_merma(cant, costo), "repetida": False}
+
+
+def _costo_de_la_merma(cantidad: Decimal, costo) -> dict:
+    """Los campos de costo de la respuesta de una merma (ADR-059): `costo_unitario` y `costo_total` (`cantidad × costo`), o `None` en los dos y
+    `sin_costo: True` si el producto no tenía costo cargado. Los tres llevan `costo` en el nombre a propósito: es lo que un producto filtra (VentaLibra,
+    `SinCostos`) para quien no puede ver costos."""
+    if costo is None:
+        return {"costo_unitario": None, "costo_total": None, "sin_costo": True}
+    return {"costo_unitario": float(Decimal(str(costo))), "costo_total": importe(cantidad, costo), "sin_costo": False}
 
 
 def _baja_repetida(conn, filas: list, pedida: dict) -> dict:
@@ -678,7 +699,8 @@ def _baja_repetida(conn, filas: list, pedida: dict) -> dict:
                               previa["lote"], previa["vence"], hasta_id=filas[0]["id"])
     return {"producto_id": previa["producto_id"], "deposito_id": previa["deposito_id"],
             "variante_id": previa["variante_id"], "lote": previa["lote"], "vence": previa["vence"],
-            "cantidad": _num(previa["cantidad"]), "saldo_restante": _num(saldo), "repetida": True}
+            "cantidad": _num(previa["cantidad"]), "saldo_restante": _num(saldo),
+            **_costo_de_la_merma(previa["cantidad"], filas[0]["unit_cost"]), "repetida": True}
 
 
 # ── Entrada manual con lote (carga de vencimientos, 2026-09-30) ────────────
@@ -794,3 +816,192 @@ def _entrada_repetida(conn, clave: str, filas: list, pedida: dict) -> dict:
             "variante_id": previa["variante_id"], "lote": previa["lote"], "vence": previa["vence"],
             "cantidad": _num(previa["cantidad"]), "referencia": nota[:-len(sufijo)] if nota.endswith(sufijo) else nota,
             "saldo_lote": _num(saldo), "repetida": True}
+
+
+# ── Conciliar el saldo «sin lote» negativo heredado (ADR-060) ──────────────────────────────────────────
+
+_ENTRA_A_SIN_LOTE = "(entra a sin lote)"
+_SALE_DEL_LOTE = "(sale del lote)"
+
+
+def _saldos_de_la_variante(conn, item_id: int, deposito_id: int, variante_id: int | None) -> dict[tuple, Decimal]:
+    """`{(lote, vence): saldo}` de un producto en un depósito y una variante (`None` = el producto sin variantes), con los saldos en cero fuera."""
+    return {k[3:]: v for k, v in _saldos(conn, "sm.item_id = ? AND sm.location_id = ?", [item_id, deposito_id],
+                                         {deposito_id: {}}).items() if k[2] == variante_id}
+
+
+def _exigir_deposito(conn, deposito_id: int) -> None:
+    if isinstance(deposito_id, bool) or not isinstance(deposito_id, int):
+        raise ValueError(f"deposito_id tiene que ser un entero: {deposito_id!r}")
+    if not conn.execute("SELECT 1 FROM locations WHERE id = ?", (deposito_id,)).fetchall():
+        raise ValueError(f"el depósito {deposito_id} no existe")
+
+
+def conciliacion_sin_lote(conn, producto_id: int, deposito_id: int, variante_id: int | None = None, *,
+                          hoy: datetime.date | None = None) -> dict:
+    """La vista previa de conciliar el saldo «sin lote» de un producto en un depósito y una variante. **Lectura pura**: no escribe, no toma el producto.
+
+    Antes de A-4 (2026-10-01) las salidas (ventas, devoluciones, transferencias, ajustes) descontaban del bucket «sin lote» aunque la
+    mercadería estuviera en un lote: el «sin lote» quedó **negativo** y los lotes **sobreestimados** (ver el docstring del módulo). Si el saldo «sin lote»
+    es `-X`, hay `X` unidades que salieron de algún lote y siguen contadas en él. La propuesta las reparte **FEFO** (`erp.lotes.plan_fefo`: vencidos primero,
+    «sin lote» último) entre los lotes con saldo > 0, que es la misma regla con la que hoy sale una venta; lo que los lotes no alcanzan a cubrir queda
+    en `sin_cubrir`: es un faltante real, que no se concilia sino que corrige un conteo físico.
+
+    Devuelve `{producto_id, codigo, nombre, unidad, vence (si está marcado), deposito_id, variante_id, hoy, saldo_sin_lote, a_conciliar, lotes, propuesta,
+    cubierto, sin_cubrir}`. `saldo_sin_lote` es el del bucket (puede ser ≥ 0); `a_conciliar` es `X` (0 si no es negativo); `lotes` son los buckets con saldo > 0 en
+    orden FEFO (`lote`, `vence`, `saldo`, `dias_para_vencer`, `estado`); `propuesta` es `[{lote, vence, cantidad}]`, **la misma forma que el `reparto` de
+    `conciliar_sin_lote`** (se puede mandar tal cual, o editada); `cubierto` es lo que reparte y `sin_cubrir` es `a_conciliar − cubierto`.
+
+    `ProductoNoEncontrado`; `ValueError` con un depósito inexistente o una variante que no existe o es de otro producto; `SinRevision` sin la revisión `0002`."""
+    _exigir_revision(conn)
+    producto = _fila_de_producto(conn, producto_id)
+    _validar_variante(conn, producto_id, variante_id)
+    _exigir_deposito(conn, deposito_id)
+    hoy = hoy or hoy_argentina()
+    saldos = _saldos_de_la_variante(conn, producto_id, deposito_id, variante_id)
+    sin_lote = saldos.get((None, None), _CERO)
+    a_conciliar = -sin_lote if sin_lote < 0 else _CERO
+    lotes = []
+    for (lote, vence), saldo in sorted(saldos.items(), key=lambda kv: _orden_fefo(kv[0])):
+        if (lote, vence) == (None, None) or saldo <= 0:
+            continue
+        dias = _dias(vence, hoy)
+        lotes.append({"lote": lote, "vence": vence, "saldo": _num(saldo), "dias_para_vencer": dias,
+                      "estado": "sin_fecha" if dias is None else ("vencido" if dias < 0 else "vigente")})
+    # El último tramo de `plan_fefo` es el «sin lote»: lo que ningún lote respalda (`sin_cubrir`).
+    tramos = _plan_fefo(conn, producto_id, deposito_id, variante_id, a_conciliar) if a_conciliar > 0 else []
+    propuesta = [{"lote": t.lote, "vence": t.vence, "cantidad": _num(t.cantidad)} for t in tramos if not t.sin_lote]
+    cubierto = sum((t.cantidad for t in tramos if not t.sin_lote), _CERO)
+    return {"producto_id": producto_id, "codigo": producto["codigo"], "nombre": producto["name"], "unidad": producto["unit_code"],
+            "vence": bool(producto["tracks_expiry"]), "deposito_id": deposito_id, "variante_id": variante_id, "hoy": hoy.isoformat(),
+            "saldo_sin_lote": _num(sin_lote), "a_conciliar": _num(a_conciliar), "lotes": lotes, "propuesta": propuesta,
+            "cubierto": _num(cubierto), "sin_cubrir": _num(a_conciliar - cubierto)}
+
+
+def _normalizar_reparto(reparto) -> list[tuple[str | None, str | None, Decimal]]:
+    """El `reparto` de `conciliar_sin_lote` como `[(lote, vence, cantidad)]`, en el orden recibido. `ValueError` si no es una lista no vacía de
+    `{lote, vence, cantidad}`, si un tramo no trae ni lote ni vencimiento (el bucket «sin lote» es lo que se está conciliando), si su cantidad no es un número mayor
+    a 0 o si el mismo lote aparece dos veces (se junta en un solo tramo)."""
+    if not isinstance(reparto, (list, tuple)) or not reparto:
+        raise ValueError("reparto tiene que ser una lista no vacía de {lote, vence, cantidad}")
+    tramos: dict[tuple, Decimal] = {}
+    for i, t in enumerate(reparto, 1):
+        if not isinstance(t, dict):
+            raise ValueError(f"el tramo {i} del reparto tiene que ser {{lote, vence, cantidad}}: {t!r}")
+        lote = normalizar_lote(t["lote"]) if t.get("lote") is not None else None
+        vence = normalizar_vencimiento(t["vence"]) if t.get("vence") is not None else None
+        if lote is None and vence is None:
+            raise ValueError(f"el tramo {i} del reparto no tiene lote ni vencimiento: el saldo sin lote es justo lo que se concilia")
+        if (lote, vence) in tramos:
+            raise ValueError(f"el lote {lote or '(sin código)'} (vence {vence or 'sin fecha'}) está dos veces en el reparto: juntalo en un solo tramo")
+        tramos[(lote, vence)] = _cantidad_positiva(t.get("cantidad"), f"la cantidad del tramo {i}")
+    return [(lote, vence, cant) for (lote, vence), cant in tramos.items()]
+
+
+def _reparto_ordenado(tramos) -> list[tuple]:
+    """Un reparto en una forma comparable (sin importar el orden): `[(lote, vence, cantidad)]` ordenado, con la cantidad limpia."""
+    return sorted(((lote, vence, _saldo(cant)) for lote, vence, cant in tramos), key=lambda t: (t[0] or "", t[1] or ""))
+
+
+def conciliar_sin_lote(conn, producto_id: int, deposito_id: int, reparto, *, clave_operacion: str,
+                       variante_id: int | None = None, usuario_id: int | None = None, nota: str = "",
+                       fecha: str = "") -> dict:
+    """Reparte el saldo «sin lote» **negativo** de un producto marcado en un depósito y una variante entre los lotes que lo respaldan.
+
+    `reparto` es `[{lote, vence, cantidad}]` (lo que propone `conciliacion_sin_lote`, o lo que el usuario edite). Por cada tramo escribe un **par
+    aditivo** de movimientos `ajuste`: `+cantidad` al «sin lote» y `−cantidad` al lote, con la misma referencia (`nota` más un identificador
+    `[conciliación xxxxxxxx]` que las une; sin nota, `Conciliación sin lote [...]`), la misma fecha y el mismo usuario. Nunca modifica una fila ya escrita
+    y el stock total del producto en ese depósito **no cambia**: sólo se mueve entre buckets. Si `fecha` no viene es hoy en Argentina.
+
+    Es el cierre de lo que dejó la guarda de `dar_de_baja_lote` (que se niega a mermar con el «sin lote» negativo): conciliando todo el negativo el
+    «sin lote» queda en 0 y la baja vuelve a andar. **Lo que los lotes no cubren no se toca**: si el reparto suma menos que el negativo, el resto del
+    «sin lote» sigue negativo, porque es un faltante real que se corrige con un conteo físico (`ajustar_stock`), no con una reclasificación.
+
+    **Idempotente por `clave_operacion`**, igual que `asignar_vencimiento_a_saldo` (obligatoria, única por producto, `[op:<clave>]` al final de la nota de
+    las filas, producto tomado antes de buscarla): un reintento con la misma clave y el mismo reparto no escribe nada y devuelve lo de la primera vez con
+    `repetida: True`; con otro reparto u otra operación sobre ese producto, `ClaveDeOperacionReusada` (409). La búsqueda de la clave va primero: el
+    estado (que el negativo ya no exista) se comprueba después, así que un reintento de una conciliación hecha no falla.
+
+    `ValueError` con datos inválidos (reparto mal formado, un lote repetido, cantidad ≤ 0, clave inválida, depósito inexistente, una variante que no existe o
+    es de otro producto); `ProductoNoEncontrado`; `ReglaDeNegocio` si el producto no es un producto (un servicio), no está marcado con `marcar_vence`, no
+    tiene saldo «sin lote» negativo, o el reparto suma **más** que ese negativo; `SaldoInsuficiente` si un lote no tiene su tramo. Todo se valida antes de escribir
+    la primera fila. `SinRevision` sin la revisión `0002`. Devuelve `{producto_id, deposito_id, variante_id, referencia, tramos, cantidad, saldo_sin_lote,
+    sin_cubrir, repetida}` (`saldo_sin_lote` es el que quedó al terminar; `sin_cubrir`, lo que sigue negativo)."""
+    clave = claves.normalizar_clave(clave_operacion)
+    tramos = _normalizar_reparto(reparto)
+    _validar_variante(conn, producto_id, variante_id)
+    _preparar_escritura(conn, producto_id, deposito_id)
+    previas = _movimientos_de_la_operacion(conn, producto_id, clave)
+    if previas:
+        return _conciliacion_repetida(conn, clave, previas, {
+            "tipo": "conciliar", "producto_id": producto_id, "deposito_id": deposito_id, "variante_id": variante_id,
+            "reparto": _reparto_ordenado(tramos)})
+    producto = _fila_de_producto(conn, producto_id)
+    _exigir_producto_con_inventario(producto, "conciliar el saldo sin lote")
+    if not producto["tracks_expiry"]:
+        raise ReglaDeNegocio(f"el producto {producto_id} no está marcado como perecedero: marcalo antes de conciliar su saldo sin lote")
+    saldos = _saldos_de_la_variante(conn, producto_id, deposito_id, variante_id)
+    sin_lote = saldos.get((None, None), _CERO)
+    if sin_lote >= 0:
+        raise ReglaDeNegocio("no hay saldo sin lote negativo en este depósito y variante: no hay nada que conciliar")
+    for lote, vence, cant in tramos:
+        saldo = saldos.get((lote, vence), _CERO)
+        if saldo < cant:
+            raise SaldoInsuficiente(
+                f"el lote {lote or '(sin código)'} (vence {vence or 'sin fecha'}) tiene {_texto_del_saldo(max(saldo, _CERO))} "
+                f"en el depósito {deposito_id} y se quieren conciliar {_texto_del_saldo(cant)}"
+            )
+    total = sum((cant for _, _, cant in tramos), _CERO)
+    if total > -sin_lote:
+        raise ReglaDeNegocio(
+            f"el reparto suma {_texto_del_saldo(total)} y el saldo sin lote negativo es {_texto_del_saldo(-sin_lote)}: "
+            "no se puede conciliar más de lo que está negativo"
+        )
+    fecha = fecha or hoy_argentina().isoformat()
+    marca = f"[conciliación {uuid.uuid4().hex[:8]}]"
+    referencia = f"{nota.strip()} {marca}" if nota.strip() else f"Conciliación sin lote {marca}"
+    op = claves.marca(clave)
+    # Reclasifica existencias que ya están ahí (entre buckets del mismo depósito): sigue valiendo en un depósito dado de baja (ADR-051).
+    destino = {"usuario_id": usuario_id, "fecha": fecha, "deposito_id": deposito_id, "variant_id": variante_id,
+               "sobre_existencias": True}
+    for lote, vence, cant in tramos:
+        detalle = f"{referencia}: {_detalle_del_lote(lote, vence)}"
+        add_movimiento_stock(conn, producto_id, "ajuste", float(cant), f"{detalle} {_ENTRA_A_SIN_LOTE} {op}", **destino)
+        add_movimiento_stock(conn, producto_id, "ajuste", -float(cant), f"{detalle} {_SALE_DEL_LOTE} {op}",
+                             lot_code=lote, expires_at=vence, **destino)
+    nuevo = sin_lote + total
+    return {"producto_id": producto_id, "deposito_id": deposito_id, "variante_id": variante_id, "referencia": referencia,
+            "tramos": [{"lote": lote, "vence": vence, "cantidad": _num(cant)} for lote, vence, cant in tramos],
+            "cantidad": _num(total), "saldo_sin_lote": _num(nuevo), "sin_cubrir": _num(max(-nuevo, _CERO)), "repetida": False}
+
+
+def _detalle_del_lote(lote: str | None, vence: str | None) -> str:
+    return f"lote {lote or '(sin código)'}, vence {vence or 'sin fecha'}"
+
+
+def _conciliacion_repetida(conn, clave: str, filas: list, pedida: dict) -> dict:
+    """El resultado de una conciliación que ya se escribió con esta clave, o `ClaveDeOperacionReusada` si lo pedido ahora no es lo mismo. Sin escribir
+    nada. Las filas vienen en orden de escritura: por tramo, la que entra al «sin lote» y la que sale del lote."""
+    previa = {"tipo": "otra"}
+    pares = [(filas[i], filas[i + 1]) for i in range(0, len(filas) - 1, 2)] if len(filas) % 2 == 0 else []
+    if pares and all(
+        sl["movement_type"] == "adjustment" and lo["movement_type"] == "adjustment"
+        and _dec(sl["quantity_delta"]) > 0 and _saldo(_dec(lo["quantity_delta"])) == -_saldo(_dec(sl["quantity_delta"]))
+        and sl["item_id"] == lo["item_id"] and sl["location_id"] == lo["location_id"] and sl["variant_id"] == lo["variant_id"]
+        and _lote_de_fila(sl["lot_code"]) is None and _vence_de_fila(sl["expires_at"]) is None
+        for sl, lo in pares
+    ):
+        primera = pares[0][0]
+        tramos = [(_lote_de_fila(lo["lot_code"]), _vence_de_fila(lo["expires_at"]), _saldo(_dec(sl["quantity_delta"]))) for sl, lo in pares]
+        previa = {"tipo": "conciliar", "producto_id": primera["item_id"], "deposito_id": primera["location_id"],
+                  "variante_id": primera["variant_id"], "reparto": _reparto_ordenado(tramos)}
+    _misma_operacion(previa, pedida)
+    nota = filas[0]["note"]
+    sufijo = f": {_detalle_del_lote(*tramos[0][:2])} {_ENTRA_A_SIN_LOTE} {claves.marca(clave)}"
+    saldo = _saldo_del_bucket(conn, previa["producto_id"], previa["deposito_id"], previa["variante_id"], None, None,
+                              hasta_id=filas[-1]["id"])
+    total = sum((cant for _, _, cant in tramos), _CERO)
+    return {"producto_id": previa["producto_id"], "deposito_id": previa["deposito_id"], "variante_id": previa["variante_id"],
+            "referencia": nota[:-len(sufijo)] if nota.endswith(sufijo) else nota,
+            "tramos": [{"lote": lote, "vence": vence, "cantidad": _num(cant)} for lote, vence, cant in tramos],
+            "cantidad": _num(total), "saldo_sin_lote": _num(saldo), "sin_cubrir": _num(max(-saldo, _CERO)), "repetida": True}

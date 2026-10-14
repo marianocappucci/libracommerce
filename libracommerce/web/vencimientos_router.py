@@ -5,17 +5,20 @@ escribir**: quien mira el reporte de próximos a vencer no es necesariamente qui
 da de baja un lote.
 
 - `build_vencimientos_router`, **sólo lectura**: `GET /api/vencimientos` (próximos a vencer y vencidos),
-  `GET /api/vencimientos/export` (CSV) y `GET /api/vencimientos/productos/{id}/lotes` (las existencias por lote).
+  `GET /api/vencimientos/export` (CSV), `GET /api/vencimientos/productos/{id}/lotes` (las existencias por lote) y
+  `GET /api/vencimientos/conciliacion` (la vista previa de conciliar el saldo «sin lote» negativo, ADR-060).
 - `build_vencimientos_escritura_router`: `PUT /api/vencimientos/productos/{id}` (marcar «vence»),
   `POST /api/vencimientos/asignar` (ponerle lote y vencimiento a saldo sin lote), `POST /api/vencimientos/entrada`
-  (una entrada manual de stock nuevo con lote y vencimiento) y `POST /api/vencimientos/merma` (dar de baja un lote).
+  (una entrada manual de stock nuevo con lote y vencimiento), `POST /api/vencimientos/merma` (dar de baja un lote; devuelve el costo
+  de la merma, ADR-059) y `POST /api/vencimientos/conciliar` (repartir el saldo «sin lote» negativo entre los lotes que lo respaldan,
+  ADR-060).
   Además de lo que el producto ponga al montarlo (`include_router(..., dependencies=...)`), acepta gates **por
   operación**: `dependencias_marcar` (marcar un producto) y `dependencias_movimientos` (asignar, dar entrada y dar
-  de baja, las tres que mueven el ledger). Así, por ejemplo, un producto puede dejar que el encargado marque y que
+  de baja y conciliar, las que mueven el ledger). Así, por ejemplo, un producto puede dejar que el encargado marque y que
   el encargado **y el depósito** asignen y den de baja. **La factory de escritura FALLA al construirse (`ValueError`)
   si falta `usuario_actual` o alguna de las dos listas de dependencias está vacía o ausente**: no hay forma de exponer
   escrituras del ledger sin autorización ni sin usuario.
-- `asignar`, `entrada` y `merma` exigen `clave_operacion` en el cuerpo (un texto único por intento, p. ej. un UUID): un reintento
+- `asignar`, `entrada`, `merma` y `conciliar` exigen `clave_operacion` en el cuerpo (un texto único por intento, p. ej. un UUID): un reintento
   con la misma clave, el mismo producto y los mismos datos no vuelve a escribir y devuelve el resultado anterior con
   `repetida: true` (la clave es única por producto: una por intento del usuario y por producto).
 
@@ -113,6 +116,27 @@ class MermaPayload(BaseModel):
     _no_son_booleanos = sin_booleanos("producto_id", "deposito_id", "variante_id")
 
 
+class TramoPayload(BaseModel):
+    """Un tramo de la conciliación: cuánto del saldo «sin lote» negativo se carga a un lote. Al menos uno de `lote` y `vence` (los del bucket tal como los
+    devuelve `GET /conciliacion`), y se valida en el motor."""
+
+    lote: str | None = None
+    vence: str | None = None
+    cantidad: Decimal = Field(gt=0)
+
+
+class ConciliarPayload(BaseModel):
+    producto_id: int
+    deposito_id: int
+    variante_id: int | None = None
+    #: Lo que propone `GET /conciliacion` (`propuesta`), o lo que el usuario edite.
+    reparto: list[TramoPayload] = Field(min_length=1)
+    clave_operacion: str = Field(min_length=1, max_length=vencimientos.MAX_LARGO_CLAVE)
+    nota: str = ""
+
+    _no_son_booleanos = sin_booleanos("producto_id", "deposito_id", "variante_id")
+
+
 def _http(error: Exception) -> HTTPException:
     """El código HTTP de cada error del módulo (ver el docstring de arriba)."""
     if isinstance(error, vencimientos.SinRevision):
@@ -132,12 +156,18 @@ def build_vencimientos_router(
     conexion: Conexion | None = None,
     usuario_actual: Callable[..., Any] | None = None,
     prefix: str = "/api/vencimientos",
+    dependencias_conciliacion: Sequence[Any] | None = None,
 ):
-    """`GET ""`, `GET /export` (CSV) y `GET /productos/{producto_id}/lotes`. Sólo lee. `GET ""`: `dias` (15, de 1 a
+    """`GET ""`, `GET /export` (CSV), `GET /productos/{producto_id}/lotes` y `GET /conciliacion`. Sólo lee. `GET ""`: `dias` (15, de 1 a
     365), `sucursal_id`, `deposito_id`, `categoria`, `producto_id` e `incluir_vencidos` (`true` por default); devuelve
     `{hoy, dias, hasta, resumen, lotes, sin_lote}` (ver `erp.vencimientos.proximos_a_vencer`). Un parámetro inválido o
     una sucursal o un depósito que no existen es 422. `usuario_actual` no se usa acá (es del router de escritura);
-    se acepta para que los dos se construyan igual."""
+    se acepta para que los dos se construyan igual.
+
+    `GET /conciliacion?producto_id&deposito_id[&variante_id]` (ADR-060) es la vista previa de `POST /conciliar`: el saldo «sin lote» negativo de un producto en un
+    depósito y una propuesta FEFO de reparto entre sus lotes (`erp.vencimientos.conciliacion_sin_lote`). Lectura pura: vive acá porque este router no escribe. Es
+    la antesala de una escritura, así que `dependencias_conciliacion` (opcional) le pone a esa sola ruta un gate propio, encima del que el producto ponga al
+    montar el router: lo natural es pasarle las mismas `dependencias_movimientos` del router de escritura."""
     abrir, _ = _deps(usuario_actual, conexion)
     router = APIRouter(prefix=prefix, tags=["vencimientos"])
 
@@ -180,6 +210,16 @@ def build_vencimientos_router(
             raise _http(e) from e
         return {"producto": ficha, "hoy": vencimientos.hoy_argentina().isoformat(), "lotes": filas}
 
+    @router.get("/conciliacion", dependencies=list(dependencias_conciliacion or ()))
+    def conciliacion(producto_id: int, deposito_id: int, variante_id: int | None = None):
+        """El saldo «sin lote» negativo de `(producto, depósito, variante)` y la propuesta de reparto FEFO entre sus lotes (`propuesta`, con la misma forma que el `reparto`
+        de `POST /conciliar`). Producto que no existe, 404; depósito o variante que no existen o que no son del producto, 422."""
+        try:
+            with abrir() as conn:
+                return vencimientos.conciliacion_sin_lote(conn, producto_id, deposito_id, variante_id)
+        except _ERRORES as e:
+            raise _http(e) from e
+
     return router
 
 
@@ -191,9 +231,8 @@ def build_vencimientos_escritura_router(
     dependencias_marcar: Sequence[Any] | None = None,
     dependencias_movimientos: Sequence[Any] | None = None,
 ):
-    """`PUT /productos/{producto_id}` (`{vence: bool}`), `POST /asignar`, `POST /entrada` y `POST /merma`. Cada
-    operación es una transacción: un error de negocio no deja nada escrito. Las tres que mueven el ledger escriben
-    filas nuevas, nunca un `UPDATE` de una ya escrita, y **exigen `clave_operacion` en el cuerpo** (un texto único por intento, p. ej. un
+    """`PUT /productos/{producto_id}` (`{vence: bool}`), `POST /asignar`, `POST /entrada`, `POST /merma` y `POST /conciliar`. Cada operación es una transacción: un error de negocio no deja nada
+    escrito. Las que mueven el ledger escriben filas nuevas, nunca un `UPDATE` de una ya escrita, y **exigen `clave_operacion` en el cuerpo** (un texto único por intento, p. ej. un
     UUID): un reintento con la misma clave y los mismos datos devuelve el resultado anterior (`repetida: true`) sin
     escribir nada, y con la misma clave y otros datos, 409.
 
@@ -201,7 +240,11 @@ def build_vencimientos_escritura_router(
     (`ValueError`) si falta algo de esto.** `usuario_actual` (una `Depends`-able que devuelve un `dict` con `id`) sale
     como `created_by` de los movimientos. `dependencias_marcar` y `dependencias_movimientos` (listas **no vacías** de
     `Depends(...)`) van **por operación**, encima de las que el producto ponga al montar el router: las primeras a la
-    marca de un producto, las segundas a `asignar`, `entrada` y `merma`."""
+    marca de un producto, las segundas a `asignar`, `entrada`, `merma` y `conciliar`.
+
+    `POST /merma` devuelve además `costo_unitario`, `costo_total` y `sin_costo` (ADR-059): el motor no decide quién ve esos importes, el producto los
+    filtra por rol. `POST /conciliar` es la escritura de la conciliación del saldo «sin lote» negativo (ADR-060); su vista previa es `GET /conciliacion`, que vive en el
+    router de lectura."""
     if usuario_actual is None:
         raise ValueError("build_vencimientos_escritura_router necesita usuario_actual: los movimientos que escribe "
                          "tienen que quedar a nombre de quien los hizo")
@@ -256,6 +299,19 @@ def build_vencimientos_escritura_router(
                     clave_operacion=payload.clave_operacion, variante_id=payload.variante_id,
                     motivo=payload.motivo, usuario_id=user.get("id"),
                     nota=payload.nota,
+                )
+        except _ERRORES as e:
+            raise _http(e) from e
+
+    @router.post("/conciliar", dependencies=list(dependencias_movimientos))
+    def conciliar(payload: ConciliarPayload, user: dict = Depends(usuario)):
+        try:
+            with abrir() as conn:
+                return vencimientos.conciliar_sin_lote(
+                    conn, payload.producto_id, payload.deposito_id,
+                    [{"lote": t.lote, "vence": t.vence, "cantidad": t.cantidad} for t in payload.reparto],
+                    clave_operacion=payload.clave_operacion, variante_id=payload.variante_id,
+                    usuario_id=user.get("id"), nota=payload.nota,
                 )
         except _ERRORES as e:
             raise _http(e) from e

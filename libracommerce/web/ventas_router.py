@@ -249,7 +249,8 @@ class OpcionesVentas:
     #: `sale_items.unit_cost_snapshot` (ADR-016), para que el reporte de margen
     #: (`erp.margen`) use el costo de aquella venta y no el de hoy. Default
     #: `False` (el comportamiento de hoy: queda NULL; Contalibra y Restolibra no
-    #: cambian). Sin migración: la columna ya existe.
+    #: cambian). Sin migración: la columna ya existe. También estampa el costo vigente en la merma de una devolución de un
+    #: perecedero (`stock_movements.unit_cost`, ADR-059), que es lo que valoriza el reporte de mermas.
     guardar_costo: bool = False
     #: Avisos de vencimiento (ADR-018, A-4 PR-3, opt-in). **Prendida:** `POST /api/ventas` y `GET /api/ventas/{id}`
     #: agregan la clave `avisos` a la respuesta **sólo si hay alguno** (`erp.lotes.avisos_de_venta`: lote vencido, por
@@ -632,6 +633,7 @@ def build_ventas_router(
                     usuario_id=user.get("id"), hooks=opciones.hooks,
                     caja_con_turno=opciones.caja_con_turno,
                     clave_operacion=payload.clave_operacion,
+                    guardar_costo=opciones.guardar_costo,
                 )
                 conn.commit()
             except ventas.ClaveReusada as exc:

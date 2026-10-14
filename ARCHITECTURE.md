@@ -72,6 +72,9 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
   cliente y los ganchos; el cobro por QR y la factura desde la venta son de LibraCore) y
   `margen_router` (`build_margen_router`: margen y rotación por producto y por período, sólo
   lectura sobre `erp.margen`; ADR-015) y
+  `mermas_router` (`build_mermas_router`: mermas por período con su importe, `GET /api/reportes/mermas`, sólo lectura sobre
+  `erp.mermas`; la merma guarda el costo vigente en `stock_movements.unit_cost`, opt-in por `guardar_costo` / `OpcionesStock.con_costo_de_merma`, sin migración;
+  los campos de importe llevan `costo` en el nombre para que el producto los filtre por rol; ADR-059) y
   `reposicion_router` (`build_reposicion_router`: qué pedir por producto y por sucursal, sólo lectura sobre
   `erp.reposicion`; ADR-017; los tres exports CSV —margen, reposición y vencimientos— pasan por un único `_csv` que
   neutraliza las celdas de texto que una planilla leería como fórmula, `web/csv_seguro.py`; `build_reposicion_minimos_router`: el stock
@@ -80,11 +83,12 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
   del producto de `erp.reposicion` también lo toma `catalogo.update_producto`, ADR-026, y `actualizacion_masiva.aplicar`, que relee el producto después de tomarlo, ADR-027) y
   `vencimientos_router` (`build_vencimientos_router`, de lectura, y `build_vencimientos_escritura_router`, con
   gates por operación: próximos a vencer, lotes de un producto, marcar «vence», asignar vencimiento a saldo sin
-  lote, cargar una entrada de stock nuevo con lote (`POST /entrada`) y dar de baja un lote, sobre `erp.vencimientos`;
+  lote, cargar una entrada de stock nuevo con lote (`POST /entrada`), dar de baja un lote —con el costo de la merma, ADR-059— y conciliar el saldo «sin lote»
+  negativo heredado de antes de A-4 (`GET /conciliacion`, en el router de lectura, y `POST /conciliar`, ADR-060), sobre `erp.vencimientos`;
   ADR-018; y, opt-in con `OpcionesCatalogo.con_vencimientos`, la marca `vence` en el producto: listado, escaneo, alta y
   edición la devuelven y el alta y la edición la cambian bajo `autorizar_marcar_vence`, y apagada las respuestas de
   productos no cambian). La de escritura **falla al construirse** sin
-  `usuario_actual` o sin listas no vacías `dependencias_marcar` y `dependencias_movimientos`, y `asignar`, `entrada` y `merma`
+  `usuario_actual` o sin listas no vacías `dependencias_marcar` y `dependencias_movimientos`, y `asignar`, `entrada`, `merma` y `conciliar`
   exigen `clave_operacion` (idempotencia de los reintentos; única por producto: el cliente genera una clave por intento
   del usuario y por producto). Una `variante_id` que no es del producto es 422.
 - **`adapters/`** e **`integrations/`** — puentes hacia afuera: `adapters/
