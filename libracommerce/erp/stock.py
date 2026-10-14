@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from datetime import date as _date
 from datetime import datetime as _datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 from libracommerce.domain.inventory import DepositoInexistente
@@ -103,6 +103,22 @@ def _deposito_del_movimiento(conn, deposito_id: int | None, sobre_existencias: b
     return deposito_id
 
 
+def costo_vigente(conn, producto_id: int) -> str | None:
+    """El costo unitario vigente de un producto (`catalog_items.default_cost`), como texto, o `None` si no tiene.
+
+    Un costo en 0 o NULL significa «nadie lo cargó» y no «costó cero» (el mismo criterio que `ventas._costos_vigentes`, ADR-016): un 0
+    guardado haría pasar una merma sin costo por una de costo cero. El costo vive en el producto: `item_variants` no tiene columna de costo,
+    así que una variante toma el del producto. Va como texto para que SQLite no lo pase por `float` (igual que `unit_cost_snapshot`)."""
+    fila = conn.execute("SELECT default_cost FROM catalog_items WHERE id = ?", (producto_id,)).fetchone()
+    if fila is None or fila[0] is None:
+        return None
+    try:
+        costo = Decimal(str(fila[0]))
+    except InvalidOperation:
+        return None
+    return str(costo) if costo > 0 else None
+
+
 def add_movimiento_stock(conn, producto_id: int, tipo: str, cantidad: float,
                          referencia: str = "", fecha: str = "",
                          venta_id: int | None = None,
@@ -111,7 +127,9 @@ def add_movimiento_stock(conn, producto_id: int, tipo: str, cantidad: float,
                          variant_id: int | None = None,
                          lot_code: str | None = None,
                          expires_at: _date | _datetime | str | None = None,
-                         sobre_existencias: bool = False):
+                         sobre_existencias: bool = False,
+                         unit_cost: Decimal | str | None = None,
+                         guardar_costo: bool = False):
     """Agrega un movimiento. cantidad positiva = entrada, negativa = salida.
 
     Un movimiento de cantidad 0 se ignora: `stock_movements` tiene
@@ -137,6 +155,13 @@ def add_movimiento_stock(conn, producto_id: int, tipo: str, cantidad: float,
     anularse), reasignar un lote (`vencimientos.asignar_vencimiento`) y dar de baja un lote (`vencimientos.dar_de_baja_lote`:
     «las existencias de un depósito dado de baja siguen existiendo», ADR-018). Stock NUEVO (una entrada, un ajuste, una venta,
     una recepción) nunca lo lleva: ése sólo entra a un depósito activo.
+
+    🔑 **El costo de una merma es ADITIVO y opt-in (ADR-059, como `guardar_costo` de las ventas, ADR-016).** `guardar_costo=False` (el default, y
+    lo único que mandan hoy Contalibra y Restolibra) escribe el `INSERT` de siempre: `stock_movements.unit_cost` queda en NULL. Con `True`, un movimiento de
+    tipo `merma` guarda el `default_cost` vigente del producto en este momento (`costo_vigente`), o NULL si no tiene costo cargado: es una foto, y si el
+    costo cambia después la merma conserva el que tenía. `unit_cost` fija ese costo en vez de resolverlo (`dar_de_baja_lote` lo resuelve una vez para
+    devolverlo en su respuesta) y vale para cualquier `tipo`; sin `unit_cost` ni `guardar_costo`, o con `guardar_costo` en un tipo que no es `merma`,
+    el `INSERT` es el de siempre.
     """
     if not cantidad:
         return
@@ -158,6 +183,17 @@ def add_movimiento_stock(conn, producto_id: int, tipo: str, cantidad: float,
     # ningún test ni caller del motor usa 0 como "sin depósito" (búsqueda en
     # `tests/` y `libracommerce/`, 2026-09-15).
     _deposito = _deposito_del_movimiento(conn, deposito_id, sobre_existencias)
+    _costo = str(unit_cost) if unit_cost is not None else (costo_vigente(conn, producto_id) if guardar_costo and tipo == "merma" else None)
+    if _costo is not None:
+        conn.execute(
+            """INSERT INTO stock_movements
+               (item_id, variant_id, location_id, movement_type, quantity_delta, occurred_at,
+                source_type, source_id, note, created_by, reason_code, lot_code, expires_at, unit_cost)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (producto_id, variant_id, _deposito, _TIPO_A_MOVEMENT_TYPE[tipo], cantidad, _fecha,
+             "venta" if venta_id else None, venta_id, referencia, usuario_id, tipo, _lote, _vence, _costo),
+        )
+        return
     if _lote is not None or _vence is not None:
         conn.execute(
             """INSERT INTO stock_movements
@@ -240,9 +276,26 @@ def alertas_de_stock(productos: list[dict]) -> list[dict]:
     return [p for p in productos if p["stock_minimo"] > 0 and p["stock_actual"] <= p["stock_minimo"]]
 
 
+#: Decimales con que se expresa un importe (pesos). Un total se calcula exacto y se redondea al final.
+IMPORTE_DECIMALES = 2
+
+
+def importe(cantidad, costo_unitario) -> float:
+    """`cantidad` × `costo_unitario` como `float` redondeado a `IMPORTE_DECIMALES` (half-up, en `Decimal`: sin el ruido del `float`)."""
+    total = Decimal(str(cantidad)) * Decimal(str(costo_unitario))
+    return float(total.quantize(Decimal(1).scaleb(-IMPORTE_DECIMALES), rounding=ROUND_HALF_UP))
+
+
 def get_movimientos_stock(conn, producto_id: int | None = None,
                           desde: str = "", hasta: str = "",
-                          limit: int = 200) -> list[dict]:
+                          limit: int = 200, con_costo: bool = False) -> list[dict]:
+    """El historial de movimientos, del más nuevo al más viejo.
+
+    `con_costo` (ADR-059, opt-in) suma a cada fila `costo_unitario`, `costo_total` y `sin_costo`. Sólo una **merma** los llena: `costo_unitario` es
+    el costo que se estampó al mermar (`stock_movements.unit_cost`), `costo_total` es `|cantidad| × costo_unitario` y `sin_costo` dice si la merma
+    no tiene costo (el producto no lo tenía cargado, o es anterior a ADR-059: no se reconstruye). En cualquier otro movimiento son `None`. Sin
+    `con_costo` las filas son las de siempre. El motor no decide quién ve estos importes: un producto que los quiera restringidos filtra la
+    respuesta (VentaLibra: `costos.ver`)."""
     where: list[str] = []
     params: list[Any] = []
     if producto_id:
@@ -260,7 +313,7 @@ def get_movimientos_stock(conn, producto_id: int | None = None,
     sql = """SELECT sm.id, sm.item_id AS producto_id, sm.movement_type, sm.reason_code,
                     sm.quantity_delta, sm.note, sm.source_id AS venta_id,
                     sm.created_by AS usuario_id, sm.location_id AS deposito_id,
-                    sm.created_at,
+                    sm.created_at, sm.unit_cost,
                     substr(sm.occurred_at, 1, 10) AS fecha,
                     ci.name AS producto_nombre, ci.unit_code AS unidad
              FROM stock_movements sm
@@ -270,7 +323,7 @@ def get_movimientos_stock(conn, producto_id: int | None = None,
     sql += " ORDER BY sm.occurred_at DESC, sm.id DESC LIMIT ?"
     params.append(limit)
     rows = conn.execute(sql, params).fetchall()
-    return [
+    salida = [
         {
             "id": r["id"], "producto_id": r["producto_id"],
             "tipo": _tipo_de_row(r["movement_type"], r["reason_code"]),
@@ -282,6 +335,14 @@ def get_movimientos_stock(conn, producto_id: int | None = None,
         }
         for r in rows
     ]
+    if con_costo:
+        for fila, r in zip(salida, rows, strict=True):
+            es_merma = r["movement_type"] == "waste"
+            costo = r["unit_cost"] if es_merma else None
+            fila["costo_unitario"] = float(costo) if costo is not None else None
+            fila["costo_total"] = importe(abs(Decimal(str(r["quantity_delta"]))), costo) if costo is not None else None
+            fila["sin_costo"] = (costo is None) if es_merma else None
+    return salida
 
 
 def ajustar_stock(conn, producto_id: int, stock_nuevo: float, referencia: str,
@@ -372,7 +433,8 @@ def _ajustar_total(conn, producto_id, stock_nuevo, referencia, usuario_id, fecha
 
 
 def salida_manual(conn, producto_id: int, tipo: str, cantidad: float, referencia: str, usuario_id: int | None = None,
-                  fecha: str = "", deposito_id: int | None = None, variant_id: int | None = None):
+                  fecha: str = "", deposito_id: int | None = None, variant_id: int | None = None,
+                  guardar_costo: bool = False):
     """Una salida manual de stock (`salida`, `merma`, ...: lo que el endpoint de ajuste escribe en esos modos) de
     `cantidad` (positiva; el signo lo pone esta función).
 
@@ -386,7 +448,9 @@ def salida_manual(conn, producto_id: int, tipo: str, cantidad: float, referencia
     Es el punto de entrada para CUALQUIER salida manual de un producto que puede estar marcado: llamar a
     `add_movimiento_stock` con una cantidad negativa y sin lote resta del bucket «sin lote» y deja sobreestimado el saldo
     de los lotes. Un marcado SIN variante con stock por variante en ese depósito es `lotes.VarianteRequerida` (ver
-    `ajustar_stock`)."""
+    `ajustar_stock`).
+
+    `guardar_costo` (ADR-059, opt-in) estampa el costo vigente del producto en cada fila de una `merma` (ver `add_movimiento_stock`); en otro `tipo` no hace nada."""
     cantidad = -abs(cantidad)
     if lotes.ids_marcados(conn, [producto_id]):
         lotes.tomar_productos(conn, [producto_id])
@@ -394,9 +458,9 @@ def salida_manual(conn, producto_id: int, tipo: str, cantidad: float, referencia
                               deposito_id if deposito_id is not None else get_default_deposito_id(conn), variant_id)
         return _salida_por_lote(conn, producto_id=producto_id, cantidad=cantidad, referencia=referencia, venta_id=None,
                                 usuario_id=usuario_id, fecha=fecha, deposito_id=deposito_id, variant_id=variant_id,
-                                tipo=tipo)
+                                tipo=tipo, guardar_costo=guardar_costo)
     return add_movimiento_stock(conn, producto_id, tipo, cantidad, referencia, usuario_id=usuario_id, fecha=fecha,
-                                deposito_id=deposito_id, variant_id=variant_id)
+                                deposito_id=deposito_id, variant_id=variant_id, guardar_costo=guardar_costo)
 
 
 def entrada_manual_con_lote(conn, producto_id: int, cantidad: float, referencia: str, *, lot_code=None,
@@ -423,18 +487,18 @@ def _es_servicio(conn, producto_id: int) -> bool:
 
 def _salida_por_lote(conn, *, producto_id: int, cantidad: float, referencia: str, venta_id: int | None,
                      usuario_id: int | None, fecha: str, deposito_id: int | None, variant_id: int | None = None,
-                     tipo: str = "venta"):
+                     tipo: str = "venta", guardar_costo: bool = False):
     """La salida de `cantidad` (negativa) de un producto **marcado** (`tracks_expiry=1`, ya tomado con
     `lotes.tomar_productos`): una fila por bucket en orden FEFO (`lotes.plan_fefo`), cada una con el `lot_code` y el
     `expires_at` de su bucket. Un marcado sin lotes da un único tramo «sin lote» y entonces la llamada es, argumento por
     argumento, la de siempre (incluida la cantidad original en `float`, sin pasar por `Decimal`).
 
     `tipo` es el de las filas: `venta` (la venta, con su `venta_id`) o `ajuste` (el ajuste negativo de
-    `ajustar_stock`, sin `venta_id`; A-4 PR-3)."""
+    `ajustar_stock`, sin `venta_id`; A-4 PR-3). `guardar_costo` (ADR-059) se pasa a cada fila."""
     if not cantidad:
         return add_movimiento_stock(conn, producto_id=producto_id, tipo=tipo, cantidad=cantidad,
                                     referencia=referencia, venta_id=venta_id, usuario_id=usuario_id, fecha=fecha,
-                                    variant_id=variant_id, deposito_id=deposito_id)
+                                    variant_id=variant_id, deposito_id=deposito_id, guardar_costo=guardar_costo)
     deposito = deposito_id if deposito_id is not None else get_default_deposito_id(conn)
     tramos = lotes.plan_fefo(conn, producto_id, deposito, variant_id, Decimal(str(abs(cantidad))))
     for t in tramos:
@@ -443,13 +507,14 @@ def _salida_por_lote(conn, *, producto_id: int, cantidad: float, referencia: str
                 conn, producto_id=producto_id, tipo=tipo,
                 cantidad=cantidad if len(tramos) == 1 else -float(t.cantidad),
                 referencia=referencia, venta_id=venta_id, usuario_id=usuario_id, fecha=fecha,
-                variant_id=variant_id, deposito_id=deposito_id,
+                variant_id=variant_id, deposito_id=deposito_id, guardar_costo=guardar_costo,
             )
         else:
             add_movimiento_stock(
                 conn, producto_id=producto_id, tipo=tipo, cantidad=-float(t.cantidad),
                 referencia=referencia, venta_id=venta_id, usuario_id=usuario_id, fecha=fecha,
                 variant_id=variant_id, deposito_id=deposito_id, lot_code=t.lote, expires_at=t.vence,
+                guardar_costo=guardar_costo,
             )
 
 

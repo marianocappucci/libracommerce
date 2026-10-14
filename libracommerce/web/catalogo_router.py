@@ -174,6 +174,13 @@ class OpcionesStock:
     #: consulta: sigue siendo el ajuste común, con la protección con la que el producto monte el router. (Mismo contrato que
     #: `OpcionesCatalogo.autorizar_marcar_vence`.)
     autorizar_lotes: Callable[[dict], bool] | None = None
+    #: El costo de las mermas (ADR-059, opt-in, como `OpcionesVentas.guardar_costo`). **Prendida:** el ajuste en modo «Merma» estampa el costo vigente del
+    #: producto en el movimiento (`stock_movements.unit_cost`, una foto; NULL si el producto no tiene costo) y `GET /movimientos` suma a cada fila
+    #: `costo_unitario`, `costo_total` y `sin_costo` (de una merma; `None` en los demás tipos). **Apagada (el default):** el movimiento y las filas son
+    #: los de siempre (Contalibra y Restolibra no cambian ni guardan ni exponen un costo que nunca mostraron). Sin migración: la columna ya existe. Quién ve
+    #: los importes no lo decide el motor: un producto que restringe costos por rol (VentaLibra, `costos.ver`) prende la opción y deja que su filtro por
+    #: clave (`costo`) saque los campos.
+    con_costo_de_merma: bool = False
 
 
 @dataclass(frozen=True)
@@ -912,7 +919,7 @@ def build_stock_router(
         with abrir() as conn:
             return stock.get_movimientos_stock(
                 conn, producto_id=producto_id or None, desde=desde, hasta=hasta,
-                limit=limit or opciones.limite_movimientos,
+                limit=limit or opciones.limite_movimientos, con_costo=opciones.con_costo_de_merma,
             )
 
     @router.get("/motivos-merma")
@@ -1011,7 +1018,8 @@ def build_stock_router(
                 motivo = (payload.motivo or "Otro").strip() or "Otro"
                 try:
                     stock.salida_manual(conn, pid, "merma", payload.cantidad, f"Merma: {motivo}",
-                                        usuario_id=usuario_id, fecha=fecha, **destino)
+                                        usuario_id=usuario_id, fecha=fecha, guardar_costo=opciones.con_costo_de_merma,
+                                        **destino)
                 except lotes.VarianteRequerida as e:
                     raise HTTPException(422, str(e)) from e
             else:

@@ -1165,8 +1165,11 @@ def _reintegro_prorrateado(lineas, descuento_venta, ya_devuelto: dict[tuple, flo
 def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: int,
                    medio_pago: str = "efectivo", usuario_id: int | None = None,
                    hooks: Hooks = SIN_GANCHOS, *, caja_con_turno: bool = False,
-                   clave_operacion: str | None = None) -> dict:
+                   clave_operacion: str | None = None, guardar_costo: bool = False) -> dict:
     """Devuelve algunas líneas de una venta confirmada y reintegra su importe.
+
+    `guardar_costo` (ADR-059, opt-in) estampa el costo vigente del producto en la `merma` del par de un perecedero devuelto (`stock_movements.unit_cost`),
+    para que el reporte de mermas la valorice. `False` (el default) escribe la fila de siempre.
 
     🔑 **`clave_operacion` (opcional, ADR-041) distingue un REINTENTO de una segunda devolución.** Una devolución que el cliente
     reenvía (doble clic, timeout y el usuario aprieta de nuevo) pide lo mismo que la primera y, si quedaba disponible, repondría el
@@ -1441,7 +1444,7 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
                 conn, producto_id=linea["item_id"], tipo="merma", cantidad=-float(tramo),
                 referencia=f"Merma: devolución venta ID {vid} — lote {lote or '(sin código)'}{sello}",
                 venta_id=vid, usuario_id=usuario_id, fecha=fecha, deposito_id=deposito_id,
-                variant_id=linea["variant_id"], lot_code=lote, expires_at=vence,
+                variant_id=linea["variant_id"], lot_code=lote, expires_at=vence, guardar_costo=guardar_costo,
             )
 
     importe = float(_reintegro_prorrateado(lineas.values(), venta["descuento"], ya_devuelto, pedido_por_clave))
