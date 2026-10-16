@@ -162,6 +162,13 @@ Las revisiones siguientes siguen el mismo criterio (aditivas, idempotentes, y el
 por producto de la reposición), `0005` (`item_branch_min_stock`), `0006` (`purchase_receipts.clave_operacion`, ADR-046) y `0007_devoluciones_de_servicio`
 (`sale_service_returns`, ADR-054: lo devuelto de un servicio, que no tiene stock en el ledger).
 
+**El DDL se corre de a un proceso por vez (ADR-062).** Con `uvicorn --workers N` cada worker corre en su arranque `init_schema()` y, en el
+producto, las tablas de cruce y `repuntar_fk_ventas_pagos`; en PostgreSQL ese «si no existe, crear» no es atómico y dos procesos sobre una
+base sin las tablas chocan en el catálogo (`duplicate key … pg_type_typname_nsp_index`). Cada una de esas funciones empieza con
+`db.candado.serializar_esquema(conn)`, que es `libracore.candados.esperar_candado_de_transaccion` (ADR-053 del motor) con el nombre
+`libracommerce.esquema`: el segundo proceso espera al `commit` del primero y corre sobre lo que dejó. Sobre SQLite no hace nada ni
+importa libracore. No cambia ninguna tabla (el esquema sigue congelado). Lo que **no** cubre es el DDL propio de cada producto.
+
 ## Capas ERP y web (P9)
 
 El plan P9 (`wiki/analyses/migracion-p9-capa-comercial-libracommerce.md`) mueve

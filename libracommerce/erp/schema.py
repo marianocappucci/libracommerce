@@ -34,6 +34,8 @@ cada producto, que compara columnas contra una fixture—.
 
 from __future__ import annotations
 
+from libracommerce.db.candado import serializar_esquema
+
 #: El `CREATE TABLE` de `venta_links`, tal cual lo venían declarando los dos
 #: productos. Se expone como constante además de la función porque una baseline
 #: de Alembic puede querer el texto y no la llamada.
@@ -56,6 +58,7 @@ def crear_venta_links(conn) -> None:
     motores: las FKs apuntan a `sales` (LibraCommerce) y a `facturas`, `remitos`
     y `turnos_caja` (LibraCore).
     """
+    serializar_esquema(conn)  # ADR-062: de a un proceso por vez
     conn.execute(VENTA_LINKS_DDL)
 
 
@@ -80,6 +83,7 @@ def crear_cliente_lista_precio(conn) -> None:
     motores: las FKs apuntan a `clients` (LibraCore) y a `price_lists`
     (LibraCommerce). Mismo criterio que `crear_venta_links`.
     """
+    serializar_esquema(conn)  # ADR-062: de a un proceso por vez
     conn.execute(CLIENTE_LISTA_PRECIO_DDL)
 
 
@@ -133,5 +137,6 @@ def crear_promociones(conn) -> None:
     motores: las FK apuntan a `catalog_items` y `sales` (LibraCommerce). Mismo
     criterio que `crear_cliente_lista_precio`.
     """
+    serializar_esquema(conn)  # ADR-062: de a un proceso por vez
     for ddl in PROMOCIONES_DDL:
         conn.execute(ddl)

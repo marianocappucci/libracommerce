@@ -1,9 +1,14 @@
 import sqlite3
 
+from .candado import serializar_esquema
 from .migrations import run_migrations
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
+    # 🔴 De a un proceso por vez (ADR-062): con N workers cada uno corre esto al arrancar, y sobre una base sin las tablas
+    # dos `CREATE TABLE IF NOT EXISTS` de la misma tabla chocan en el catálogo de PostgreSQL. Primera sentencia: el candado
+    # se suelta con el `commit` de `run_migrations()` (el del final), y todo lo de en medio queda adentro.
+    serializar_esquema(conn)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(
         """
