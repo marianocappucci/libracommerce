@@ -24,13 +24,13 @@ def _producto(conn, nombre="Yerba", precio=100.0, existencia=10.0):
 
 
 def _venta(abrir, *, pagos=None, items=None, stock_habilitado=True, hooks=None,
-          usuario_id=USUARIO["id"], descuento=0.0, **opciones):
+          usuario_id=USUARIO["id"], descuento=0.0, cliente_id=None, **opciones):
     items = items or [{"nombre": "Suelto", "qty": 2, "precio": 100.0, "subtotal": 200.0, "producto_id": None}]
     pagos = pagos or [{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}]
     subtotal = round(sum(i["subtotal"] for i in items), 2)
     total = round(subtotal - descuento, 2)
     kw = dict(fecha=HOY, items=items, subtotal=subtotal, descuento=descuento, total=total,
-              cliente_id=None, cliente_nombre="", usuario_id=usuario_id, observaciones="",
+              cliente_id=cliente_id, cliente_nombre="", usuario_id=usuario_id, observaciones="",
               estado=ventas.estado_segun_pagos(total, pagos), pagos=pagos,
               stock_habilitado=stock_habilitado, **opciones)
     if hooks is not None:
@@ -477,6 +477,55 @@ def test_exigir_turno_con_turno_registra_normal(abrir_ventas):
     vid = _venta(abrir_ventas, exigir_turno=True)
     with abrir_ventas() as conn:
         assert ventas.obtener_venta(conn, vid) is not None
+
+
+# ── Fiar sin cliente (ADR-061) ───────────────────────────────────────────
+
+_FIADO = [{"medio": "cuenta_corriente", "monto": 200.0, "estado": "aprobado"}]
+
+
+def test_fiar_sin_cliente_levanta_y_no_deja_nada(abrir_ventas):
+    """El caso de uso no depende del router: quien lo llama directo (una integración, un cobro de pedido) tampoco puede
+    dejar una deuda a nombre de nadie. Se rechaza ANTES de escribir: ni venta, ni pago, ni caja, ni stock."""
+    with abrir_ventas() as conn:
+        pid = _producto(conn)
+        conn.commit()
+    with pytest.raises(ventas.FiadoSinCliente, match="sin cliente"):
+        _venta(abrir_ventas, pagos=_FIADO,
+               items=[{"nombre": "Yerba", "qty": 2, "precio": 100.0, "subtotal": 200.0, "producto_id": pid}])
+    with abrir_ventas() as conn:
+        assert ventas.listar_ventas(conn) == []
+        assert conn.execute("SELECT COUNT(*) FROM ventas_pagos").fetchone()[0] == 0
+        assert _caja(conn) == []
+        assert stock.get_stock_actual(conn, pid) == 10.0
+
+
+def test_fiar_sin_cliente_es_un_valueerror():
+    """Es un dato del pedido que nunca se cura reintentando: un `ValueError`, como `ProductoInexistente`."""
+    assert issubclass(ventas.FiadoSinCliente, ValueError)
+
+
+def test_fiar_con_cliente_registra(abrir_ventas):
+    with abrir_ventas() as conn:
+        conn.execute("INSERT INTO clients (id, name, cuit_dni) VALUES (5, 'Cliente', '20111111112')")
+        conn.execute("INSERT INTO parties (id, party_type, display_name) VALUES (5, 'customer', 'Cliente')")
+        conn.commit()
+    vid = _venta(abrir_ventas, pagos=_FIADO, stock_habilitado=False, cliente_id=5)
+    with abrir_ventas() as conn:
+        assert ventas.obtener_venta(conn, vid)["cliente_id"] == 5
+
+
+def test_fiar_sin_cliente_con_opt_out_explicito_registra(abrir_ventas):
+    vid = _venta(abrir_ventas, pagos=_FIADO, stock_habilitado=False, exigir_cliente_para_fiar=False)
+    with abrir_ventas() as conn:
+        v = ventas.obtener_venta(conn, vid)
+        assert v["cliente_id"] is None and v["pagos"][0]["medio"] == "cuenta_corriente"
+
+
+def test_fiar_sin_cliente_se_rechaza_antes_que_la_falta_de_turno(abrir_ventas):
+    """Mismo orden que el router de antes: el 422 del fiado va primero, no el 409 del turno."""
+    with pytest.raises(ventas.FiadoSinCliente):
+        _venta(abrir_ventas, pagos=_FIADO, exigir_turno=True)
 
 
 def test_caja_con_turno_apunta_el_turno_id(abrir_ventas):

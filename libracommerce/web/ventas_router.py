@@ -48,7 +48,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
 from libracore import medios_pago  # noqa: E402
 from libracore import pagos as acreditacion  # noqa: E402
-from libracore.db.caja import MEDIO_CUENTA_CORRIENTE  # noqa: E402
 from pydantic import BaseModel, Field, field_validator, model_validator  # noqa: E402
 
 #: El medio con el que cobra el QR de caja. Pasa por `medios_pago.validar` y no
@@ -236,8 +235,10 @@ class OpcionesVentas:
     exigir_pago_completo: bool = False
     #: Un pago en `cuenta_corriente` sin `cliente_id` se rechaza con 422 antes
     #: de escribir nada — una deuda que no es de nadie no se puede cobrar.
-    #: Default `False` (el comportamiento de hoy).
-    exigir_cliente_para_fiar: bool = False
+    #: **Default `True`** (ADR-061; antes era `False` y Contalibra y Restolibra
+    #: aceptaban fiar a nadie). Un producto que de verdad fía sin cliente lo
+    #: dice a la vista con `exigir_cliente_para_fiar=False`.
+    exigir_cliente_para_fiar: bool = True
     #: Aplicar las promociones vigentes (`erp.promociones`, "llevá N pagá M" y
     #: combos) a la venta. **El servidor las calcula con las líneas que llegan**,
     #: no confía en un descuento del cliente: el ahorro se SUMA al `descuento`
@@ -492,15 +493,6 @@ def build_ventas_router(
                     f"la venta (${total})."
                 )
 
-        if opciones.exigir_cliente_para_fiar and not payload.cliente_id and any(
-            p["medio"] == MEDIO_CUENTA_CORRIENTE for p in pagos
-        ):
-            raise HTTPException(
-                422,
-                "No se puede fiar sin cliente: una venta con un pago en "
-                "cuenta corriente necesita `cliente_id`."
-            )
-
         cliente_nombre = payload.cliente_nombre.strip()
         if payload.cliente_id:
             cliente_nombre = opciones.nombre_de_cliente(payload.cliente_id) or cliente_nombre
@@ -516,9 +508,13 @@ def build_ventas_router(
                 exigir_turno=opciones.exigir_turno, caja_con_turno=opciones.caja_con_turno,
                 deposito_id=payload.deposito_id, promociones=aplicadas,
                 guardar_costo=opciones.guardar_costo,
+                exigir_cliente_para_fiar=opciones.exigir_cliente_para_fiar,
             )
         except ventas.SinTurno as exc:
             raise HTTPException(409, str(exc)) from None
+        except ventas.FiadoSinCliente as exc:
+            # ADR-061: un dato del pedido que no se cura reintentando, y se rechazó antes de escribir nada.
+            raise HTTPException(422, str(exc)) from None
         except ventas.ProductoInexistente as exc:
             # 🔴 No es un conflicto con otra venta: es un dato del pedido que
             # nunca iba a dejar de fallar. Va ANTES del catch-all de abajo,

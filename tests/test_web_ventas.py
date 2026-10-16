@@ -425,29 +425,82 @@ def test_exigir_pago_completo_falso_por_default_no_bloquea(client):
     assert parcial["estado"] == "parcial"
 
 
-def test_exigir_cliente_para_fiar_rechaza_cc_sin_cliente(abrir_ventas):
+def _sin_escribir_nada(abrir, client, pid, stock_antes):
+    """El rechazo de una venta es antes de escribir: ni venta, ni pago, ni caja, ni stock descontado."""
+    assert client.get("/api/ventas").json() == []
+    assert client.get(f"/api/stock/{pid}").json()["stock_actual"] == stock_antes
+    with abrir() as conn:
+        for tabla in ("sales", "sale_items", "ventas_pagos", "caja_movimientos"):
+            assert conn.execute(f"SELECT COUNT(*) FROM {tabla}").fetchone()[0] == 0, tabla
+
+
+def _producto_con_stock(client, existencia=10):
+    pid = client.post("/api/productos", json={"nombre": "Yerba", "precio_venta": 100.0, "precio_costo": 60.0}).json()["id"]
+    client.post(f"/api/stock/{pid}/ajuste", json={"modo": "absoluto", "cantidad": existencia})
+    return pid
+
+
+def _cliente(abrir, cid=3):
+    with abrir() as conn:
+        conn.execute("INSERT INTO clients (id, name) VALUES (?, 'Cliente')", (cid,))
+        conn.execute("INSERT INTO parties (id, party_type, display_name) VALUES (?, 'customer', 'Cliente')", (cid,))
+        conn.commit()
+
+
+def test_el_default_exige_cliente_para_fiar():
+    """ADR-061: fiar sin cliente es un defecto (la deuda queda a nombre de nadie), así que lo seguro es el default."""
+    assert OpcionesVentas().exigir_cliente_para_fiar is True
+
+
+def test_por_default_no_se_fia_sin_cliente(abrir_ventas, client):
+    """Contalibra y Restolibra no prendían la opción: el POS aceptaba (200) una venta a cuenta corriente con
+    `cliente_id: null`, una deuda que no aparece en ninguna cuenta y no se puede cobrar."""
+    pid = _producto_con_stock(client)
+    resp = client.post("/api/ventas", json={
+        "fecha": HOY, "items": [{"nombre": "Yerba", "qty": 2, "precio": 100.0, "producto_id": pid}],
+        "pagos": [{"medio": "cuenta_corriente", "monto": 200.0}]})
+    assert resp.status_code == 422, resp.text
+    assert "sin cliente" in resp.json()["detail"].lower()
+    _sin_escribir_nada(abrir_ventas, client, pid, 10.0)
+
+
+def test_por_default_el_fiado_parcial_sin_cliente_tambien_se_rechaza(abrir_ventas, client):
+    """Un pago en efectivo no disimula el pedazo fiado: alcanza con UN pago a cuenta corriente."""
+    pid = _producto_con_stock(client)
+    resp = client.post("/api/ventas", json={
+        "fecha": HOY, "items": [{"nombre": "Yerba", "qty": 2, "precio": 100.0, "producto_id": pid}],
+        "pagos": [{"medio": "efectivo", "monto": 50.0}, {"medio": "cuenta_corriente", "monto": 150.0}]})
+    assert resp.status_code == 422, resp.text
+    _sin_escribir_nada(abrir_ventas, client, pid, 10.0)
+
+
+def test_por_default_se_fia_con_cliente(abrir_ventas, client):
+    _cliente(abrir_ventas)
+    venta = _venta(client, cliente_id=3, pagos=[{"medio": "cuenta_corriente", "monto": 200.0}])
+    assert venta["estado"] == "cobrada" and venta["cliente_id"] == 3
+
+
+def test_por_default_sin_fiado_no_hace_falta_cliente(client):
+    """La regla es del fiado, no de la venta: cobrar al contado sin cliente (consumidor final) sigue andando."""
+    venta = _venta(client, pagos=[{"medio": "efectivo", "monto": 200.0}])
+    assert venta["cliente_id"] is None and venta["estado"] == "cobrada"
+
+
+def test_el_opt_out_explicito_permite_fiar_sin_cliente(abrir_ventas):
+    """Un producto que de verdad fía sin cliente lo dice con `exigir_cliente_para_fiar=False`."""
+    client = _app(abrir_ventas, OpcionesVentas(exigir_cliente_para_fiar=False))
+    venta = _venta(client, pagos=[{"medio": "cuenta_corriente", "monto": 200.0}])
+    assert venta["estado"] == "cobrada" and venta["cliente_id"] is None
+
+
+def test_exigir_cliente_para_fiar_explicito_sigue_rechazando(abrir_ventas):
+    """VentaLibra la pasa en True a mano: pasarla explícita no cambia nada."""
     client = _app(abrir_ventas, OpcionesVentas(exigir_cliente_para_fiar=True))
     resp = client.post("/api/ventas", json={
         "fecha": HOY, "items": [{"nombre": "X", "qty": 1, "precio": 100}],
         "pagos": [{"medio": "cuenta_corriente", "monto": 100}]})
     assert resp.status_code == 422, resp.text
     assert client.get("/api/ventas").json() == []
-
-
-def test_exigir_cliente_para_fiar_acepta_con_cliente(abrir_ventas):
-    client = _app(abrir_ventas, OpcionesVentas(exigir_cliente_para_fiar=True))
-    with abrir_ventas() as conn:
-        conn.execute("INSERT INTO clients (id, name) VALUES (3, 'Cliente')")
-        conn.execute("INSERT INTO parties (id, party_type, display_name) VALUES (3, 'customer', 'Cliente')")
-        conn.commit()
-    venta = _venta(client, cliente_id=3, pagos=[{"medio": "cuenta_corriente", "monto": 200.0}])
-    assert venta["estado"] == "cobrada"
-
-
-def test_exigir_cliente_para_fiar_falso_por_default_permite(client):
-    """El comportamiento de hoy: Contalibra y Restolibra no prenden la opción."""
-    venta = _venta(client, pagos=[{"medio": "cuenta_corriente", "monto": 200.0}])
-    assert venta["estado"] == "cobrada"
 
 
 def test_recibido_menor_que_monto_422(client):

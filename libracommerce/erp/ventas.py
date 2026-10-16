@@ -111,6 +111,28 @@ class SinTurno(Exception):
     La venta no se llega a registrar: nada queda escrito a medio camino."""
 
 
+class FiadoSinCliente(ValueError):
+    """La venta tiene un pago en `cuenta_corriente` y no trae cliente (ADR-061).
+
+    Una deuda que no es de nadie no aparece en ninguna cuenta y no se puede
+    cobrar. Es un dato del pedido que nunca se cura reintentando, como
+    `ProductoInexistente`: la venta no se llega a registrar y nada queda
+    escrito. El mensaje es el que ve el cajero (el router lo devuelve en el 422)."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "No se puede fiar sin cliente: una venta con un pago en cuenta corriente "
+            "necesita un cliente (`cliente_id`). Elegí uno o cobrala con otro medio."
+        )
+
+
+def _fia(pagos: list[dict]) -> bool:
+    """Si algún pago es a cuenta corriente (en cualquiera de sus grafías, sin mirar mayúsculas ni espacios)."""
+    from libracore.db.caja import MEDIOS_CUENTA_CORRIENTE
+
+    return any(str(p.get("medio") or "").strip().lower() in MEDIOS_CUENTA_CORRIENTE for p in pagos)
+
+
 class ProductoInexistente(ValueError):
     """Un ítem de la venta trae un `producto_id` que no existe en el catálogo
     (violación de FK en `sale_items.item_id`).
@@ -313,7 +335,8 @@ def registrar_venta(conn, *, fecha: str, items: list, subtotal: float, descuento
                     caja_con_turno: bool = False,
                     deposito_id: int | None = None,
                     promociones: list[dict] | None = None,
-                    guardar_costo: bool = False) -> int:
+                    guardar_costo: bool = False,
+                    exigir_cliente_para_fiar: bool = True) -> int:
     """Una venta de mostrador completa, dentro de la transacción de `conn`:
     número, encabezado, líneas, pagos, caja, stock, turno y el gancho.
 
@@ -353,6 +376,12 @@ def registrar_venta(conn, *, fecha: str, items: list, subtotal: float, descuento
     qué promoción se aplicó y cuánto ahorró, en la misma transacción de la venta.
     El ahorro ya viaja dentro de `descuento`: lo suma el caller.
 
+    🔴 **Fiar sin cliente se rechaza (ADR-061).** Con un pago en `cuenta_corriente` y sin
+    `cliente_id`, `exigir_cliente_para_fiar=True` (el default) levanta `FiadoSinCliente` ANTES de
+    escribir nada —antes incluso que `SinTurno`—: la deuda quedaría a nombre de nadie, fuera de
+    toda cuenta y sin forma de cobrarla. El default es el seguro; un producto que de verdad fía
+    sin cliente pasa `False`, a la vista.
+
     🔴 **`guardar_costo` es ADITIVO (ADR-016).** `False` (el default, y lo único
     que mandan Contalibra y Restolibra hoy) no escribe `unit_cost_snapshot`: la
     venta queda como siempre. Con `True`, cada línea de producto guarda el costo
@@ -364,6 +393,9 @@ def registrar_venta(conn, *, fecha: str, items: list, subtotal: float, descuento
     from libracore import medios_pago
     from libracore import pagos as acreditacion
     from libracore.db.caja import create_caja_movimiento
+
+    if exigir_cliente_para_fiar and not cliente_id and _fia(pagos):
+        raise FiadoSinCliente()
 
     validar_deposito(conn, deposito_id)
 
@@ -461,6 +493,7 @@ def crear_venta_directa(conexion: Conexion, *, fecha: str, items: list, subtotal
                         deposito_id: int | None = None,
                         promociones: list[dict] | None = None,
                         guardar_costo: bool = False,
+                        exigir_cliente_para_fiar: bool = True,
                         intentos: int = INTENTOS_POR_NUMERO) -> int:
     """`registrar_venta` con su transacción y el reintento por número repetido.
 
@@ -487,6 +520,7 @@ def crear_venta_directa(conexion: Conexion, *, fecha: str, items: list, subtotal
                     exigir_turno=exigir_turno, caja_con_turno=caja_con_turno,
                     deposito_id=deposito_id, promociones=promociones,
                     guardar_costo=guardar_costo,
+                    exigir_cliente_para_fiar=exigir_cliente_para_fiar,
                 )
                 conn.commit()
                 return venta_id
