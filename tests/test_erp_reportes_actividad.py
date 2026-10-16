@@ -22,11 +22,11 @@ def _producto(conn, nombre, precio, existencia, minimo=0.0):
     return pid
 
 
-def _venta(abrir, items, pagos, fecha=HOY):
+def _venta(abrir, items, pagos, fecha=HOY, cliente_id=None):
     total = round(sum(i["subtotal"] for i in items), 2)
     return ventas.crear_venta_directa(
         abrir, fecha=fecha, items=items, subtotal=total, descuento=0.0, total=total,
-        cliente_id=None, cliente_nombre="", usuario_id=USUARIO["id"], observaciones="",
+        cliente_id=cliente_id, cliente_nombre="", usuario_id=USUARIO["id"], observaciones="",
         estado=ventas.estado_segun_pagos(total, pagos), pagos=pagos, stock_habilitado=True,
     )
 
@@ -114,8 +114,13 @@ def test_las_ventas_anuladas_y_pendientes_no_cuentan_si_el_producto_lo_pide(abri
 
 def test_el_saldo_de_caja_del_resumen_no_cuenta_lo_anulado_ni_el_fiado_si_se_pide(abrir_ventas):
     yerba, _azucar, _ = _escenario(abrir_ventas)  # 450 de ingresos hoy
+    with abrir_ventas() as conn:
+        # Fiar exige cliente (ADR-061): la deuda es de alguien.
+        conn.execute("INSERT INTO clients (id, name) VALUES (7, 'Deudor')")
+        conn.execute("INSERT INTO parties (id, party_type, display_name) VALUES (7, 'customer', 'Deudor')")
+        conn.commit()
     _venta(abrir_ventas, [{"nombre": "Yerba", "qty": 5, "precio": 100.0, "subtotal": 500.0, "producto_id": yerba}],
-           [{"medio": "cuenta_corriente", "monto": 500.0, "estado": "aprobado"}])
+           [{"medio": "cuenta_corriente", "monto": 500.0, "estado": "aprobado"}], cliente_id=7)
     with abrir_ventas() as conn:
         con_fiado = float(reportes.reporte_resumen(conn, HOY, HOY)["caja_saldo"])
         sin_fiado = float(reportes.reporte_resumen(conn, HOY, HOY, sin_fiado=True)["caja_saldo"])
