@@ -59,6 +59,7 @@ from typing import Any
 
 from libracore.fechas import rango_por_dia
 
+from libracommerce.db.candado import serializar_esquema
 from libracommerce.domain.sales import LineaReintegro, reintegro_prorrateado
 
 from . import claves, lotes
@@ -1799,6 +1800,9 @@ def repuntar_fk_ventas_pagos(conn) -> bool:
     RENAME no reescribe FKs ajenas.
     """
     if not isinstance(conn, sqlite3.Connection):
+        # 🔴 De a un proceso por vez (ADR-062): el `SELECT` de `pg_constraint` y los `ALTER` de abajo son un «si no está,
+        # repuntar» con ventana: dos procesos juntos repuntan los dos (o uno borra la FK que el otro está por leer).
+        serializar_esquema(conn)
         definiciones = conn.execute("""
             SELECT conname, pg_get_constraintdef(oid)
             FROM pg_constraint

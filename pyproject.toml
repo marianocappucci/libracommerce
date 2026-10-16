@@ -43,7 +43,8 @@ migrations = [
     # un extra que pidiera v1.84.0). El piso es lo que la cadena usa de verdad:
     # `conexion_libracore` (v1.53.0) y `url_de_instancia`.
     # >=1.148: `erp/ventas`, `erp/reportes` y `erp/margen` importan `libracore.fechas` (ADR-037 del motor).
-    "libracore[migrations]>=1.148,<2",
+    # >=1.168 (ADR-062, ADR-053 del motor): `init_schema()` contra PostgreSQL toma `libracore.candados.esperar_candado_de_transaccion`.
+    "libracore[migrations]>=1.168,<2",
 ]
 erp = [
     # >=1.87: `libracore.db.logs` con partes componibles y `libracore.reportes`
@@ -53,7 +54,8 @@ erp = [
     # >=1.130 (ADR-035): las notas SUMAN (`saldo_acreditable`) y el abono de cada nota lleva su marca (`nc:factura:<id>:<nota>`).
     # >=1.137 (ADR-027 de LibraCore): `agregar_pago` y `vincular_cobros_de_venta` llevan la venta
     # fiada y el cobro a cuenta al libro de clientes del motor (`libro_de_clientes`).
-    "libracore>=1.137,<2",
+    # >=1.168 (ADR-062, ADR-053 del motor): las tablas de cruce y `repuntar_fk_ventas_pagos` toman `esperar_candado_de_transaccion`.
+    "libracore>=1.168,<2",
 ]
 web = [
     "fastapi>=0.115,<1",
