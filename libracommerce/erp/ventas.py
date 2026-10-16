@@ -63,7 +63,7 @@ from libracommerce.db.candado import serializar_esquema
 from libracommerce.domain.sales import LineaReintegro, reintegro_prorrateado
 
 from . import claves, lotes
-from .catalogo import DepositoInexistente, validar_deposito
+from .catalogo import DepositoInexistente, sucursal_del_deposito, validar_deposito
 from .claves import ClaveReusada
 from .hooks import SIN_GANCHOS, Hooks
 from .stock import add_movimiento_stock, descontar_stock_venta
@@ -204,7 +204,7 @@ def crear_venta(conn, *, numero: str, fecha: str, items: list, subtotal: float,
                 descuento: float, total: float, cliente_id: int | None,
                 cliente_nombre: str, usuario_id: int | None,
                 observaciones: str = "", estado: str = "cobrada",
-                guardar_costo: bool = False) -> int:
+                guardar_costo: bool = False, sucursal_id: int | None = None) -> int:
     """Inserta el encabezado en `sales` y las líneas en `sale_items`.
 
     Una línea con `producto_id` es de tipo 'product'; una ad-hoc (texto libre,
@@ -222,17 +222,22 @@ def crear_venta(conn, *, numero: str, fecha: str, items: list, subtotal: float,
     y los productos sin costo cargado: `default_cost` es `NOT NULL DEFAULT 0` y
     ese 0 significa "nadie lo cargó", no "costó cero" —un 0 guardado daría un
     margen de 100% con cara de dato real—.
+
+    🔴 **`sucursal_id` es ADITIVO (ADR-063).** `None` (el default) deja `sales.branch_id` sin escribir: el `INSERT` es
+    carácter por carácter el de siempre. Con un valor, la venta nace con esa sucursal; `registrar_venta` pasa la del
+    depósito del que sale.
     """
-    cur = conn.execute(
-        """INSERT INTO sales
-           (number, occurred_on, status, status_detail, customer_party_id,
-            customer_name_snapshot, created_by, notes, source_type,
-            subtotal, discount_total, tax_total, total)
-           VALUES (?,?,?,?,?,?,?,?,'pos',?,?,0,?)""",
-        (numero, fecha, _ESTADO_A_STATUS.get(estado, "draft"), estado,
-         cliente_id, cliente_nombre, usuario_id, observaciones,
-         subtotal, descuento, total),
-    )
+    columnas = ("number, occurred_on, status, status_detail, customer_party_id, customer_name_snapshot, created_by, "
+                "notes, source_type, subtotal, discount_total, tax_total, total")
+    valores = "?,?,?,?,?,?,?,?,'pos',?,?,0,?"
+    params = [numero, fecha, _ESTADO_A_STATUS.get(estado, "draft"), estado,
+              cliente_id, cliente_nombre, usuario_id, observaciones,
+              subtotal, descuento, total]
+    if sucursal_id is not None:
+        columnas += ", branch_id"
+        valores += ",?"
+        params.append(sucursal_id)
+    cur = conn.execute(f"INSERT INTO sales ({columnas}) VALUES ({valores})", params)
     venta_id = cur.lastrowid
     costos = _costos_vigentes(conn, items) if guardar_costo else {}
     for it in items:
@@ -383,6 +388,10 @@ def registrar_venta(conn, *, fecha: str, items: list, subtotal: float, descuento
     toda cuenta y sin forma de cobrarla. El default es el seguro; un producto que de verdad fía
     sin cliente pasa `False`, a la vista.
 
+    🔴 **La venta anota su sucursal (ADR-063).** `sales.branch_id` es la sucursal del depósito del que sale la venta
+    (`deposito_id` o, sin él, el depósito por defecto: `catalogo.sucursal_del_deposito`), o NULL si ese depósito no
+    tiene sucursal o no hay depósito. Una empresa sin sucursales escribe lo de siempre (NULL).
+
     🔴 **`guardar_costo` es ADITIVO (ADR-016).** `False` (el default, y lo único
     que mandan Contalibra y Restolibra hoy) no escribe `unit_cost_snapshot`: la
     venta queda como siempre. Con `True`, cada línea de producto guarda el costo
@@ -412,6 +421,7 @@ def registrar_venta(conn, *, fecha: str, items: list, subtotal: float, descuento
         descuento=descuento, total=total, cliente_id=cliente_id,
         cliente_nombre=cliente_nombre, usuario_id=usuario_id,
         observaciones=observaciones, estado=estado, guardar_costo=guardar_costo,
+        sucursal_id=sucursal_del_deposito(conn, deposito_id),
     )
     if promociones:
         from . import promociones as _promociones

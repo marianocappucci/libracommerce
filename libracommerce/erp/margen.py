@@ -62,6 +62,8 @@ from decimal import Decimal
 
 from libracore.fechas import rango_por_dia
 
+from .catalogo import SALIDA_DE_VENTA_SQL
+
 #: Los `sales.status` que son una venta. Ver el docstring del módulo.
 _STATUS_DE_VENTA = ("confirmed", "partially_returned", "returned")
 
@@ -253,18 +255,17 @@ def _sucursal_de_las_ventas(conn, desde: str, hasta: str) -> dict[int, int | Non
     """La sucursal de cada venta del rango: `{venta_id: branch_id | None}`.
 
     `sales.branch_id` cuando la venta lo trae; si no, la sucursal del depósito del que salió su stock. **No se
-    puede leer sólo `sales.branch_id`**: `erp.ventas.crear_venta` —el camino de `POST /api/ventas`— no lo escribe
-    (sólo lo llena `db.repository.save_sale` con un `Sale` del dominio), así que toda venta de mostrador lo trae en
-    NULL, y la sucursal es la de su depósito (`locations.branch_id`, la del ledger `movement_type='sale'` con
-    `source_type` `venta` o `sale`, las dos formas en que el motor anota una venta). Una venta tiene un solo depósito
+    puede leer sólo `sales.branch_id`**: hasta ADR-063 `erp.ventas.crear_venta` —el camino de `POST /api/ventas`— no
+    lo escribía (sólo lo llena `db.repository.save_sale` con un `Sale` del dominio), y toda venta de antes sigue con
+    NULL: su sucursal es la de su depósito (`locations.branch_id`, la del ledger `SALIDA_DE_VENTA_SQL`: la misma
+    cuenta que hace `catalogo.completar_sucursal_de_ventas` para dejarla anotada). Una venta tiene un solo depósito
     (`deposito_id` es de la venta); si el ledger trajera varios se toma la menor sucursal, para que dé siempre lo
     mismo. Sin ninguna de las dos cosas (un producto sin sucursales, o una venta que no movió stock) es `None`."""
     donde, params = _filtro_de_ventas(desde, hasta)
     filas = conn.execute(
         f"""SELECT s.id AS venta_id, s.branch_id, MIN(l.branch_id) AS branch_deposito
             FROM sales s
-            LEFT JOIN stock_movements sm ON sm.source_id = s.id AND sm.movement_type = 'sale'
-                                        AND sm.source_type IN ('venta', 'sale')
+            LEFT JOIN stock_movements sm ON sm.source_id = s.id AND {SALIDA_DE_VENTA_SQL}
             LEFT JOIN locations l ON l.id = sm.location_id
             WHERE {donde}
             GROUP BY s.id, s.branch_id""",

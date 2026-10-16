@@ -206,11 +206,7 @@ def _stock_siempre() -> bool:
 def sucursal_del_deposito(conn, payload: VentaPayload) -> int | None:
     """La sucursal de la venta, por default: la del depósito del que sale (`locations.branch_id`; sin `deposito_id`, el depósito por defecto). `None` si el depósito
     no pertenece a ninguna sucursal (o no existe: eso lo rechaza la venta con su 422). Es el default de `OpcionesVentas.sucursal_de_la_venta`."""
-    deposito = payload.deposito_id if payload.deposito_id is not None else catalogo.get_default_deposito_id(conn)
-    if deposito is None:
-        return None
-    fila = conn.execute("SELECT branch_id FROM locations WHERE id = ?", (deposito,)).fetchone()
-    return fila[0] if fila is not None else None
+    return catalogo.sucursal_del_deposito(conn, payload.deposito_id)
 
 
 @dataclass(frozen=True)
