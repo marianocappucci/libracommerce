@@ -731,6 +731,89 @@ def set_default_sucursal(conn, sid: int):
     conn.execute("UPDATE branches SET is_default=1 WHERE id=?", (sid,))
 
 
+# ── La sucursal de una venta y la sucursal única (ADR-063) ───────────────
+
+#: Las filas del ledger que son la **salida de una venta**: `movement_type='sale'` con `source_type` `venta` o `sale`
+#: (las dos formas en que el motor anota una venta). Es el criterio con el que `erp.margen` deduce la sucursal de una
+#: venta que no la trae, y con el que `completar_sucursal_de_ventas` la completa: un solo texto para los dos, sobre la
+#: tabla `stock_movements` con alias `sm`.
+SALIDA_DE_VENTA_SQL = "sm.movement_type = 'sale' AND sm.source_type IN ('venta', 'sale')"
+
+
+def sucursal_del_deposito(conn, deposito_id: int | None = None) -> int | None:
+    """La sucursal de un depósito (`locations.branch_id`); sin `deposito_id`, la del depósito por defecto (el que
+    recibe una venta que no dice de cuál sale). `None` si el depósito no tiene sucursal, no existe o no hay depósito:
+    una empresa sin sucursales no tiene qué escribir. Es la sucursal que `registrar_venta` anota en `sales.branch_id` y
+    el default de `OpcionesVentas.sucursal_de_la_venta`."""
+    if deposito_id is None:
+        deposito_id = get_default_deposito_id(conn)
+    if deposito_id is None:
+        return None
+    fila = conn.execute("SELECT branch_id FROM locations WHERE id = ?", (deposito_id,)).fetchone()
+    return fila[0] if fila is not None else None
+
+
+def adoptar_sucursal_unica(conn, nombre: str = "Casa central") -> int:
+    """Deja a una empresa de un solo local con su única sucursal y devuelve el id de la predeterminada.
+
+    - **Sin sucursales** (`branches` vacía): crea `nombre` como predeterminada, con el depósito por defecto de la
+      instancia como `default_location_id` (`NULL` si no hay ninguno: el primero que se cree lo ocupa), y le asigna
+      todos los depósitos sin sucursal.
+    - **Con una predeterminada**: no crea otra; asigna a ésa los depósitos que sigan sin sucursal.
+    - **Con sucursales pero ninguna predeterminada**: `ValueError`. No hay una única que adoptar, y elegir una por el
+      dueño de los datos no es de esta función.
+
+    Idempotente: una segunda llamada devuelve el mismo id y no cambia nada. No toca más que `branches` y
+    `locations.branch_id`: ni `cajas` (es de libracore) ni las ventas (`completar_sucursal_de_ventas`).
+
+    **Serializada** con `db.candado.serializar_esquema` (ADR-062): no es DDL, pero es un «si no existe, crear» sobre el
+    índice único de la predeterminada, y dos procesos que arrancan juntos (dos workers, dos contenedores) chocarían con
+    una `UniqueViolation`. Con el candado, el segundo espera al `commit` del primero y encuentra la sucursal ya creada.
+    **Va como primera sentencia de la transacción** y no commitea: es del caller."""
+    from libracommerce.db.candado import serializar_esquema
+
+    nombre = nombre.strip()
+    if not nombre:
+        raise ValueError("La sucursal única necesita un nombre.")
+    serializar_esquema(conn)
+    sid = get_default_sucursal_id(conn)
+    if sid is None:
+        if conn.execute("SELECT 1 FROM branches LIMIT 1").fetchone() is not None:
+            raise ValueError(
+                "Ya hay sucursales y ninguna es la predeterminada: no hay una única que adoptar. "
+                "Marcá una con `set_default_sucursal`."
+            )
+        sid = conn.execute(
+            "INSERT INTO branches (name, is_default, default_location_id) VALUES (?, 1, ?)",
+            (nombre, get_default_deposito_id(conn)),
+        ).lastrowid
+    conn.execute("UPDATE locations SET branch_id = ? WHERE branch_id IS NULL", (sid,))
+    _asegurar_deposito_predeterminado(conn, sid)
+    return sid
+
+
+def completar_sucursal_de_ventas(conn) -> int:
+    """Anota `sales.branch_id` en las ventas que no lo traen, con el **mismo criterio que `erp.margen`**: la sucursal
+    del depósito del que salió su stock (`SALIDA_DE_VENTA_SQL`; si el ledger trae varios, la menor). Sólo toca ventas
+    con `branch_id IS NULL`: lo que una venta ya declara no se pisa. Una venta que no movió stock, o cuyo depósito no
+    tiene sucursal, queda como estaba. Devuelve cuántas actualizó; idempotente (la segunda vez, 0). No commitea.
+
+    Una sola pasada (`UPDATE … FROM` de un `GROUP BY` del ledger), no una subconsulta correlacionada por venta: sobre
+    100.000 ventas y 195.000 movimientos la correlacionada no terminó en 7 minutos (una lectura del ledger por venta, sin
+    índice por `source_id`)."""
+    cur = conn.execute(
+        f"""UPDATE sales SET branch_id = de_salida.sucursal
+            FROM (
+                SELECT sm.source_id AS venta_id, MIN(l.branch_id) AS sucursal
+                FROM stock_movements sm JOIN locations l ON l.id = sm.location_id
+                WHERE {SALIDA_DE_VENTA_SQL} AND l.branch_id IS NOT NULL
+                GROUP BY sm.source_id
+            ) AS de_salida
+            WHERE sales.id = de_salida.venta_id AND sales.branch_id IS NULL"""
+    )
+    return cur.rowcount or 0
+
+
 # ── Categorías de producto ───────────────────────────────────────────────
 
 

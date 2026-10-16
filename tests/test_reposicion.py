@@ -300,8 +300,10 @@ def test_cada_sucursal_se_mira_con_sus_ventas_y_su_stock(abrir_ventas):
     _venta(abrir, [(yerba, "Yerba", 3, 100.0)], "2026-09-11", deposito_id=dep_b)
     _venta(abrir, [(yerba, "Yerba", 5, 100.0)], "2026-09-12", deposito_id=principal)
     with abrir() as conn:
-        # La venta de mostrador no guarda la sucursal (`sales.branch_id` en NULL): la sucursal es la de su depósito.
-        assert [r[0] for r in conn.execute("SELECT DISTINCT branch_id FROM sales").fetchall()] == [None]
+        # La venta de mostrador guarda la sucursal de su depósito (ADR-063); la del depósito sin sucursal queda en NULL.
+        # El reporte da lo mismo que cuando la sucursal se deducía sólo del depósito de la venta (`erp.margen`).
+        assert sorted((r[0] is None, r[0]) for r in conn.execute("SELECT DISTINCT branch_id FROM sales").fetchall()) \
+            == [(False, a), (False, b), (True, None)]
 
     # Centro: 25 vendidas (0,83 por día → 15 en 18 días) y le quedan 5: pide 10.
     [centro] = _reporte(abrir, sucursal_id=a)

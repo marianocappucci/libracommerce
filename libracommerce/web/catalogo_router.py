@@ -194,6 +194,10 @@ class OpcionesDepositos:
       que el producto monte el router.
     - `validar_alta(payload)` / `validar_edicion(payload, actual)` / `validar_eliminacion(actual)`: antes de escribir.
     - `al_guardar(deposito)`: después de crear o editar (VentaLibra: una sucursal que vende necesita su caja).
+    - `sucursal_por_defecto` (ADR-063, opt-in): un depósito que se crea **sin `branch_id`** cae en la sucursal
+      predeterminada, si existe (sin ella queda sin sucursal, como siempre). Para la empresa de un solo local que
+      adoptó su sucursal única (`catalogo.adoptar_sucursal_unica`): el depósito nuevo no queda huérfano. Quien manda
+      `branch_id` lo conserva; apagada (el default) el alta es la de siempre.
     """
 
     autorizar_escritura: Any = None
@@ -201,6 +205,7 @@ class OpcionesDepositos:
     validar_edicion: Callable[["DepositoUpdatePayload", dict], None] | None = None
     validar_eliminacion: Callable[[dict], None] | None = None
     al_guardar: Callable[[dict], None] | None = None
+    sucursal_por_defecto: bool = False
 
 
 @dataclass(frozen=True)
@@ -663,9 +668,12 @@ def build_depositos_router(
         if opt.validar_alta:
             opt.validar_alta(payload)
         with abrir() as conn:
+            branch_id = payload.branch_id
+            if branch_id is None and opt.sucursal_por_defecto:
+                branch_id = catalogo.get_default_sucursal_id(conn)
             try:
                 did = catalogo.create_deposito(
-                    conn, nombre, payload.descripcion.strip(), payload.tipo, payload.branch_id
+                    conn, nombre, payload.descripcion.strip(), payload.tipo, branch_id
                 )
             except ValueError as e:
                 raise HTTPException(422, str(e)) from e
