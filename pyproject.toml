@@ -147,7 +147,8 @@ dev = [
     # v1.157.0 -> v1.159.0 (2026-10-13): `libracore.candados` (ADR-044) y `libracore.errores` (ADR-045); este motor no los usa (no importa libracore en runtime). Sin migracion.
     # v1.159.0 -> v1.162.0 (2026-10-13): concepto sin «Factura» doble con migracion 0025 (corre al migrar, backup antes), alta por CLI con aviso de casilla y `panel_admin casilla`, se retira `get_cc_movimientos_periodo` y los adicionales quedan fuera de la escalera de planes (ADR-048, sin migracion).
     # v1.162.0 -> v1.166.0 (2026-10-14): nota de debito por importe (ADR-049, v1.163.0), rastro de envios por mail con migracion 0026 (`envios_email`, ADR-050, v1.164.0), un proceso sin el almacen de secretos dice la causa (v1.165.0) y el filtro `envio=` del listado de comprobantes (ADR-051, v1.166.0). Este motor no los usa (no importa libracore en runtime).
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.168.0",
+    # v1.168.0 -> v1.176.0 (2026-10-17): sólo para la suite: los tests de `anular_venta` con notas que devolvieron (ADR-064 de este motor) necesitan `notas_de_credito.devuelto_por_notas` (ADR-065 del motor). Sin migracion para este motor.
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.176.0",
     # SOLO PARA TESTS, como libracore: `tests/test_auditoria_formato_libraauth.py` compara
     # las filas de `RepositorioAuditado` con las de `libraauth.auditoria.registrador_dbapi`
     # (ADR-050). En runtime este motor no importa libraauth: el registrador lo pasa el producto.

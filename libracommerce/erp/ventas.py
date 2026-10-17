@@ -952,6 +952,91 @@ def _saldo_sin_acreditar(conn, factura):
     return saldo_acreditable({"total": factura["total"]}, previas), previas
 
 
+def _devuelto_por_notas(conn, factura_id: int) -> dict[str | None, Decimal]:
+    """Lo que las notas de crédito de la factura **ya sacaron de la caja**, por medio de pago (ADR-064).
+
+    Una nota de una factura al contado que se emitió eligiendo «Devolver» deja un egreso con la marca
+    `nc:factura:<id>:<nota>` y el `factura_id` (`libracore.notas_de_credito.devuelto_por_notas`, libracore >= 1.176).
+    La clave `None` es plata que salió sin medio conocido. **Con un libracore anterior la función no existe** y las
+    notas de una factura al contado nunca movían plata: no hay nada que restar y la anulación se comporta como
+    siempre."""
+    try:
+        from libracore.notas_de_credito import devuelto_por_notas, referencia_cc_de_nota
+    except ImportError:
+        return {}
+    total = devuelto_por_notas(conn, factura_id)
+    if total <= 0:
+        return {}
+    from libracore.db.caja import sql_no_anulado
+
+    base = referencia_cc_de_nota(factura_id)
+    por_medio: dict[str | None, Decimal] = {}
+    for fila in conn.execute(
+        "SELECT medio_pago, COALESCE(SUM(monto), 0) FROM caja_movimientos"
+        f" WHERE tipo = 'egreso' AND factura_id = ? AND {sql_no_anulado()}"
+        " AND (referencia = ? OR referencia LIKE ?) GROUP BY medio_pago",
+        (int(factura_id), base, base + ":%"),
+    ).fetchall():
+        medio = fila[0] or None
+        por_medio[medio] = por_medio.get(medio, Decimal(0)) + Decimal(str(fila[1]))
+    sin_medio = total - sum(por_medio.values(), Decimal(0))
+    if sin_medio > 0:
+        por_medio[None] = por_medio.get(None, Decimal(0)) + sin_medio
+    return por_medio
+
+
+def descontar_reintegro_de_notas(
+    pagos: list[dict], devuelto_por_medio: dict[str | None, Decimal], a_favor: Decimal,
+) -> tuple[list[dict], Decimal]:
+    """`(pagos, a_favor_sin_caja)`: los pagos a revertir **sin lo que las notas de la factura ya reintegraron** (ADR-064).
+
+    🔴 Anular una venta saca de la caja cada pago; si una nota de crédito de su factura ya devolvió esa plata (egreso)
+    o la dejó a favor del cliente (abono en su cuenta corriente), revertirla otra vez la devuelve dos veces. Se
+    descuenta **sólo de los pagos que fueron plata de la caja**: el fiado (`cuenta_corriente`) nunca entró al cajón y
+    su deuda ya tiene su propio criterio (`cc_ya_acreditada`).
+
+    Criterio, en este orden:
+
+    1. lo **devuelto por caja** sale primero de los pagos **del mismo medio** con el que se devolvió (la nota
+       devolvió en tarjeta: se descuenta del pago con tarjeta, no del efectivo, que sigue en el cajón);
+    2. lo que no cupo en su medio —o se devolvió sin medio conocido—, y lo **dejado a favor**, salen de los demás
+       pagos de caja, en el orden en que se cobraron.
+
+    Un pago que queda en cero no se revierte (no hay egreso por 0). Devuelve los pagos con el monto ya descontado
+    (los demás, tal cual) y `a_favor_sin_caja`: lo dejado a favor que **no cupo** en los pagos de caja; es deuda
+    cancelada en la cuenta corriente y se trata como siempre (`cc_ya_acreditada`)."""
+    from libracore import medios_pago
+    from libracore.db.reversiones import MEDIO_CUENTA_CORRIENTE
+
+    restante = {p["id"]: Decimal(str(p["monto"])) for p in pagos if p["medio"] != MEDIO_CUENTA_CORRIENTE}
+
+    def quitar(cuanto: Decimal, ids: list) -> Decimal:
+        for i in ids:
+            if cuanto <= 0:
+                break
+            sacado = min(cuanto, restante[i])
+            restante[i] -= sacado
+            cuanto -= sacado
+        return cuanto
+
+    todos = list(restante)
+    for medio, cuanto in sorted(devuelto_por_medio.items(), key=lambda kv: (kv[0] is None, kv[0] or "")):
+        propios = [p["id"] for p in pagos if p["id"] in restante and medio is not None
+                   and medios_pago.canonico(p["medio"]) == medios_pago.canonico(medio)]
+        quitar(quitar(cuanto, propios), todos)
+    sin_caja = quitar(a_favor, todos)
+
+    a_revertir = []
+    for p in pagos:
+        if p["id"] not in restante:
+            a_revertir.append(p)
+        elif restante[p["id"]] == Decimal(str(p["monto"])):
+            a_revertir.append(p)
+        elif restante[p["id"]] > 0:
+            a_revertir.append({**p, "monto": float(restante[p["id"]])})
+    return a_revertir, sin_caja
+
+
 def anular_venta(conn, vid: int, usuario_id: int | None = None,
                  hooks: Hooks = SIN_GANCHOS, *, caja_con_turno: bool = False) -> bool:
     """Anula una venta: repone el stock que se había descontado (los insumos de
@@ -1009,6 +1094,15 @@ def anular_venta(conn, vid: int, usuario_id: int | None = None,
     sin eso, el saldo del cliente quedaba en −total. Una factura sin CAE (sin ARCA, o que ARCA no autorizó)
     se anula como siempre.
 
+    🔴 **Lo que una nota ya devolvió por caja o dejó a favor del cliente no se devuelve otra vez (ADR-064).** Desde
+    libracore 1.176 (ADR-065 del motor) la nota de una factura **al contado** cobrada mueve la plata al emitirse:
+    «devolver» saca un egreso de caja, «dejar a favor» abona la cuenta corriente del cliente, los dos con la marca
+    `nc:factura:<id>:<nota>`. Anular la venta revertía además cada pago entero: la plata salía dos veces. Ahora se
+    descuenta de los pagos de caja lo que las notas ya reintegraron (`descontar_reintegro_de_notas`: primero del
+    pago del mismo medio con el que se devolvió, y lo demás de los otros en el orden en que se cobraron); lo
+    dejado a favor que no cabe en los pagos de caja es deuda de fiado ya abonada (el criterio de arriba). Sin notas
+    que hayan movido plata, o con un libracore anterior (la función `devuelto_por_notas` no existe), no cambia nada.
+
     Devuelve `False` si ya estaba anulada —no-op, para no revertir dos veces
     si se reintenta la acción—. Levanta `ValueError` si no existe. No
     commitea.
@@ -1035,6 +1129,8 @@ def anular_venta(conn, vid: int, usuario_id: int | None = None,
         )
 
     cc_ya_acreditada = False
+    devuelto_por_medio: dict[str | None, Decimal] = {}
+    a_favor = Decimal(0)
     factura = _factura_de_la_venta(conn, vid)
     if factura is not None and _tiene_cae(factura["cae"]):
         saldo, previas = _saldo_sin_acreditar(conn, factura)
@@ -1048,9 +1144,11 @@ def anular_venta(conn, vid: int, usuario_id: int | None = None,
                  f"{saldo} por acreditar. Emití una nota de crédito por ese saldo y después anulá la venta."),
                 factura["id"],
             )
-        from libracore.notas_de_credito import cc_acreditada_por_nota
+        from libracore.notas_de_credito import cc_acreditado_por_notas
 
-        cc_ya_acreditada = cc_acreditada_por_nota(conn, factura["id"])
+        a_favor = Decimal(str(cc_acreditado_por_notas(conn, factura["id"])))
+        cc_ya_acreditada = a_favor > 0
+        devuelto_por_medio = _devuelto_por_notas(conn, factura["id"])
 
     fecha = _ar_now().split(" ")[0]
 
@@ -1068,7 +1166,7 @@ def anular_venta(conn, vid: int, usuario_id: int | None = None,
 
     pagos = [
         dict(p) for p in conn.execute(
-            "SELECT id, medio, monto, estado FROM ventas_pagos WHERE venta_id=?", (vid,)
+            "SELECT id, medio, monto, estado FROM ventas_pagos WHERE venta_id=? ORDER BY id", (vid,)
         ).fetchall()
     ]
     acreditados = [p for p in pagos if acreditacion.estado_de(p) in acreditacion.ACREDITAN]
@@ -1082,6 +1180,12 @@ def anular_venta(conn, vid: int, usuario_id: int | None = None,
             f"UPDATE ventas_pagos SET estado=? WHERE id IN ({marcadores})",
             (acreditacion.EstadoAcreditacion.VENCIDO.value, *pendientes_ids),
         )
+
+    if devuelto_por_medio or a_favor > 0:
+        # Lo que las notas ya devolvieron o dejaron a favor no se revierte de nuevo; lo que no cabe en la caja es
+        # deuda de fiado ya abonada por la nota.
+        acreditados, a_favor_sin_caja = descontar_reintegro_de_notas(acreditados, devuelto_por_medio, a_favor)
+        cc_ya_acreditada = a_favor_sin_caja > 0
 
     turno = hooks.turno_para(conn, usuario_id) if caja_con_turno else None
     revertir_cobro_venta(
