@@ -13,7 +13,7 @@ ADR-059 (no se reconstruye: el costo de entonces no está en ningún lado), `uni
 (`movimientos_sin_costo`, `cantidad_sin_costo`) para que la pantalla avise que el importe no está completo en vez de mostrarlo como si lo estuviera.
 Un 0 nunca se guarda como costo (significa «nadie lo cargó»).
 
-**El rango es por día** (`desde` y `hasta` inclusive, como los demás reportes), sobre `occurred_at`. **Los importes se calculan exactos (`Decimal`) y se
+**El rango es por día** (`desde` y `hasta` inclusive, como los demás reportes), sobre el **día de Argentina** de `occurred_at` (`hora.dia_local_sql`, ADR-066). **Los importes se calculan exactos (`Decimal`) y se
 redondean a 2 decimales al final**; los campos se llaman con `costo` a propósito (`costo_total`, `movimientos_sin_costo`, `cantidad_sin_costo`): es la clave
 que un producto filtra para quien no puede ver costos (VentaLibra, `SinCostos`). El motor no decide quién ve el reporte.
 """
@@ -24,6 +24,7 @@ import datetime
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal
 
+from .. import hora
 from .stock import IMPORTE_DECIMALES
 
 CERO = Decimal("0")
@@ -85,9 +86,8 @@ def reporte_mermas(conn, desde: str, hasta: str, *, deposito_id: int | None = No
         raise ValueError(f"desde ({desde}) no puede ser posterior a hasta ({hasta})")
     if deposito_id is not None and not conn.execute("SELECT 1 FROM locations WHERE id = ?", (deposito_id,)).fetchall():
         raise ValueError(f"el depósito {deposito_id} no existe")
-    donde = ["sm.movement_type = 'waste'", "sm.quantity_delta < 0", "substr(sm.occurred_at, 1, 10) >= ?",
-             "substr(sm.occurred_at, 1, 10) <= ?"]
-    params: list = [desde, hasta]
+    por_dia, params = hora.filtro_de_dias_sql(conn, "sm.occurred_at", desde, hasta)
+    donde = ["sm.movement_type = 'waste'", "sm.quantity_delta < 0", *por_dia]
     if deposito_id is not None:
         donde.append("sm.location_id = ?")
         params.append(deposito_id)

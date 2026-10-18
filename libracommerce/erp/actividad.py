@@ -30,6 +30,10 @@ producto (ver `erp.ventas`).
 
 from __future__ import annotations
 
+import sqlite3
+
+from .. import hora
+
 PARTE_VENTAS_COMERCIO = """
         SELECT
             s.created_at AS ts,
@@ -49,10 +53,10 @@ PARTE_VENTAS_COMERCIO = """
         LEFT JOIN usuarios u ON u.id = s.created_by
 """
 
-PARTE_STOCK_COMERCIO = """
+_PARTE_STOCK = """
         SELECT
             sm.created_at AS ts,
-            substr(sm.occurred_at, 1, 10) AS fecha,
+            {fecha} AS fecha,
             'stock'       AS tipo,
             COALESCE(sm.reason_code, sm.movement_type) || ' ' || ci.name ||
               -- Doble CAST a propósito: `quantity_delta` es NUMERIC y SQLite
@@ -73,19 +77,36 @@ PARTE_STOCK_COMERCIO = """
         LEFT JOIN usuarios u ON u.id = sm.created_by
 """
 
+#: La parte de stock en SQLite y en PostgreSQL. Su `fecha` es el **día de Argentina** de `occurred_at` (`hora.dia_local_sql`, ADR-066):
+#: una recepción estampada en UTC a las 23:30 de Argentina cuenta ese día, no el siguiente. La expresión no es la misma en los dos motores.
+PARTE_STOCK_COMERCIO = _PARTE_STOCK.replace("{fecha}", hora.dia_local_sql_de_motor("sm.occurred_at", postgres=False))
+PARTE_STOCK_COMERCIO_PG = _PARTE_STOCK.replace("{fecha}", hora.dia_local_sql_de_motor("sm.occurred_at", postgres=True))
 
-def partes_de_comercio() -> tuple[str, ...]:
+
+def _es_postgres(conn) -> bool:
+    if conn is not None:
+        return not isinstance(conn, sqlite3.Connection)
+    from libracore.db import core
+
+    return core.is_postgres()
+
+
+def partes_de_comercio(conn=None) -> tuple[str, ...]:
     """Las partes del UNION para un producto de este motor: ventas y stock
     de acá, más `logs.PARTES_CORE` del `libracore` instalado, en su orden.
     `PARTE_CAJA` va explícita en el medio (orden histórico: ventas, caja,
     stock, después el resto del core) y se descuenta de `PARTES_CORE` por
     identidad para no repetirla; el resto de la tupla del core entra tal cual
     venga, así que una parte nueva del core (como `PARTE_CIERRES_DIARIOS`
-    desde v1.98.0) se suma sola sin que este archivo tenga que nombrarla."""
+    desde v1.98.0) se suma sola sin que este archivo tenga que nombrarla.
+
+    La parte de stock depende del motor (ADR-066): con `conn`, el de esa
+    conexión; sin ella, el que tenga configurado `libracore.db.core`."""
     from libracore.db.logs import PARTE_CAJA, PARTES_CORE
 
     resto_core = tuple(p for p in PARTES_CORE if p is not PARTE_CAJA)
-    return (PARTE_VENTAS_COMERCIO, PARTE_CAJA, PARTE_STOCK_COMERCIO) + resto_core
+    stock = PARTE_STOCK_COMERCIO_PG if _es_postgres(conn) else PARTE_STOCK_COMERCIO
+    return (PARTE_VENTAS_COMERCIO, PARTE_CAJA, stock) + resto_core
 
 
 def get_actividad_log(conn, tipos=None, usuario_id=None, turno_id=None,
@@ -96,7 +117,7 @@ def get_actividad_log(conn, tipos=None, usuario_id=None, turno_id=None,
 
     return logs.get_actividad_log(tipos=tipos, usuario_id=usuario_id, turno_id=turno_id,
                                   desde=desde, hasta=hasta, limit=limit, offset=offset,
-                                  partes=partes_de_comercio(), conn=conn)
+                                  partes=partes_de_comercio(conn), conn=conn)
 
 
 def get_actividad_count(conn, tipos=None, usuario_id=None, turno_id=None,
@@ -106,4 +127,4 @@ def get_actividad_count(conn, tipos=None, usuario_id=None, turno_id=None,
 
     return logs.get_actividad_count(tipos=tipos, usuario_id=usuario_id, turno_id=turno_id,
                                     desde=desde, hasta=hasta,
-                                    partes=partes_de_comercio(), conn=conn)
+                                    partes=partes_de_comercio(conn), conn=conn)

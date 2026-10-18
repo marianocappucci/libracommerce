@@ -30,6 +30,7 @@ from typing import Any
 
 from libracommerce.domain.inventory import DepositoInexistente
 
+from .. import hora
 from . import lotes
 from .catalogo import get_default_deposito_id, validar_deposito
 from .hooks import SIN_GANCHOS, Hooks
@@ -302,19 +303,19 @@ def get_movimientos_stock(conn, producto_id: int | None = None,
         where.append("sm.item_id = ?")
         params.append(producto_id)
     # `occurred_at` es un timestamp ISO; los filtros son por fecha. Se compara
-    # el prefijo de 10 caracteres, si no un `<= '2026-07-01'` dejaría afuera
-    # los movimientos de ese mismo día.
-    if desde:
-        where.append("substr(sm.occurred_at, 1, 10) >= ?")
-        params.append(desde)
-    if hasta:
-        where.append("substr(sm.occurred_at, 1, 10) <= ?")
-        params.append(hasta)
-    sql = """SELECT sm.id, sm.item_id AS producto_id, sm.movement_type, sm.reason_code,
+    # el DÍA DE ARGENTINA (`hora.dia_local_sql`, ADR-066), no el texto: un
+    # `<= '2026-07-01'` dejaría afuera los movimientos de ese mismo día, y una
+    # recepción estampada en UTC (`...+00:00`) a las 23:30 de Argentina es del
+    # día de Argentina, no del siguiente.
+    por_dia, params_dia = hora.filtro_de_dias_sql(conn, "sm.occurred_at", desde, hasta)
+    where += por_dia
+    params += params_dia
+    dia = hora.dia_local_sql(conn, "sm.occurred_at")
+    sql = f"""SELECT sm.id, sm.item_id AS producto_id, sm.movement_type, sm.reason_code,
                     sm.quantity_delta, sm.note, sm.source_id AS venta_id,
                     sm.created_by AS usuario_id, sm.location_id AS deposito_id,
                     sm.created_at, sm.unit_cost,
-                    substr(sm.occurred_at, 1, 10) AS fecha,
+                    {dia} AS fecha,
                     ci.name AS producto_nombre, ci.unit_code AS unidad
              FROM stock_movements sm
              JOIN catalog_items ci ON ci.id = sm.item_id"""

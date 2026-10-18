@@ -6,7 +6,10 @@ precio, ni las promociones, ni los vencimientos de acá. Ahora `hora` lee de `li
 
 Estos tests fijan la zona del proceso en UTC (`TZ=UTC` + `time.tzset()`) y pisan **la función de LibraCore** que lee el reloj
 (`libracore.fechas._ahora_utc`) a las 02:30Z del 18/10/2026 = 23:30 del 17/10 en Argentina. Rojos si `hora` vuelve a leer el reloj por
-su cuenta: el motor daría las 02:30 del 18 (o la hora real de quien corra la suite)."""
+su cuenta: el motor daría las 02:30 del 18 (o la hora real de quien corra la suite).
+
+La recepción de mercadería se sigue estampando como instante UTC (`...+00:00`, ADR-065), pero los reportes por día la cuentan el día de
+Argentina (ADR-066): la de las 23:30 del 17 es del 17 en el listado de movimientos, la actividad y la reposición."""
 from __future__ import annotations
 
 import datetime
@@ -22,10 +25,11 @@ from test_web_compras import _app, _deposito, _producto, _proveedor
 
 from libracommerce import hora
 from libracommerce.domain.catalog import CatalogItem, CatalogItemType, ItemPrice, PriceList, Unit
-from libracommerce.erp import listas_precio, promociones, stock, vencimientos
+from libracommerce.erp import actividad, listas_precio, promociones, reposicion, stock, vencimientos
 
 destino = _vto.destino          # las fixtures de siempre: una base por motor, con la cadena al día
 abrir_vto = _vto.abrir_vto
+abrir_vto_ventas = _vto.abrir_vto_ventas   # los dos schemas: la actividad lee también los de LibraCore
 
 #: 23:30 del 17/10/2026 en Argentina = 02:30Z del 18/10/2026.
 INSTANTE = datetime.datetime(2026, 10, 18, 2, 30, tzinfo=datetime.UTC)
@@ -142,9 +146,10 @@ def test_los_vencimientos_y_el_ajuste_de_stock_usan_el_dia_de_argentina(abrir_vt
     assert str(reporte["hoy"]) == "2026-10-17"
 
 
-def test_la_recepcion_se_estampa_con_el_reloj_unico_y_conserva_su_formato(abrir_vto, utc_a_las_23_30_ar):
+def test_la_recepcion_se_estampa_con_el_reloj_unico_y_conserva_su_formato(abrir_vto_ventas, utc_a_las_23_30_ar):
     """`compras_router` estampa la recepción como un instante con zona UTC (ADR-052 «no cubre»; ADR-065 lo deja así): el formato no cambia,
-    pero el instante sale del reloj de LibraCore, así que un test lo puede fijar."""
+    pero el instante sale del reloj de LibraCore, así que un test lo puede fijar. Los reportes por día la cuentan el 17 (ADR-066)."""
+    abrir_vto = abrir_vto_ventas
     proveedor, producto, deposito, client = _proveedor(abrir_vto), _producto(abrir_vto), _deposito(abrir_vto), _app(abrir_vto)
     r = client.post("/api/purchase-receipts/recibir", json={
         "proveedor_id": proveedor, "deposito_id": deposito, "clave_operacion": "reloj-unico-1",
@@ -152,10 +157,20 @@ def test_la_recepcion_se_estampa_con_el_reloj_unico_y_conserva_su_formato(abrir_
     assert r.status_code == 200, r.text
     assert r.json()["received_at"] == "2026-10-18T02:30:00+00:00"
     with abrir_vto() as conn:
-        # Lo que ADR-065 NO cambia y deja dicho: el movimiento de stock lleva el instante en UTC, así que el reporte por día
-        # (`substr(occurred_at, 1, 10)`) lo cuenta el 18 aunque en Argentina sea el 17. Si se unifica el formato, este assert cambia.
+        # Lo que ADR-065 no cambia: el movimiento de stock guarda el instante en UTC, con zona.
         assert conn.execute("SELECT occurred_at FROM stock_movements WHERE item_id = ?", (producto,)).fetchone()[0] \
             == "2026-10-18T02:30:00+00:00"
+        # Lo que ADR-066 arregla: los reportes por día lo cuentan el 17, el día de Argentina (antes, el 18).
+        del_17 = stock.get_movimientos_stock(conn, producto, desde="2026-10-17", hasta="2026-10-17")
+        assert [m["fecha"] for m in del_17] == ["2026-10-17"]
+        assert stock.get_movimientos_stock(conn, producto, desde="2026-10-18", hasta="2026-10-18") == []
+        log = actividad.get_actividad_log(conn, tipos=["stock"], desde="2026-10-17", hasta="2026-10-17")
+        assert [f["fecha"] for f in log] == ["2026-10-17"]
+        assert actividad.get_actividad_log(conn, tipos=["stock"], desde="2026-10-18", hasta="2026-10-18") == []
+        # La reposición del 17 con un día de ventana: el producto tuvo stock ese día (con el día UTC, la entrada caía el 18,
+        # fuera de la ventana, y el 17 quedaba sin stock).
+        fila, = reposicion.sugerencia_reposicion(conn, dias_rotacion=1, producto_id=producto, solo_a_pedir=False, hoy=HOY_AR)
+        assert fila["dias_con_stock"] == 1
     r = client.post("/api/purchase-receipts", json={"proveedor_id": proveedor, "document_reference": "REM-9"})
     assert r.status_code == 200, r.text
     rid = r.json()["id"]
