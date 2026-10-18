@@ -151,12 +151,13 @@ dev = [
     # v1.162.0 -> v1.166.0 (2026-10-14): nota de debito por importe (ADR-049, v1.163.0), rastro de envios por mail con migracion 0026 (`envios_email`, ADR-050, v1.164.0), un proceso sin el almacen de secretos dice la causa (v1.165.0) y el filtro `envio=` del listado de comprobantes (ADR-051, v1.166.0). Este motor no los usa (no importa libracore en runtime).
     # v1.168.0 -> v1.176.0 (2026-10-17): sólo para la suite: los tests de `anular_venta` con notas que devolvieron (ADR-064 de este motor) necesitan `notas_de_credito.devuelto_por_notas` (ADR-065 del motor). Sin migracion para este motor.
     # v1.176.0 -> v1.182.0 (2026-10-18): `libracore.fechas` es el reloj único de Argentina (`hoy`, `ahora`, `ZONA_AR`; ADR-070 del motor) y `libracommerce.hora` lo usa (ADR-065 de este motor). Sin migracion.
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.182.0",
+    # v1.182.0 -> v1.183.0 (2026-10-18): tokens de servicio e integracion propios de cada instancia (ADR-071); con libraauth v0.52.0 (ADR-025, token anterior para rotar sin corte). Sin migracion.
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.183.0",
     # SOLO PARA TESTS, como libracore: `tests/test_auditoria_formato_libraauth.py` compara
     # las filas de `RepositorioAuditado` con las de `libraauth.auditoria.registrador_dbapi`
     # (ADR-050). En runtime este motor no importa libraauth: el registrador lo pasa el producto.
     # v0.49.0 (2026-10-12): `registrador_dbapi` y las piezas puras del formato (ADR-022).
-    "libraauth @ git+https://github.com/marianocappucci/libraauth.git@v0.49.0",
+    "libraauth @ git+https://github.com/marianocappucci/libraauth.git@v0.52.0",
 ]
 offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@develop"]
 offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@develop"]
