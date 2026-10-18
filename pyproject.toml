@@ -154,7 +154,8 @@ dev = [
     # v1.182.0 -> v1.183.0 (2026-10-18): tokens de servicio e integracion propios de cada instancia (ADR-071); con libraauth v0.52.0 (ADR-025, token anterior para rotar sin corte). Sin migracion.
     # v1.183.0 -> v1.184.0 (2026-10-18): los cobros de MercadoPago con el CUIT de quien factura nacen ignorados y no se auto-facturan (ADR-072); `admin.services.clientes_dir()` publica. Sin migracion.
     # v1.184.0 -> v1.184.1 (2026-10-18): tokens por instancia, `${VAR:?mensaje}` se lee del .env (corrige ADR-071). Sin migracion.
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.184.1",
+    # v1.184.1 -> v1.185.0 (2026-10-18): la nota de debito de una factura a cuenta corriente hereda la cuenta: asienta su debito y se paga con recibo (ADR-073). Sin migracion.
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.185.0",
     # SOLO PARA TESTS, como libracore: `tests/test_auditoria_formato_libraauth.py` compara
     # las filas de `RepositorioAuditado` con las de `libraauth.auditoria.registrador_dbapi`
     # (ADR-050). En runtime este motor no importa libraauth: el registrador lo pasa el producto.
