@@ -622,8 +622,8 @@ wheels = [
 
 [[package]]
 name = "libraauth"
-version = "0.49.0"
-source = { git = "https://github.com/marianocappucci/libraauth.git?rev=v0.49.0#d27734184b4e789a4b5277c7c06e830e5759baac" }
+version = "0.52.0"
+source = { git = "https://github.com/marianocappucci/libraauth.git?rev=v0.52.0#d4cfb784ef8795ef7d5c3da804580355117b9854" }
 dependencies = [
     { name = "altcha" },
     { name = "argon2-cffi" },
@@ -686,10 +686,10 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.115,<1" },
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.115,<1" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
-    { name = "libraauth", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libraauth.git?rev=v0.49.0" },
+    { name = "libraauth", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libraauth.git?rev=v0.52.0" },
     { name = "libracore", marker = "extra == 'dev'", specifier = ">=1.125,<2" },
     { name = "libracore", marker = "extra == 'dev'", specifier = ">=1.182,<2" },
-    { name = "libracore", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libracore.git?rev=v1.182.0" },
+    { name = "libracore", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libracore.git?rev=v1.183.0" },
     { name = "libracore", marker = "extra == 'erp'", specifier = ">=1.182,<2" },
     { name = "libracore", marker = "extra == 'web'", specifier = ">=1.125,<2" },
     { name = "libracore", extras = ["migrations"], marker = "extra == 'dev'", specifier = ">=1.182,<2" },
@@ -711,8 +711,8 @@ provides-extras = ["dev", "erp", "migrations", "offline", "offline-server", "pla
 
 [[package]]
 name = "libracore"
-version = "1.182.0"
-source = { git = "https://github.com/marianocappucci/libracore.git?rev=v1.182.0#dbc7362e7aded3285210cd452fdfe699e93b9345" }
+version = "1.183.0"
+source = { git = "https://github.com/marianocappucci/libracore.git?rev=v1.183.0#47fad629150a2a5105f169de9c3305ecc9f6535c" }
 dependencies = [
     { name = "cryptography" },
     { name = "fastapi" },
