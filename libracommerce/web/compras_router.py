@@ -13,10 +13,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from .. import hora
 from ..domain.inventory import DepositoInexistente
 from ..erp import claves, compras
 from . import fastapi as _fastapi
@@ -245,7 +246,7 @@ def build_compras_router(*, conexion: Conexion | None = None,
                 recepcion = compras.recibir_mercaderia(
                     conn, supplier_party_id=party_id, deposito_id=payload.deposito_id,
                     items=[i.model_dump() for i in payload.items], clave_operacion=payload.clave_operacion,
-                    occurred_at=datetime.now(UTC), purchase_order_id=payload.purchase_order_id,
+                    occurred_at=hora.ahora_utc(), purchase_order_id=payload.purchase_order_id,
                     document_reference=payload.document_reference,
                 )
             except compras.OrdenNoEncontrada as e:
@@ -266,7 +267,7 @@ def build_compras_router(*, conexion: Conexion | None = None,
         with abrir() as conn:
             try:
                 recepcion = compras.confirmar_recepcion(
-                    conn, recepcion_id, location_id=payload.deposito_id, occurred_at=datetime.now(UTC),
+                    conn, recepcion_id, location_id=payload.deposito_id, occurred_at=hora.ahora_utc(),
                 )
             except compras.RecepcionNoEncontrada as e:
                 raise HTTPException(404, "purchase receipt not found") from e

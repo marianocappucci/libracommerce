@@ -2107,3 +2107,33 @@ Todas las corridas sin error dejaron la base idéntica a la esperada (mismas tab
 - **Revertir la devolución de la nota** si después se anula la nota: no existe (una nota autorizada no se deshace).
 
 **Cómo se adopta.** Subir el pin (**v0.64.0**, menor: función nueva y `anular_venta` revierte menos cuando una nota ya devolvió), **sin migración**. Hace efecto cuando el producto tenga libracore >= 1.176 (con uno anterior es inerte, sin romper nada). Los productos que anulan ventas con `erp.ventas.anular_venta` (Contalibra, Restolibra, VentaLibra): nada que tocar en el código.
+
+## ADR-065 — `libracommerce.hora` toma el reloj de `libracore.fechas`: un solo «hoy» y «ahora» de Argentina en la familia (2026-10-18)
+
+**Problema.** LibraCore v1.182.0 (ADR-070 del motor, ítem 14d de la cola autónoma) dejó **una** fuente de «hoy» y «ahora» de Argentina: `libracore.fechas.hoy()`, `ahora()`, `ZONA_AR` (UTC-3 fijo) y `_ahora_utc()`, lo único que lee el reloj del sistema y lo que un test pisa. Este motor tenía la suya: `libracommerce/hora.py` (ADR-052) con su propio `ZONA_LOCAL` y su propio `ahora_utc()`. La regla era la misma, así que no daban días distintos, pero eran **dos**: fijar el instante de LibraCore con `fechas._ahora_utc` no movía las vigencias de precio, las promociones ni los vencimientos de este motor, y un cambio de regla (huso, reloj) había que hacerlo en dos lugares.
+
+**Relevado (`git grep "datetime.now\|date.today\|timezone(timedelta\|utcnow"` sobre `develop` v0.64.0).** El relevo previo (ADR-052, 2026-10-13) ya había cerrado los `datetime.now()` sin zona de `resolve_price`, `set_precio_vigente`, `promociones` y `set_setting`: no queda ninguno en el paquete. Lo que quedaba:
+- `hora.py`: `ZONA_LOCAL = timezone(timedelta(hours=-3))` y `datetime.now(UTC)`, una segunda definición del huso y del reloj.
+- `web/compras_router.py` (dos veces) y `erp/precio_de_venta.py`: `datetime.now(UTC)` suelto, que el guard toleraba («lleva zona») pero que ningún test podía fijar.
+
+**Qué ya existía.** `hora.py` y su gancho `ahora_utc` (ADR-052): `ahora_local`, `hoy_local`, `vencimientos.hoy_argentina`, `listas_precio.a_hora_local` y `_ZONA_LOCAL` ya salen de ahí. No hay que tocar ninguno de sus llamadores.
+
+**Decisión.**
+- **`hora.py` es el adaptador de `libracore.fechas`**: `ZONA_LOCAL = fechas.ZONA_AR` y `ahora_utc() = fechas.ahora().astimezone(UTC)`. Se usa la API pública (`ahora()`), no `_ahora_utc`; el instante sigue saliendo de `_ahora_utc`, así que pisarlo mueve todo el motor. `ahora_utc` se queda como gancho: los tests de ADR-052 (`monkeypatch.setattr(hora, "ahora_utc", ...)`) siguen valiendo sin tocarlos.
+- **El núcleo sigue sin depender de LibraCore** (ADR-030, `dependencies = []`; `db/repository.py` importa `hora`): `import libracore.fechas` es opcional. Sin LibraCore, o con uno anterior a 1.182 (sin `fechas.ahora`), `hora` cae a la misma regla (UTC-3 fijo, su propia lectura de `datetime.now(UTC)`). Es el **único** `datetime.now` que queda, y está en `EXCEPCIONES` del guard con su motivo.
+- **El piso sube a `libracore>=1.182`** en los extras `erp` y `migrations` (los de un producto): con ellos el reloj es siempre el de LibraCore, nunca el respaldo. `web` queda en `>=1.125`: lo trae el producto con `erp`. El pin del extra `dev` pasa a `v1.182.0` (con `uv lock --upgrade-package libracore`; sin migración).
+- **`compras_router` (recibir y confirmar) y `precio_de_venta` leen `hora.ahora_utc()`** en vez de `datetime.now(UTC)`: el **mismo valor y el mismo formato** (instante con zona UTC, `...+00:00`), pero ahora del reloj único.
+- **El guard (`test_sin_reloj_del_sistema`) se aprieta:** marca todo `.now(...)`, también con zona. Antes dejaba pasar `datetime.now(UTC)` («no depende de la zona del proceso»): cierto, pero era justo la lectura que un test no podía fijar.
+
+**Lo que NO se cambió: el `occurred_at` de la recepción de mercadería.** `compras_router` estampa la recepción (`received_at`) y sus movimientos de stock (`occurred_at`) como un **instante UTC con zona** (`2026-10-18T02:30:00+00:00`), mientras que el resto de los movimientos (`erp.stock.add_movimiento_stock`, ajustes, transferencias) se estampa como el **día de Argentina sin zona** (`2026-10-17T00:00:00`). Alinearlos tocaría datos y reportes, así que queda como estaba, a propósito:
+- El reporte por día lee `substr(occurred_at, 1, 10)` (`erp.actividad`, `erp.mermas`, el listado de movimientos de `erp.stock`) y `reposicion` lee `str(occurred_at)[:10]`. Una recepción confirmada entre las 21:00 y las 24:00 de Argentina queda con el día **siguiente** (UTC): hoy se cuenta mañana. Es un defecto vivo, medido en `tests/test_un_solo_reloj.py` (23:30 AR del 17 → `occurred_at` del 18). No es nuevo (ADR-052 «No cubre» ya lo dejaba).
+- Pasar a hora local sin zona **cambia el contrato de `received_at`** que la API le devuelve al cliente (de `...+00:00` a naive), el orden de `ORDER BY occurred_at` contra las filas ya guardadas con offset (el texto no ordena igual entre `+00:00` y naive) y a qué día cae esa recepción en los reportes de períodos ya cerrados. Las filas que ya están no se reescriben solas.
+- Es una decisión aparte, con dato y con los consumidores de la API a avisar (quien lea `received_at`). Queda abierta; cuando se tome, el único lugar a cambiar es `compras_router` (leer `hora.ahora_local()`) y el assert marcado en el test.
+
+**Tests.** `tests/test_un_solo_reloj.py`: con `TZ=UTC` (`time.tzset()`) y `libracore.fechas._ahora_utc` pisada a las 02:30Z del 18/10/2026 (23:30 del 17 en Argentina): «hoy» y «ahora» del motor, `hoy_argentina`, el precio vigente sin `desde`, `resolve_price` sin `at` (vigencia hasta 23:45), la promoción creada y evaluada (vigente de 23:00 a 23:45), el ajuste de stock sin fecha, el `hoy` de los vencimientos, y la recepción (`received_at` y movimiento con el instante de `fechas`, formato `+00:00`). Más: `ZONA_LOCAL` es `fechas.ZONA_AR`, pisar `hora.ahora_utc` sigue valiendo y, sin LibraCore, `hora` anda con la misma regla. Rojos sin el cambio (8 de 10; los otros dos fijan que pisar `hora.ahora_utc` y el reloj real ya andaban). `test_sin_reloj_del_sistema` suma los casos con zona al guard y también se pone rojo.
+
+**No cubre.**
+- Las filas ya escritas con la hora del sistema (ADR-052) o con offset (recepciones) no se corrigen.
+- Los tests que fijan sus fixtures con `date.today()` (`HOY`) siguen igual; el guard recorre sólo el paquete.
+
+**Cómo se adopta.** Subir el pin (**v0.65.0**, menor: el piso de `libracore` sube a 1.182). Sin migración; sin cambio de valores para quien despliega con `TZ` de Argentina, ni para quien corre en UTC (la regla ya era UTC-3 fija).
