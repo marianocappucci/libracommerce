@@ -24,8 +24,7 @@ La tolerancia es de un centavo: el POS manda el precio como número y el servido
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
+from libracommerce import hora
 from libracommerce.db.repository import repositorio_de
 from libracommerce.domain.catalog import ItemCodeType
 from libracommerce.domain.scale import ScaleValueKind, parse_scale_barcode
@@ -129,7 +128,7 @@ def validar_precios(conn, lineas: list[dict], *, en: str = "", sucursal_id: int 
             conn, lista_id,
             [{"producto_id": c["producto_id"], "variante_id": c["variante_id"], "cantidad": c["qty"]} for c in conocidas],
             # La misma sucursal por la que cotiza el POS (ADR-049: lo que el POS cotiza, el servidor lo valida; ADR-058: ahora con sucursal).
-            sucursal_id=sucursal_id, en=en or datetime.now(UTC).isoformat(),
+            sucursal_id=sucursal_id, en=en or hora.ahora_utc().isoformat(),
         )
         de_lista = {linea["indice"]: cotizada["precio"] for linea, cotizada in zip(conocidas, cotizadas, strict=True)}
 
