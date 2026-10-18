@@ -110,6 +110,7 @@ import unicodedata
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from fractions import Fraction
 
+from .. import hora
 from . import margen
 from .lotes import saldos_por_bucket
 from .stock import get_stock_por_deposito
@@ -443,13 +444,17 @@ def sugerencia_reposicion(conn, *, dias_rotacion: int = DIAS_ROTACION, dias_cobe
         if item_id in ids:
             saldos[item_id] = sum((_stock(c) for d, c in por_deposito.items() if d in depositos), _CERO)
 
+    # El día de cada movimiento es el de Argentina (`hora.dia_local`, ADR-066): una recepción estampada en UTC a las 23:30 del día anterior
+    # a `desde` tiene un texto `>= desde` pero no es de la ventana, y se descarta (si no, se restaría del saldo de partida sin volver a sumarse).
     movimientos: dict[int, list[tuple[str, Decimal]]] = {}
     for f in conn.execute(
         "SELECT item_id, location_id, occurred_at, quantity_delta FROM stock_movements "
         "WHERE occurred_at >= ? ORDER BY occurred_at, id", (desde.isoformat(),),
     ).fetchall():
         if f["item_id"] in ids and f["location_id"] in depositos:
-            movimientos.setdefault(f["item_id"], []).append((str(f["occurred_at"])[:10], _stock(f["quantity_delta"])))
+            dia = hora.dia_local(f["occurred_at"])
+            if dia >= desde.isoformat():
+                movimientos.setdefault(f["item_id"], []).append((dia, _stock(f["quantity_delta"])))
 
     vendidas: dict[int, Decimal] = {}
     dias_con_venta: dict[int, set[str]] = {}
