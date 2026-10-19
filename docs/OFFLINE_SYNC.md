@@ -4,9 +4,14 @@ Estado: implementado, con la persistencia/transporte/recepción del outbox movid
 
 LibraCommerce ya no mantiene tablas propias de `node_identity`/`local_sequences`/`sync_outbox`/`sync_inbox` ni su propio worker/transporte/receiver (retirados: eran una copia de compatibilidad temporal). Su responsabilidad se limita a la traducción de dominio:
 
-- `libracommerce.integrations.libraedge.sale_to_edge_operation(sale, node_id, sequence, occurred_at)` traduce una venta confirmada al `OutboxOperation` genérico de LibraEdge.
-- `libracommerce.integrations.libraedge.apply_confirmed_sale_operation(conn, operation)` es el `operation_handler` que se pasa a `libraedge.sync.receiver.SyncReceiver` en el lado central: sabe interpretar un payload `sale.confirmed` y materializarlo como una `Sale` real.
-- La generación de `sequence` y el enqueue/worker/transporte/recepción usan las clases de `libraedge.db.repository.SqliteNodeRepository`, `libraedge.sync.worker.OutboxWorker`, `libraedge.sync.http.HttpSyncTransport` y `libraedge.sync.receiver.SyncReceiver` directamente — LibraCommerce no las reimplementa.
+> **Desde 2026-10-19 (ADR-067) la traducción es `libracommerce.erp.offline`**, sobre la capa ERP (`erp.ventas`) que usan
+> RestoLibra, VentaLibra y ContaLibra: `con_outbox(hooks, Outbox(...))` encola en la **misma transacción** de la venta
+> `venta.registrada`, `venta.pago_acreditado`, `venta.anulada` y `venta.devolucion`, y `aplicadores(hooks)` las
+> materializa en el central. `integrations/libraedge` (`sale.confirmed` sobre la capa vieja `Sale`, con venta y outbox
+> en dos pasos) se retiró: ningún producto la usaba. Lo de abajo sobre «dos pasos separados» describe aquella versión;
+> la de hoy vuelve a ser atómica (`enqueue_operation(commit=False)`).
+
+- La generación de `sequence` y el enqueue/worker/transporte/recepción usan las clases de `libraedge.db.repository.NodeRepository`, `libraedge.sync.worker.OutboxWorker`, `libraedge.sync.http.HttpSyncTransport` y `libraedge.sync.receiver.SyncReceiver` directamente — LibraCommerce no las reimplementa.
 
 **Importante para cualquier deployment central**: la conexión SQLite del lado central necesita correr *ambos* `init_schema` — el de `libracommerce.db.schema` (tablas de dominio comercial) y el de `libraedge.db.schema` (`sync_inbox`, que el receiver usa para idempotencia) — sobre la misma base, no solo el de LibraCommerce.
 

@@ -61,7 +61,14 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
   como primer parámetro —salvo `crear_venta_directa`, que recibe la fábrica porque el
   reintento por número repetido necesita una transacción nueva—; y `erp.hooks`, los
   puntos de extensión tipados que un producto engancha (`al_confirmar_venta` /
-  `al_anular_venta` corren dentro de esa transacción).
+  `al_anular_venta`, y desde ADR-067 `al_registrar_venta`, `al_acreditar_pago` y
+  `al_devolver_items`, corren dentro de esa transacción); y `erp.offline` (ADR-067), las
+  ventas en un nodo offline de LibraEdge: `con_outbox(hooks, Outbox(...))` suma a los
+  ganchos del producto el encolado de `venta.registrada`, `venta.pago_acreditado`,
+  `venta.anulada` y `venta.devolucion` (en la misma transacción) y el numerador con el
+  prefijo de la sucursal (`S02-POS-000123`); `registrar_en(Despachador(), hooks)` (libraedge
+  v0.7.0) registra los `(conn, operacion)` que las materializan en el central, idempotentes y con la
+  colisión de número a revisión manual.
 - **`web/`** (extra `[web]`) — factories de router FastAPI que el producto monta con
   `include_router` y gatea él: `catalogo_router` (`build_productos_router`,
   `build_depositos_router`, `build_stock_router`, con `OpcionesCatalogo`/`OpcionesStock`
@@ -91,10 +98,10 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
   `usuario_actual` o sin listas no vacías `dependencias_marcar` y `dependencias_movimientos`, y `asignar`, `entrada`, `merma` y `conciliar`
   exigen `clave_operacion` (idempotencia de los reintentos; única por producto: el cliente genera una clave por intento
   del usuario y por producto). Una `variante_id` que no es del producto es 422.
-- **`adapters/`** e **`integrations/`** — puentes hacia afuera: `adapters/
-  contalibra` lee datos del schema legado de Contalibra; `integrations/libraedge`
-  traduce una venta confirmada a una operación de sincronización del nodo edge
-  (`sale_to_edge_operation`, `apply_confirmed_sale_operation`).
+- **`adapters/`** — puentes hacia afuera: `adapters/contalibra` lee datos del schema
+  legado de Contalibra. (`integrations/libraedge`, la traducción de la capa vieja `Sale`
+  a LibraEdge, se retiró con ADR-067: ningún producto la usaba; la de hoy es
+  `erp.offline`.)
 - **`scripts/`** — migración y verificación de datos reales:
   `migrate_from_contalibra` / `migrate_from_restolibra` mueven un producto legado
   al schema del motor, y `verify_*_migration` comparan conteos, stock por
@@ -181,7 +188,8 @@ duplicada. `usecases/` sigue puro; lo que cruza a LibraCore va en `erp/` (extra
 - `repo.transaction()` **anida** (ADR-031): la profundidad es de la conexión, la transacción exterior es dueña del commit y del rollback, y cada interior es un `SAVEPOINT`
   (una interior que falla y se atrapa revierte sólo lo suyo; `update_producto` y `create_producto` se pueden llamar dentro de la `transaction()` de un producto).
 - La variación entre productos entra por `erp.hooks.Hooks` (`resolver_receta`,
-  `al_confirmar_venta`, `al_anular_venta`, `lista_de_precio_para`, `canales`),
+  `al_confirmar_venta`, `al_anular_venta`, `al_registrar_venta`, `al_acreditar_pago`,
+  `al_devolver_items`, `lista_de_precio_para`, `canales`, `numerador`, ...),
   con defaults que son el comportamiento de Contalibra. **Sin `if producto`.**
 - **Un cuerpo con campos `int`/`float` rechaza `true`/`false`** donde un `1` o un `0` cambian algo del negocio (ids,
   cantidades, precios, porcentajes): pydantic los convertiría en `1`/`0` antes de que el motor los vea. Se declara con

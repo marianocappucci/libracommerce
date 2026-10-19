@@ -13,6 +13,9 @@ Cada uno nombra el caso real que lo motiva:
 |---|---|---|
 | `resolver_receta` | Restolibra | descontar los insumos de la receta en vez del plato (`erp.stock.descontar_stock_venta`) |
 | `al_confirmar_venta` / `al_anular_venta` | Restolibra, Contalibra | marcar el pedido cobrado y liberar la mesa; `venta_links`, integraciones, outbox de LibraEdge |
+| `al_registrar_venta` | los tres, en un nodo offline (ADR-067) | la venta recién nacida, **en cualquier estado** (cobrada, parcial, pendiente): el outbox la sube aunque falte plata |
+| `al_acreditar_pago` | los tres, en un nodo offline (ADR-067) | los pagos que `acreditar_pago_qr` acaba de acreditar: completan en el central la venta que subió parcial |
+| `al_devolver_items` | los tres, en un nodo offline (ADR-067) | la devolución recién aplicada (no un reintento con la misma clave): `venta.devolucion` al outbox |
 | `lista_de_precio_para` | Contalibra | la lista mayorista asignada al cliente (`cliente_lista_precio`) |
 | `canales` | Restolibra | mostrador y delivery como canales del reporte de ventas |
 | `numerador` | VentaLibra | numeración propia (`POS-000001` contra su tabla `sequences`) en vez de `V-00001` |
@@ -30,6 +33,14 @@ que abriera su propia conexión rompería eso sin que ningún test lo viera.
 pagos, turno_id, ...), leído con la misma conexión. `al_confirmar_venta` corre
 cuando la venta llega a `cobrada` —al nacer cobrada, o al acreditarse el QR—;
 `al_anular_venta`, después de reponer stock y revertir la caja.
+
+ADR-067 (2026-10-19, LibraEdge en la suite) suma tres ganchos con el mismo
+contrato de conexión: `al_registrar_venta` corre al final de `registrar_venta`
+para TODA venta, antes de `al_confirmar_venta`; `al_acreditar_pago`, en
+`acreditar_pago_qr`, después de acreditar y recalcular el estado (y antes de
+`al_confirmar_venta`, si quedó cobrada); `al_devolver_items`, al final de
+`devolver_items`, con la devolución que se acaba de escribir. Los tres son un
+no-op por default. Los compone `erp.offline.con_outbox`.
 """
 
 from __future__ import annotations
@@ -64,6 +75,38 @@ class GanchoDeVenta(Protocol):
     """Corre dentro de la transacción de la venta, con la misma conexión."""
 
     def __call__(self, conn: Any, venta: Any) -> None: ...
+
+
+class GanchoDePago(Protocol):
+    """Corre dentro de la transacción de `acreditar_pago_qr`, con la misma conexión.
+
+    `venta` es `obtener_venta` ya con el estado recalculado; `pagos`, las filas de
+    `ventas_pagos` que esta llamada acaba de pasar a `aprobado` (`id`, `medio`,
+    `monto`, `referencia`, `estado`) más `payment_id`, el de MercadoPago."""
+
+    def __call__(self, conn: Any, venta: Any, pagos: Sequence[Mapping[str, Any]]) -> None: ...
+
+
+class GanchoDeDevolucion(Protocol):
+    """Corre dentro de la transacción de `devolver_items`, con la misma conexión,
+    después de reponer el stock, reintegrar y marcar el estado.
+
+    `venta` es `obtener_venta` ya devuelta; `devolucion` dice qué se devolvió:
+    `lineas` (`{sale_item_id: cantidad}`), `deposito_id`, `medio_pago`, `importe`
+    (lo reintegrado), `clave_operacion` (o `None`) y `usuario_id` (quien devolvió). Un reintento con la misma
+    clave (`repetida`) no escribe nada y **no** llama al gancho."""
+
+    def __call__(self, conn: Any, venta: Any, devolucion: Mapping[str, Any]) -> None: ...
+
+
+class RequiereConexion(ValueError):
+    """La operación no se puede hacer en un nodo offline sin conexión con el central.
+
+    Caso de ADR-067: anular una venta **ya facturada** en un nodo que no está
+    sincronizando. La levanta el gancho `al_anular_venta` que arma
+    `erp.offline.con_outbox`; corre adentro de la transacción de `anular_venta`,
+    así que el rollback del llamador deja la venta como estaba. El router la
+    contesta 409."""
 
 
 class ListaDePrecioPara(Protocol):
@@ -137,6 +180,14 @@ def _nada(conn: Any, venta: Any) -> None:
     return None
 
 
+def _nada_con_pagos(conn: Any, venta: Any, pagos: Sequence[Mapping[str, Any]]) -> None:
+    return None
+
+
+def _nada_con_devolucion(conn: Any, venta: Any, devolucion: Mapping[str, Any]) -> None:
+    return None
+
+
 def _lista_default(conn: Any, cliente_id: int | None) -> None:
     return None
 
@@ -184,6 +235,12 @@ class Hooks:
     turno_para: TurnoPara = _turno_default
     cliente_cc_de: ClienteCcDe = _cliente_cc_default
     validar_deposito: ValidarDeposito = _deposito_libre
+    #: ADR-067: toda venta al nacer, en cualquier estado (antes de `al_confirmar_venta`).
+    al_registrar_venta: GanchoDeVenta = _nada
+    #: ADR-067: los pagos que `acreditar_pago_qr` acaba de acreditar.
+    al_acreditar_pago: GanchoDePago = _nada_con_pagos
+    #: ADR-067: la devolución que `devolver_items` acaba de escribir.
+    al_devolver_items: GanchoDeDevolucion = _nada_con_devolucion
 
 
 #: El comportamiento de Contalibra: ningún gancho enganchado.

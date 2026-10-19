@@ -605,6 +605,10 @@ def build_ventas_router(
                 conn.rollback()
                 # Detalle de texto, como los demás 409: las pantallas lo muestran tal cual.
                 raise HTTPException(409, str(exc)) from None
+            except ventas.RequiereConexion as exc:
+                # ADR-067: un nodo offline sin conexión no anula una venta ya facturada (lo rechaza `erp.offline.con_outbox`).
+                conn.rollback()
+                raise HTTPException(409, str(exc)) from None
             except Exception:
                 conn.rollback()
                 raise
