@@ -117,12 +117,12 @@ def _pendientes(base: _Base):
         return list(NodeRepository(conn).list_pending_operations(limit=1000))
 
 
-def _subir(central: _Base, operaciones, hooks: Hooks = SIN_GANCHOS):
+def _subir(central: _Base, operaciones, hooks: Hooks = SIN_GANCHOS, aplicar_factura=None):
     """Cada operación por el receptor de LibraEdge, con los aplicadores registrados en su `Despachador` (v0.7.0)."""
     from libraedge.sync.despacho import Despachador
     from libraedge.sync.receiver import SyncReceiver
 
-    despachador = offline.registrar_en(Despachador(), hooks)
+    despachador = offline.registrar_en(Despachador(), hooks, aplicar_factura=aplicar_factura)
     resultados = []
     with central.abrir() as conn:
         receptor = SyncReceiver(conn, despachador=despachador)
@@ -481,3 +481,146 @@ def test_el_schema_desconocido_se_rechaza():
     op = replace(_op("n:1"), operation_type="venta.anulada", schema_version=2)
     with pytest.raises(ValueError, match="schema 2"):
         offline.aplicar_venta_anulada(sqlite3.connect(":memory:"), op)
+
+
+# ── venta.facturada (ADR-068) ──────────────────────────────────────────────
+#
+# El payload y la escritura de la factura son de libracore (`facturas_del_nodo`, ADR-074 del motor, todavía sin tag):
+# acá se inyectan dobles con la misma forma. CAE y números ficticios.
+
+CAE = "70000000000001"
+
+
+def _factura_del_nodo(base: _Base, vid: int, *, numero=1, cae=CAE) -> dict:
+    """La factura que emitió el nodo, ya vinculada a la venta (como la deja `facturar_venta` antes de `al_facturar`)."""
+    with base.abrir() as conn:
+        conn.execute(
+            "INSERT INTO facturas (tipo, punto_venta, numero, fecha, cliente_cuit, cliente_razon, cliente_iva_cond, "
+            "items, subtotal, iva_amount, total, ambiente, cae) VALUES (11, 7, ?, ?, '', 'CF', 5, '[]', 200, 0, 200, "
+            "'homologacion', ?)", (numero, HOY, cae))
+        fid = conn.execute("SELECT MAX(id) FROM facturas").fetchone()[0]
+        ventas.vincular_factura(conn, vid, fid)
+        conn.commit()
+        return dict(conn.execute("SELECT * FROM facturas WHERE id=?", (fid,)).fetchone())
+
+
+def _payload_factura(factura) -> dict:
+    """Como `libracore.facturas_del_nodo.payload_factura`: campos de la factura, `id_en_el_nodo` y `version`."""
+    campos = ("tipo", "punto_venta", "numero", "fecha", "cliente_razon", "subtotal", "iva_amount", "total", "cae",
+              "ambiente")
+    datos = {c: (str(factura[c]) if c == "fecha" else factura[c]) for c in campos}
+    datos["subtotal"], datos["iva_amount"], datos["total"] = (float(datos[k]) for k in ("subtotal", "iva_amount",
+                                                                                          "total"))
+    return {**datos, "items": [], "id_en_el_nodo": factura["id"], "version": 1}
+
+
+def _aplicar_factura(payload, *, conn):
+    """Como `aplicar_factura_del_nodo`: idempotente por (tipo, punto de venta, número, ambiente)."""
+    fila = conn.execute("SELECT id FROM facturas WHERE tipo=? AND punto_venta=? AND numero=? AND ambiente=?",
+                        (payload["tipo"], payload["punto_venta"], payload["numero"], payload["ambiente"])).fetchone()
+    if fila:
+        return fila[0], False
+    conn.execute(
+        "INSERT INTO facturas (tipo, punto_venta, numero, fecha, cliente_cuit, cliente_razon, cliente_iva_cond, "
+        "items, subtotal, iva_amount, total, ambiente, cae) VALUES (?, ?, ?, ?, '', ?, 5, '[]', ?, ?, ?, ?, ?)",
+        (payload["tipo"], payload["punto_venta"], payload["numero"], payload["fecha"], payload["cliente_razon"],
+         payload["subtotal"], payload["iva_amount"], payload["total"], payload["ambiente"], payload["cae"]))
+    return conn.execute("SELECT MAX(id) FROM facturas").fetchone()[0], True
+
+
+def _al_facturar(base: _Base, **kwargs):
+    return offline.al_facturar_con_outbox(offline.Outbox(nodo=lambda: NODO), base.abrir,
+                                          payload_factura=_payload_factura, **kwargs)
+
+
+def test_la_factura_del_nodo_sube_y_queda_vinculada_a_la_venta(puntas):
+    nodo, central = puntas
+    vid = _vender(nodo, _hooks_de_nodo(), [{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}])
+    factura = _factura_del_nodo(nodo, vid)
+    with nodo.abrir() as conn:
+        venta = ventas.obtener_venta(conn, vid)
+    _al_facturar(nodo)(venta, factura)
+
+    ops = _pendientes(nodo)
+    assert [o.operation_type for o in ops] == ["venta.registrada", "venta.facturada"]
+    facturada = ops[1]
+    assert facturada.aggregate_id == f"nodo-s02:venta:{vid}"
+    assert facturada.payload["venta_id"] == vid and facturada.payload["numero"] == "S02-V-00001"
+    assert facturada.payload["factura"]["cae"] == CAE
+    json.dumps(facturada.payload)
+
+    assert [r.result for r in _subir(central, ops, aplicar_factura=_aplicar_factura)] == ["accepted", "accepted"]
+    with central.abrir() as conn:
+        vid_central = offline.venta_del_central(conn, NODO.node_id, vid)
+        venta_central = ventas.obtener_venta(conn, vid_central)
+        fac = conn.execute("SELECT id, numero, cae FROM facturas").fetchall()
+        assert [(f["numero"], f["cae"]) for f in fac] == [(1, CAE)]
+        assert venta_central["factura_id"] == fac[0]["id"]
+        cobros = conn.execute("SELECT factura_id FROM caja_movimientos WHERE concepto LIKE ?",
+                              ("%S02-V-00001%",)).fetchall()
+        assert [c["factura_id"] for c in cobros] == [fac[0]["id"]], "el cobro queda como cobro de la factura"
+
+        # Reaplicar no duplica la factura ni cambia el vínculo.
+        offline.aplicar_venta_facturada(conn, facturada, aplicar_factura=_aplicar_factura)
+        conn.commit()
+        assert conn.execute("SELECT COUNT(*) FROM facturas").fetchone()[0] == 1
+        assert ventas.obtener_venta(conn, vid_central)["factura_id"] == fac[0]["id"]
+
+
+def test_venta_con_otra_factura_en_el_central_va_a_revision(puntas):
+    nodo, central = puntas
+    vid = _vender(nodo, _hooks_de_nodo(), [{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}])
+    factura = _factura_del_nodo(nodo, vid, numero=3)
+    with nodo.abrir() as conn:
+        venta = ventas.obtener_venta(conn, vid)
+    _al_facturar(nodo)(venta, factura)
+    registrada, facturada = _pendientes(nodo)
+
+    assert [r.result for r in _subir(central, [registrada])] == ["accepted"]
+    with central.abrir() as conn:
+        vid_central = offline.venta_del_central(conn, NODO.node_id, vid)
+    _factura_del_nodo(central, vid_central, numero=99, cae="")  # el central la facturó por su lado
+
+    resultado = _subir(central, [facturada], aplicar_factura=_aplicar_factura)[0]
+    assert resultado.result == "rejected" and "ya tiene la factura" in resultado.error
+
+
+def test_la_factura_de_una_venta_que_no_subio_se_rechaza(puntas):
+    nodo, central = puntas
+    vid = _vender(nodo, _hooks_de_nodo(), [{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}])
+    factura = _factura_del_nodo(nodo, vid)
+    with nodo.abrir() as conn:
+        venta = ventas.obtener_venta(conn, vid)
+    _al_facturar(nodo)(venta, factura)
+    _registrada, facturada = _pendientes(nodo)
+    resultado = _subir(central, [facturada], aplicar_factura=_aplicar_factura)[0]
+    assert resultado.result == "rejected" and "no está en el central" in resultado.error
+
+
+def test_al_facturar_fuera_de_un_nodo_no_encola_y_corre_el_del_producto():
+    llamados = []
+
+    def abrir():
+        raise AssertionError("fuera de un nodo no se abre conexión")
+
+    gancho = offline.al_facturar_con_outbox(offline.Outbox(nodo=lambda: None), abrir,
+                                            base=lambda v, f: llamados.append((v["id"], f["id"])))
+    gancho({"id": 1, "numero": "V-00001"}, {"id": 5})
+    assert llamados == [(1, 5)]
+
+
+def test_central_sin_facturas_del_nodo_manda_a_revision(monkeypatch):
+    """Con un libracore sin `facturas_del_nodo` el aplicador levanta `ValueError` (revisión manual, se reintenta al
+    actualizar el motor), no un `ImportError` que el receptor no atrapa."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "libracore.facturas_del_nodo", None)
+    op = replace(_op("n:1"), operation_type="venta.facturada", payload={"venta_id": 1, "numero": "S02-V-00001",
+                                                                        "factura": {"version": 1}})
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE sales (id INTEGER PRIMARY KEY, source_type TEXT, source_id INTEGER)")
+    conn.execute("INSERT INTO sales VALUES (1, 'libraedge:n', 1)")
+    with pytest.raises(ValueError, match="facturas_del_nodo"):
+        offline.aplicar_venta_facturada(conn, op)
+    with pytest.raises(RuntimeError, match="facturas_del_nodo"):
+        offline.payload_venta_facturada({"id": 1, "numero": "X"}, {"id": 1})

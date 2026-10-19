@@ -2201,3 +2201,22 @@ Todas las corridas sin error dejaron la base idéntica a la esperada (mismas tab
 - **El cobro de un pedido de RestoLibra** (`cobrar_pedido`) no pasa por `registrar_venta`: hasta que migre (E5) no llama a `al_registrar_venta`.
 
 **Cómo se adopta** (el próximo tag, v0.67.0: menor, ganchos y módulo nuevos, sin migración). En el producto: `GANCHOS = con_outbox(GANCHOS_DEL_PRODUCTO, Outbox(nodo=..., en_linea=en_linea_segun_estado(ruta), extra_de_venta=...))`, el mismo en el nodo y en el central; en el central, `create_sync_router(abrir, despachador=registrar_en(Despachador(), GANCHOS))`, sumando al mismo despachador los tipos propios del producto. RestoLibra, al migrar, deja de encolar `pedido.cobrado` desde `al_confirmar_venta` (sino la venta sube dos veces) y manda el pedido en `extra`.
+
+## ADR-068 — `venta.facturada`: la factura que emite un nodo offline sube al central y se vincula a su venta (2026-10-19)
+
+**Problema.** Fase 1 de LibraEdge, pieza E4b. El humano decidió que el nodo factura cuando tiene internet, con el ticket de ARCA que le presta el central (ADR-074 de libracore, libracore #418; ADR-009 de libraedge). La factura nace en la base del nodo con su número y CAE, y ADR-067 dejaba anotado que no subía: el central quedaba con la venta y sin la factura (libro IVA, cobros, reportes) y una anulación posterior en el central no sabía que hacía falta la nota de crédito.
+
+**Qué ya existía.** En libracore #418: `PuertoDeVentas.al_facturar(venta, factura)` (corre después de vincular la factura, **fuera** de la transacción de la venta; un error se registra y no se propaga), `facturas_del_nodo.payload_factura(factura)` (la factura en JSON, con `version`) y `aplicar_factura_del_nodo(payload, conn=)` (la escribe en el central con el mismo número y CAE, idempotente por la clave ante ARCA, `FacturaEnConflicto` si choca). En este motor: `con_outbox`, `encolar`, los aplicadores de ADR-067, `vincular_factura` y `vincular_cobros_de_venta`.
+
+**Decisión.**
+- **Quinta operación, `venta.facturada`** (mismo agregado que la venta, `schema_version = 1`), con `{"venta_id", "numero", "factura": payload_factura(factura)}`.
+- **Se encola con `al_facturar_con_outbox(outbox, abrir_conexion, base=None)`**, que el producto pone en `PuertoDeVentas.al_facturar`. Como ese gancho corre fuera de la transacción de la venta, el encolado abre su conexión y confirma. Fuera de un nodo sólo corre `base`.
+- **Aplicador `aplicar_venta_facturada`**: escribe la factura con `aplicar_factura_del_nodo` (inyectable: `registrar_en(..., aplicar_factura=)`), la vincula a la venta del central y marca los cobros de caja que creó `venta.registrada` como cobro de esa factura. Idempotente: si la venta ya tiene esa factura no cambia nada. Si tiene **otra**, `VentaConOtraFactura` (revisión manual); sin la venta, `VentaNoSincronizada`.
+- **libracore se importa recién al usarlo**: este motor pide `libracore>=1.182` y `facturas_del_nodo` todavía no está en un tag. Sin ella, encolar levanta `RuntimeError` y aplicar levanta `ValueError` (revisión manual, se reintenta con `libraedge-central revision reintentar` cuando el central tenga el motor al día).
+- **`en_linea_segun_estado` se queda acá**: la de `libracore.nodo_offline` hace lo mismo y es la que tiene que quedar, pero no está en un tag. Pasa a importarse de libracore (y se sube el piso de `libracore`) cuando se corte el tag de #418.
+
+**Tests.** `tests/test_erp_offline.py`, en las tres combinaciones de motores, con dobles de `payload_factura` y `aplicar_factura_del_nodo`: la factura sube, queda vinculada con sus cobros y reaplicar no duplica; venta con otra factura en el central y factura de una venta que no subió, a revisión; fuera de un nodo no encola; sin `facturas_del_nodo`, revisión manual en vez de `ImportError`. Verificado además a mano contra libracore #418 instalado (sin dobles), en las tres combinaciones.
+
+**No cubre.** Si `al_facturar` falla en el nodo (la base del nodo caída justo ahí), libracore lo registra y no reintenta: la factura queda en el nodo y no sube. Notas de crédito y débito emitidas en el nodo: no hay operación todavía.
+
+**Cómo se adopta.** En el nodo: `PuertoDeVentas(..., al_facturar=al_facturar_con_outbox(OUTBOX, get_connection), numerar_comprobante=numerador_con_ta(cliente_de_ticket.para_numerador(sin_conexion=SinConexion)))`. En el central: nada nuevo si ya usa `registrar_en` (registra los cinco tipos). Requiere libracore con ADR-074 en las dos puntas.
