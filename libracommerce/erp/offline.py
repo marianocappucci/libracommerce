@@ -71,6 +71,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from ..hora import ahora_utc
 from .hooks import SIN_GANCHOS, Hooks, RequiereConexion
 
 TIPO_VENTA_REGISTRADA = "venta.registrada"
@@ -153,7 +154,7 @@ def en_linea_segun_estado(ruta: str, vigencia: timedelta = timedelta(minutes=5))
             return False
         if ultima.tzinfo is None:
             ultima = ultima.replace(tzinfo=UTC)
-        return datetime.now(UTC) - ultima <= vigencia
+        return ahora_utc() - ultima <= vigencia
 
     return en_linea
 
@@ -197,7 +198,7 @@ def _fecha(valor) -> str | None:
 
 
 def _ahora_utc() -> str:
-    return datetime.now(UTC).isoformat()
+    return ahora_utc().isoformat()
 
 
 def armar_operacion(nodo: NodoLocal, secuencia: int, tipo: str, venta_id: int, payload: dict, *,
