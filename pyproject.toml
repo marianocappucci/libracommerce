@@ -45,7 +45,8 @@ migrations = [
     # >=1.148: `erp/ventas`, `erp/reportes` y `erp/margen` importan `libracore.fechas` (ADR-037 del motor).
     # >=1.168 (ADR-062, ADR-053 del motor): `init_schema()` contra PostgreSQL toma `libracore.candados.esperar_candado_de_transaccion`.
     # >=1.182 (ADR-065, ADR-070 del motor): `libracommerce.hora` toma el reloj de `libracore.fechas` (un solo «hoy» y «ahora» de Argentina).
-    "libracore[migrations]>=1.182,<2",
+    # >=1.186 (ADR-068, ADR-074 del motor): `erp.offline.en_linea_segun_estado` es la de `libracore.nodo_offline`.
+    "libracore[migrations]>=1.186,<2",
 ]
 erp = [
     # >=1.87: `libracore.db.logs` con partes componibles y `libracore.reportes`
@@ -57,7 +58,8 @@ erp = [
     # fiada y el cobro a cuenta al libro de clientes del motor (`libro_de_clientes`).
     # >=1.168 (ADR-062, ADR-053 del motor): las tablas de cruce y `repuntar_fk_ventas_pagos` toman `esperar_candado_de_transaccion`.
     # >=1.182 (ADR-065, ADR-070 del motor): `libracommerce.hora` toma el reloj de `libracore.fechas` (un solo «hoy» y «ahora» de Argentina).
-    "libracore>=1.182,<2",
+    # >=1.186 (ADR-068, ADR-074 del motor): `erp.offline.en_linea_segun_estado` es la de `libracore.nodo_offline`.
+    "libracore>=1.186,<2",
 ]
 web = [
     "fastapi>=0.115,<1",
@@ -155,7 +157,8 @@ dev = [
     # v1.183.0 -> v1.184.0 (2026-10-18): los cobros de MercadoPago con el CUIT de quien factura nacen ignorados y no se auto-facturan (ADR-072); `admin.services.clientes_dir()` publica. Sin migracion.
     # v1.184.0 -> v1.184.1 (2026-10-18): tokens por instancia, `${VAR:?mensaje}` se lee del .env (corrige ADR-071). Sin migracion.
     # v1.184.1 -> v1.185.0 (2026-10-18): la nota de debito de una factura a cuenta corriente hereda la cuenta: asienta su debito y se paga con recibo (ADR-073). Sin migracion.
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.185.0",
+    # v1.185.0 -> v1.186.0 (2026-10-19): facturar en el nodo de LibraEdge con ticket prestado por el central y bandeja al volver (ADR-074). Sin migracion.
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.186.0",
     # SOLO PARA TESTS, como libracore: `tests/test_auditoria_formato_libraauth.py` compara
     # las filas de `RepositorioAuditado` con las de `libraauth.auditoria.registrador_dbapi`
     # (ADR-050). En runtime este motor no importa libraauth: el registrador lo pasa el producto.

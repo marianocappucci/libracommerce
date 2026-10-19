@@ -62,8 +62,8 @@ que escribe el proceso del nodo (`libraedge-nodo`) en su archivo de estado: `en_
 `EstadoNodo.en_linea` y exige que la última sincronización buena sea reciente. Sin archivo, o viejo, es «sin
 conexión»: ante la duda, no se anula.
 
-🔧 **Pendiente (ADR-068):** `en_linea_segun_estado` pasa a importar la de `libracore.nodo_offline` (ADR-074 del motor,
-libracore #418) cuando esa esté en un tag de libracore; hoy no lo está y se queda la de acá, que hace lo mismo.
+✅ **Cerrado (ADR-068):** `en_linea_segun_estado` es la de `libracore.nodo_offline` (ADR-074 del motor, libracore
+v1.186.0), re-exportada acá.
 
 ## La factura del nodo (ADR-068)
 
@@ -161,28 +161,9 @@ def nodo_desde_entorno(variable_nodo: str, variable_prefijo: str) -> Callable[[]
     return nodo
 
 
-def en_linea_segun_estado(ruta: str, vigencia: timedelta = timedelta(minutes=5)) -> Callable[[], bool]:
-    """Un `Outbox.en_linea` que mira el archivo de estado del proceso del nodo (`libraedge.nodo.escribir_estado`).
-
-    En línea es: el último ciclo sincronizó (`en_linea`) **y** la última sincronización buena fue hace menos de
-    `vigencia`. Lo segundo cubre el proceso del nodo caído: su archivo se queda diciendo `en_linea: true` para
-    siempre. Sin archivo, ilegible o sin fecha, `False`."""
-
-    def en_linea() -> bool:
-        from libraedge.nodo import leer_estado
-
-        estado = leer_estado(ruta)
-        if estado is None or not estado.en_linea or not estado.ultima_sincronizacion_ok:
-            return False
-        try:
-            ultima = datetime.fromisoformat(estado.ultima_sincronizacion_ok)
-        except ValueError:
-            return False
-        if ultima.tzinfo is None:
-            ultima = ultima.replace(tzinfo=UTC)
-        return ahora_utc() - ultima <= vigencia
-
-    return en_linea
+# Una sola definición en el motor (libracore v1.186.0, ADR-074): libracommerce la re-exporta para los productos que
+# ya la importan de acá. Cerrado el pendiente del ADR-068.
+from libracore.nodo_offline import en_linea_segun_estado  # noqa: E402
 
 
 def _sin_conexion() -> bool:
