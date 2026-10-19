@@ -165,8 +165,10 @@ dev = [
 # libraedge por TAG, no por rama (2026-10-19, ADR-067): hasta hoy el extra seguia `@develop`, o sea lo que hubiera ahi
 # en el momento del build. v0.7.0 (ADR-007 de libraedge): el `Despachador` por (operation_type, schema_version),
 # donde `erp.offline.registrar_en` anota los cuatro tipos de venta; un tipo sin manejador va a revision manual.
-offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@v0.7.0"]
-offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@v0.7.0"]
+# v0.7.0 -> v0.9.0 (2026-10-19, ADR-068): aprovisionamiento generico (ADR-008) y el ticket de ARCA prestado por el
+# central (ADR-009, `libraedge.sync.ticket`) con el que el nodo factura; `venta.facturada` es el quinto tipo.
+offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@v0.9.0"]
+offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@v0.9.0"]
 
 [project.scripts]
 # `migrations/` vive ADENTRO de `libracommerce/` para entrar en el wheel: un

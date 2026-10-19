@@ -5,7 +5,7 @@ de la capa ERP —la misma para RestoLibra, VentaLibra y ContaLibra, que venden 
 vuelta en el central. Lo de cada producto entra por costuras (`Outbox.extra_de_venta`, `al_materializar`), nunca por
 `if producto`.
 
-## Las cuatro operaciones
+## Las cinco operaciones
 
 Todas con `aggregate_type = "venta"` y `aggregate_id = "<node_id>:venta:<id local>"`: el `node_id` adentro hace que dos
 nodos con el mismo id local no se pisen. `schema_version = 1`.
@@ -16,6 +16,7 @@ nodos con el mismo id local no se pisen. `schema_version = 1`.
 | `venta.pago_acreditado` | `al_acreditar_pago`: lo que `acreditar_pago_qr` acaba de acreditar | `acreditar_pago_qr` sobre la venta del central |
 | `venta.anulada` | `al_anular_venta` | `anular_venta` sobre la venta del central |
 | `venta.devolucion` | `al_devolver_items` | `devolver_items` sobre la venta del central, con una `clave_operacion` del nodo |
+| `venta.facturada` | `al_facturar_con_outbox`: el `PuertoDeVentas.al_facturar` de libracore, cuando el nodo factura | escribe la factura con el mismo número y CAE y la vincula a la venta (ADR-068) |
 
 🔑 **No hay `venta.cobrada`, y es a propósito (decisión 5 del humano).** Una venta que nace cobrada es una
 `venta.registrada` con `estado = "cobrada"`; una que nace parcial sube igual, y la completa `venta.pago_acreditado`
@@ -40,6 +41,8 @@ Los ganchos reciben la conexión de la venta, y el encolado usa `next_sequence(c
 - `venta.pago_acreditado`, por la condición: `acreditar_pago_qr` sólo toca lo `pendiente`.
 - `venta.anulada`: `anular_venta` devuelve `False` si ya estaba anulada.
 - `venta.devolucion`: la `clave_operacion` sale del `operation_id`, y `devolver_items` contesta `repetida` sin escribir.
+- `venta.facturada`: la factura, por su clave ante ARCA (`libracore.facturas_del_nodo.aplicar_factura_del_nodo`); el
+  vínculo, porque si la venta ya tiene esa factura no hace nada. Si tiene **otra**, `VentaConOtraFactura`.
 
 Una operación de una venta que el central no tiene (su `venta.registrada` quedó en revisión manual) levanta
 `ValueError`: queda en revisión manual detrás de ella, en vez de aplicarse sobre nada.
@@ -58,6 +61,24 @@ facturado dejaría al central con una factura vigente de una venta anulada. `con
 que escribe el proceso del nodo (`libraedge-nodo`) en su archivo de estado: `en_linea_segun_estado(ruta)` lee
 `EstadoNodo.en_linea` y exige que la última sincronización buena sea reciente. Sin archivo, o viejo, es «sin
 conexión»: ante la duda, no se anula.
+
+🔧 **Pendiente (ADR-068):** `en_linea_segun_estado` pasa a importar la de `libracore.nodo_offline` (ADR-074 del motor,
+libracore #418) cuando esa esté en un tag de libracore; hoy no lo está y se queda la de acá, que hace lo mismo.
+
+## La factura del nodo (ADR-068)
+
+El nodo factura con internet con el ticket de ARCA que le presta el central (ADR-074 del motor, ADR-009 de
+libraedge). La factura nace en la base del nodo con su número y CAE; `venta.facturada` la sube. Lo encola
+`al_facturar_con_outbox(outbox, abrir_conexion)`, que va en `PuertoDeVentas.al_facturar`: ese gancho corre **después**
+de vincular la factura, fuera de la transacción de la venta, así que el encolado abre su propia conexión y confirma.
+El payload de la factura es el de `libracore.facturas_del_nodo.payload_factura` (libracore >= ADR-074; se importa
+recién al usarlo).
+
+Si `al_facturar` falla (libracore lo registra y no lo reintenta), la factura quedaría en el nodo para siempre.
+`reconciliar_ventas_facturadas` lo recupera: busca las ventas del nodo con factura con CAE, ya subidas
+(`venta.registrada` en el outbox) y sin `venta.facturada`, y la encola. Corre al arrancar el producto y en cada vuelta
+de la facturación al volver (`reconciliador(outbox, abrir_conexion)`). Un duplicado por carrera (dos workers, o la
+reconciliación cruzada con `al_facturar`) no rompe nada: el aplicador del central es idempotente.
 """
 
 from __future__ import annotations
@@ -78,7 +99,8 @@ TIPO_VENTA_REGISTRADA = "venta.registrada"
 TIPO_PAGO_ACREDITADO = "venta.pago_acreditado"
 TIPO_VENTA_ANULADA = "venta.anulada"
 TIPO_VENTA_DEVOLUCION = "venta.devolucion"
-TIPOS = (TIPO_VENTA_REGISTRADA, TIPO_PAGO_ACREDITADO, TIPO_VENTA_ANULADA, TIPO_VENTA_DEVOLUCION)
+TIPO_VENTA_FACTURADA = "venta.facturada"
+TIPOS = (TIPO_VENTA_REGISTRADA, TIPO_PAGO_ACREDITADO, TIPO_VENTA_ANULADA, TIPO_VENTA_DEVOLUCION, TIPO_VENTA_FACTURADA)
 
 #: Versión del contrato de los payloads. Si cambia la forma, sube: el central rechaza lo que no entiende en vez de
 #: materializar algo a medias.
@@ -97,6 +119,10 @@ class ColisionDeNumero(ValueError):
 
 class VentaNoSincronizada(ValueError):
     """Una operación sobre una venta que el central todavía no tiene (su `venta.registrada` no se aplicó)."""
+
+
+class VentaConOtraFactura(ValueError):
+    """La venta del central ya está vinculada a una factura distinta de la que emitió el nodo. Revisión manual."""
 
 
 # ── El nodo ────────────────────────────────────────────────────────────────
@@ -307,6 +333,24 @@ def payload_venta_devolucion(venta: Mapping[str, Any], devolucion: Mapping[str, 
 
 # ── Lectura en el nodo ─────────────────────────────────────────────────────
 
+def _payload_factura_de_libracore(factura: Mapping[str, Any]) -> dict:
+    try:
+        from libracore.facturas_del_nodo import payload_factura
+    except ImportError as exc:
+        raise RuntimeError(
+            "venta.facturada necesita libracore con facturas_del_nodo (ADR-074 del motor)") from exc
+    return payload_factura(dict(factura))
+
+
+def payload_venta_facturada(venta: Mapping[str, Any], factura: Mapping[str, Any], *,
+                            payload_factura: Callable[[Mapping[str, Any]], dict] | None = None) -> dict:
+    """`{"venta_id", "numero", "factura"}`: la venta local por su id y número, y la factura como la arma
+    `libracore.facturas_del_nodo.payload_factura` (número, CAE, ítems, importes, ambiente, emisor, `id_en_el_nodo`,
+    `version`). `payload_factura` reemplaza esa función (tests, o un producto con su propia factura)."""
+    armar = payload_factura or _payload_factura_de_libracore
+    return {"venta_id": venta["id"], "numero": venta["numero"], "factura": armar(factura)}
+
+
 _SQL_LINEAS = (
     "SELECT id, item_id, variant_id, description_snapshot, quantity, unit_price, unit_cost_snapshot "
     "FROM sale_items WHERE sale_id=? ORDER BY id"
@@ -381,6 +425,107 @@ def encolar_venta_devolucion(conn, nodo: NodoLocal, venta: Mapping[str, Any], de
     ids = [li["id"] for li in _lineas(conn, venta["id"])]
     return encolar(conn, nodo, TIPO_VENTA_DEVOLUCION, venta["id"],
                    payload_venta_devolucion(venta, devolucion, ids_de_lineas=ids))
+
+
+def encolar_venta_facturada(conn, nodo: NodoLocal, venta: Mapping[str, Any], factura: Mapping[str, Any], *,
+                            payload_factura: Callable[[Mapping[str, Any]], dict] | None = None):
+    return encolar(conn, nodo, TIPO_VENTA_FACTURADA, venta["id"],
+                   payload_venta_facturada(venta, factura, payload_factura=payload_factura))
+
+
+def _agregado(nodo: NodoLocal, venta_id) -> str:
+    return f"{nodo.node_id}:venta:{venta_id}"
+
+
+def _agregados_en_el_outbox(conn, nodo: NodoLocal, tipo: str) -> set[str]:
+    """Los `aggregate_id` de las operaciones `tipo` de este nodo en el outbox, en cualquier estado (pendiente,
+    enviada, confirmada o en revisión): lo que ya se encoló una vez no se vuelve a encolar."""
+    return {f[0] for f in conn.execute(
+        "SELECT aggregate_id FROM sync_outbox WHERE node_id=? AND operation_type=?", (nodo.node_id, tipo),
+    ).fetchall()}
+
+
+def _factura_ya_encolada(conn, nodo: NodoLocal, venta_id) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sync_outbox WHERE node_id=? AND operation_type=? AND aggregate_id=?",
+        (nodo.node_id, TIPO_VENTA_FACTURADA, _agregado(nodo, venta_id)),
+    ).fetchone() is not None
+
+
+def reconciliar_ventas_facturadas(conn, outbox: Outbox, *,
+                                  payload_factura: Callable[[Mapping[str, Any]], dict] | None = None) -> list[int]:
+    """Encola `venta.facturada` para cada venta del nodo con factura **con CAE** que ya subió (`venta.registrada`
+    en el outbox) y todavía no tiene su `venta.facturada` (en ningún estado). Devuelve los ids de las ventas
+    encoladas. Idempotente: una segunda pasada no encuentra nada.
+
+    Encola en la transacción de `conn` (no confirma). Una venta que nunca subió no se toca: su factura sin la venta
+    iría a revisión manual en el central. Una factura sin CAE tampoco: todavía no es un comprobante. Fuera de un nodo
+    no hace nada."""
+    nodo = outbox.nodo()
+    if nodo is None:
+        return []
+    from .ventas import obtener_venta
+
+    subidas = _agregados_en_el_outbox(conn, nodo, TIPO_VENTA_REGISTRADA)
+    facturadas = _agregados_en_el_outbox(conn, nodo, TIPO_VENTA_FACTURADA)
+    filas = conn.execute(
+        "SELECT vl.venta_id, vl.factura_id FROM venta_links vl JOIN facturas f ON f.id = vl.factura_id"
+        " WHERE vl.factura_id IS NOT NULL AND f.cae IS NOT NULL AND f.cae <> '' ORDER BY vl.venta_id"
+    ).fetchall()
+    encoladas = []
+    for venta_id, factura_id in ((f[0], f[1]) for f in filas):
+        agregado = _agregado(nodo, venta_id)
+        if agregado not in subidas or agregado in facturadas:
+            continue
+        venta = obtener_venta(conn, venta_id)
+        factura = conn.execute("SELECT * FROM facturas WHERE id=?", (factura_id,)).fetchone()
+        if venta is None or factura is None:
+            continue
+        encolar_venta_facturada(conn, nodo, venta, dict(factura), payload_factura=payload_factura)
+        facturadas.add(agregado)
+        encoladas.append(venta_id)
+    return encoladas
+
+
+def reconciliador(outbox: Outbox, abrir_conexion: Callable[[], Any], *,
+                  payload_factura: Callable[[Mapping[str, Any]], dict] | None = None) -> Callable[[], list[int]]:
+    """`reconciliar_ventas_facturadas` en su propia transacción, para llamar sin argumentos: al arrancar el producto
+    y en cada vuelta de la facturación al volver. Fuera de un nodo no abre conexión."""
+
+    def reconciliar() -> list[int]:
+        if outbox.nodo() is None:
+            return []
+        with abrir_conexion() as conn:
+            encoladas = reconciliar_ventas_facturadas(conn, outbox, payload_factura=payload_factura)
+            conn.commit()
+        return encoladas
+
+    return reconciliar
+
+
+def al_facturar_con_outbox(outbox: Outbox, abrir_conexion: Callable[[], Any], *,
+                           base: Callable[[dict, dict], None] | None = None,
+                           payload_factura: Callable[[Mapping[str, Any]], dict] | None = None,
+                           ) -> Callable[[dict, dict], None]:
+    """El `PuertoDeVentas.al_facturar(venta, factura)` de libracore con `venta.facturada` encolada (ADR-068).
+
+    Corre `base` (lo que el producto ya hacía al facturar) y, en un nodo, encola la factura **en una transacción
+    propia**: libracore llama a este gancho después de vincular la factura, fuera de la transacción de la venta.
+    `abrir_conexion()` devuelve un context manager de conexión (`libracore.db.core.get_connection`). Fuera de un nodo
+    no encola nada. Un error acá lo registra libracore y no se propaga (la factura ya tiene su CAE)."""
+
+    def al_facturar(venta: dict, factura: dict) -> None:
+        if base is not None:
+            base(venta, factura)
+        nodo = outbox.nodo()
+        if nodo is None:
+            return
+        with abrir_conexion() as conn:
+            if not _factura_ya_encolada(conn, nodo, venta["id"]):
+                encolar_venta_facturada(conn, nodo, venta, factura, payload_factura=payload_factura)
+            conn.commit()
+
+    return al_facturar
 
 
 # ── Composición de ganchos ─────────────────────────────────────────────────
@@ -630,33 +775,81 @@ def aplicar_venta_devolucion(conn, operacion, *, hooks: Hooks = SIN_GANCHOS) -> 
         )
 
 
+def _aplicar_factura_de_libracore(payload: dict, *, conn) -> tuple[int, bool]:
+    try:
+        from libracore.facturas_del_nodo import aplicar_factura_del_nodo
+    except ImportError as exc:
+        # Un `ValueError`: va a revisión manual y se reintenta cuando el central tenga el motor al día.
+        raise ValueError(
+            "el central no puede aplicar venta.facturada: falta libracore con facturas_del_nodo (ADR-074 del motor)"
+        ) from exc
+    return aplicar_factura_del_nodo(payload, conn=conn)
+
+
+AplicarFactura = Callable[..., tuple[int, bool]]
+
+
+def aplicar_venta_facturada(conn, operacion, *, aplicar_factura: AplicarFactura | None = None) -> None:
+    """Escribe en el central la factura que emitió el nodo y la vincula a la venta que subió (ADR-068).
+
+    La factura la escribe `aplicar_factura(payload, conn=conn) -> (factura_id, creada)`, por defecto
+    `libracore.facturas_del_nodo.aplicar_factura_del_nodo`: con el mismo número y CAE, idempotente por la clave ante
+    ARCA (`FacturaEnConflicto`, un `ValueError`, si el central tiene ese número con otro total u otro CAE). Después
+    `vincular_factura` y `vincular_cobros_de_venta` (los movimientos de caja que creó `venta.registrada`).
+    Idempotente: si la venta ya tiene esa factura, sólo se reasegura el vínculo de los cobros (no toca lo ya
+    vinculado). Si tiene **otra**, `VentaConOtraFactura`. Sin la venta, `VentaNoSincronizada`."""
+    _verificar(operacion, TIPO_VENTA_FACTURADA)
+    from .ventas import obtener_venta, vincular_cobros_de_venta, vincular_factura
+
+    datos = operacion.payload
+    if not isinstance(datos.get("factura"), dict):
+        raise ValueError(f"venta.facturada sin factura (venta {datos.get('numero')!r} del nodo {operacion.node_id})")
+    vid = _venta_existente(conn, operacion)
+    factura_id, _creada = (aplicar_factura or _aplicar_factura_de_libracore)(datos["factura"], conn=conn)
+    venta = obtener_venta(conn, vid)
+    actual = venta.get("factura_id")
+    if actual and int(actual) != int(factura_id):
+        raise VentaConOtraFactura(
+            f"la venta {venta['numero']} del central ya tiene la factura {actual} y el nodo {operacion.node_id} la "
+            f"facturó con otra ({factura_id})"
+        )
+    if not actual:
+        vincular_factura(conn, vid, factura_id)
+    vincular_cobros_de_venta(conn, venta["numero"], factura_id)
+
+
 Aplicador = Callable[[Any, Any], None]
 
 
 def aplicadores(hooks: Hooks = SIN_GANCHOS, *,
-                al_materializar: Callable[[Any, int, Any], None] | None = None) -> dict[str, Aplicador]:
+                al_materializar: Callable[[Any, int, Any], None] | None = None,
+                aplicar_factura: AplicarFactura | None = None) -> dict[str, Aplicador]:
     """`{operation_type: (conn, operacion) -> None}`, para registrar en el despachador de LibraEdge (uno por tipo) o
     juntar con `despachar` en un solo `operation_handler`. `hooks` son los del central (`cliente_cc_de` para la
-    cuenta corriente, y lo que el producto haga al nacer o anularse una venta)."""
+    cuenta corriente, y lo que el producto haga al nacer o anularse una venta). `aplicar_factura` reemplaza
+    `libracore.facturas_del_nodo.aplicar_factura_del_nodo` en `venta.facturada`."""
     return {
         TIPO_VENTA_REGISTRADA: lambda conn, op: aplicar_venta_registrada(
             conn, op, hooks=hooks, al_materializar=al_materializar),
         TIPO_PAGO_ACREDITADO: lambda conn, op: aplicar_pago_acreditado(conn, op, hooks=hooks),
         TIPO_VENTA_ANULADA: lambda conn, op: aplicar_venta_anulada(conn, op, hooks=hooks),
         TIPO_VENTA_DEVOLUCION: lambda conn, op: aplicar_venta_devolucion(conn, op, hooks=hooks),
+        TIPO_VENTA_FACTURADA: lambda conn, op: aplicar_venta_facturada(conn, op, aplicar_factura=aplicar_factura),
     }
 
 
 def registrar_en(despachador, hooks: Hooks = SIN_GANCHOS, *,
-                 al_materializar: Callable[[Any, int, Any], None] | None = None):
-    """Registra los cuatro tipos de venta, en `SCHEMA_VERSION`, en un `libraedge.sync.despacho.Despachador` (v0.7.0,
+                 al_materializar: Callable[[Any, int, Any], None] | None = None,
+                 aplicar_factura: AplicarFactura | None = None):
+    """Registra los cinco tipos de venta, en `SCHEMA_VERSION`, en un `libraedge.sync.despacho.Despachador` (v0.7.0,
     ADR-007 de libraedge) y lo devuelve. Un producto suma los suyos al mismo despachador; registrar dos veces un tipo
     falla al arrancar (es la regla del `Despachador`)::
 
         despachador = registrar_en(Despachador(), GANCHOS)
         router = create_sync_router(get_connection, despachador=despachador)
     """
-    for tipo, aplicador in aplicadores(hooks, al_materializar=al_materializar).items():
+    for tipo, aplicador in aplicadores(hooks, al_materializar=al_materializar,
+                                       aplicar_factura=aplicar_factura).items():
         despachador.registrar(tipo, SCHEMA_VERSION, aplicador)
     return despachador
 
