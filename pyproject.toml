@@ -173,8 +173,9 @@ dev = [
 # v0.7.0 -> v0.9.0 (2026-10-19, ADR-068): aprovisionamiento generico (ADR-008) y el ticket de ARCA prestado por el
 # central (ADR-009, `libraedge.sync.ticket`) con el que el nodo factura; `venta.facturada` es el quinto tipo.
 # v0.9.0 -> v0.10.0 (2026-10-19): instalador del nodo por producto (E7, ADR-010) y `nodo registrar --carga`. Sin migracion.
-offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@v0.10.0"]
-offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@v0.10.0"]
+# v0.10.0 -> v0.11.0 (2026-10-19): pantalla «Sucursal sin internet» del central (ADR-011). Sin migracion.
+offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@v0.11.0"]
+offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@v0.11.0"]
 
 [project.scripts]
 # `migrations/` vive ADENTRO de `libracommerce/` para entrar en el wheel: un
