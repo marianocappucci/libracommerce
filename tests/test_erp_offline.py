@@ -624,3 +624,59 @@ def test_central_sin_facturas_del_nodo_manda_a_revision(monkeypatch):
         offline.aplicar_venta_facturada(conn, op)
     with pytest.raises(RuntimeError, match="facturas_del_nodo"):
         offline.payload_venta_facturada({"id": 1, "numero": "X"}, {"id": 1})
+
+
+def test_fallo_al_facturar_y_la_reconciliacion_la_encola_una_sola_vez(puntas):
+    nodo, central = puntas
+    outbox = offline.Outbox(nodo=lambda: NODO)
+    vid = _vender(nodo, _hooks_de_nodo(), [{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}])
+    factura = _factura_del_nodo(nodo, vid)
+    with nodo.abrir() as conn:
+        venta = ventas.obtener_venta(conn, vid)
+
+    def roto(factura):
+        raise RuntimeError("la base del nodo se cayó justo acá")
+
+    with pytest.raises(RuntimeError):  # libracore lo registraría y seguiría: la factura no subió
+        offline.al_facturar_con_outbox(outbox, nodo.abrir, payload_factura=roto)(venta, factura)
+    assert [o.operation_type for o in _pendientes(nodo)] == ["venta.registrada"]
+
+    reconciliar = offline.reconciliador(outbox, nodo.abrir, payload_factura=_payload_factura)
+    assert reconciliar() == [vid]
+    assert reconciliar() == [], "la segunda pasada no encuentra nada"
+    # Y un al_facturar tardío tampoco la duplica.
+    _al_facturar(nodo)(venta, factura)
+    ops = _pendientes(nodo)
+    assert [o.operation_type for o in ops] == ["venta.registrada", "venta.facturada"]
+    assert ops[1].payload["factura"]["cae"] == CAE
+
+    assert [r.result for r in _subir(central, ops, aplicar_factura=_aplicar_factura)] == ["accepted", "accepted"]
+    with central.abrir() as conn:
+        assert ventas.obtener_venta(conn, offline.venta_del_central(conn, NODO.node_id, vid))["factura_id"]
+
+    # Ya enviada (confirmada en el outbox), tampoco se vuelve a encolar.
+    with nodo.abrir() as conn:
+        conn.execute("UPDATE sync_outbox SET status='acknowledged'")
+        conn.commit()
+    assert reconciliar() == []
+
+
+def test_la_reconciliacion_no_toca_lo_que_no_corresponde(puntas):
+    nodo, _central = puntas
+    outbox = offline.Outbox(nodo=lambda: NODO)
+    pagos = [{"medio": "efectivo", "monto": 200.0, "estado": "aprobado"}]
+    sin_cae = _vender(nodo, _hooks_de_nodo(), pagos)
+    _factura_del_nodo(nodo, sin_cae, numero=1, cae="")
+    no_subio = _vender(nodo, SIN_GANCHOS, pagos)  # nació antes de que la instancia fuera un nodo
+    _factura_del_nodo(nodo, no_subio, numero=2)
+    _sin_factura = _vender(nodo, _hooks_de_nodo(), pagos)
+
+    assert offline.reconciliador(outbox, nodo.abrir, payload_factura=_payload_factura)() == []
+    assert {o.operation_type for o in _pendientes(nodo)} == {"venta.registrada"}
+
+
+def test_el_reconciliador_fuera_de_un_nodo_no_abre_conexion():
+    def abrir():
+        raise AssertionError("fuera de un nodo no se abre conexión")
+
+    assert offline.reconciliador(offline.Outbox(nodo=lambda: None), abrir)() == []

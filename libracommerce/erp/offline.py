@@ -73,6 +73,12 @@ libraedge). La factura nace en la base del nodo con su número y CAE; `venta.fac
 de vincular la factura, fuera de la transacción de la venta, así que el encolado abre su propia conexión y confirma.
 El payload de la factura es el de `libracore.facturas_del_nodo.payload_factura` (libracore >= ADR-074; se importa
 recién al usarlo).
+
+Si `al_facturar` falla (libracore lo registra y no lo reintenta), la factura quedaría en el nodo para siempre.
+`reconciliar_ventas_facturadas` lo recupera: busca las ventas del nodo con factura con CAE, ya subidas
+(`venta.registrada` en el outbox) y sin `venta.facturada`, y la encola. Corre al arrancar el producto y en cada vuelta
+de la facturación al volver (`reconciliador(outbox, abrir_conexion)`). Un duplicado por carrera (dos workers, o la
+reconciliación cruzada con `al_facturar`) no rompe nada: el aplicador del central es idempotente.
 """
 
 from __future__ import annotations
@@ -427,6 +433,76 @@ def encolar_venta_facturada(conn, nodo: NodoLocal, venta: Mapping[str, Any], fac
                    payload_venta_facturada(venta, factura, payload_factura=payload_factura))
 
 
+def _agregado(nodo: NodoLocal, venta_id) -> str:
+    return f"{nodo.node_id}:venta:{venta_id}"
+
+
+def _agregados_en_el_outbox(conn, nodo: NodoLocal, tipo: str) -> set[str]:
+    """Los `aggregate_id` de las operaciones `tipo` de este nodo en el outbox, en cualquier estado (pendiente,
+    enviada, confirmada o en revisión): lo que ya se encoló una vez no se vuelve a encolar."""
+    return {f[0] for f in conn.execute(
+        "SELECT aggregate_id FROM sync_outbox WHERE node_id=? AND operation_type=?", (nodo.node_id, tipo),
+    ).fetchall()}
+
+
+def _factura_ya_encolada(conn, nodo: NodoLocal, venta_id) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sync_outbox WHERE node_id=? AND operation_type=? AND aggregate_id=?",
+        (nodo.node_id, TIPO_VENTA_FACTURADA, _agregado(nodo, venta_id)),
+    ).fetchone() is not None
+
+
+def reconciliar_ventas_facturadas(conn, outbox: Outbox, *,
+                                  payload_factura: Callable[[Mapping[str, Any]], dict] | None = None) -> list[int]:
+    """Encola `venta.facturada` para cada venta del nodo con factura **con CAE** que ya subió (`venta.registrada`
+    en el outbox) y todavía no tiene su `venta.facturada` (en ningún estado). Devuelve los ids de las ventas
+    encoladas. Idempotente: una segunda pasada no encuentra nada.
+
+    Encola en la transacción de `conn` (no confirma). Una venta que nunca subió no se toca: su factura sin la venta
+    iría a revisión manual en el central. Una factura sin CAE tampoco: todavía no es un comprobante. Fuera de un nodo
+    no hace nada."""
+    nodo = outbox.nodo()
+    if nodo is None:
+        return []
+    from .ventas import obtener_venta
+
+    subidas = _agregados_en_el_outbox(conn, nodo, TIPO_VENTA_REGISTRADA)
+    facturadas = _agregados_en_el_outbox(conn, nodo, TIPO_VENTA_FACTURADA)
+    filas = conn.execute(
+        "SELECT vl.venta_id, vl.factura_id FROM venta_links vl JOIN facturas f ON f.id = vl.factura_id"
+        " WHERE vl.factura_id IS NOT NULL AND f.cae IS NOT NULL AND f.cae <> '' ORDER BY vl.venta_id"
+    ).fetchall()
+    encoladas = []
+    for venta_id, factura_id in ((f[0], f[1]) for f in filas):
+        agregado = _agregado(nodo, venta_id)
+        if agregado not in subidas or agregado in facturadas:
+            continue
+        venta = obtener_venta(conn, venta_id)
+        factura = conn.execute("SELECT * FROM facturas WHERE id=?", (factura_id,)).fetchone()
+        if venta is None or factura is None:
+            continue
+        encolar_venta_facturada(conn, nodo, venta, dict(factura), payload_factura=payload_factura)
+        facturadas.add(agregado)
+        encoladas.append(venta_id)
+    return encoladas
+
+
+def reconciliador(outbox: Outbox, abrir_conexion: Callable[[], Any], *,
+                  payload_factura: Callable[[Mapping[str, Any]], dict] | None = None) -> Callable[[], list[int]]:
+    """`reconciliar_ventas_facturadas` en su propia transacción, para llamar sin argumentos: al arrancar el producto
+    y en cada vuelta de la facturación al volver. Fuera de un nodo no abre conexión."""
+
+    def reconciliar() -> list[int]:
+        if outbox.nodo() is None:
+            return []
+        with abrir_conexion() as conn:
+            encoladas = reconciliar_ventas_facturadas(conn, outbox, payload_factura=payload_factura)
+            conn.commit()
+        return encoladas
+
+    return reconciliar
+
+
 def al_facturar_con_outbox(outbox: Outbox, abrir_conexion: Callable[[], Any], *,
                            base: Callable[[dict, dict], None] | None = None,
                            payload_factura: Callable[[Mapping[str, Any]], dict] | None = None,
@@ -445,7 +521,8 @@ def al_facturar_con_outbox(outbox: Outbox, abrir_conexion: Callable[[], Any], *,
         if nodo is None:
             return
         with abrir_conexion() as conn:
-            encolar_venta_facturada(conn, nodo, venta, factura, payload_factura=payload_factura)
+            if not _factura_ya_encolada(conn, nodo, venta["id"]):
+                encolar_venta_facturada(conn, nodo, venta, factura, payload_factura=payload_factura)
             conn.commit()
 
     return al_facturar
