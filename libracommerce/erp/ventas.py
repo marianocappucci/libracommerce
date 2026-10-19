@@ -65,7 +65,7 @@ from libracommerce.domain.sales import LineaReintegro, reintegro_prorrateado
 from . import claves, lotes
 from .catalogo import DepositoInexistente, sucursal_del_deposito, validar_deposito
 from .claves import ClaveReusada
-from .hooks import SIN_GANCHOS, Hooks
+from .hooks import SIN_GANCHOS, Hooks, RequiereConexion  # noqa: F401 -- `ventas.RequiereConexion`, para el router
 from .stock import add_movimiento_stock, descontar_stock_venta
 
 logger = logging.getLogger(__name__)
@@ -189,7 +189,12 @@ def estado_segun_pagos(total: float, pagos: list[dict]) -> str:
 def siguiente_numero(conn) -> str:
     """`V-00001`, `V-00002`, ... Calculado dentro de la transacción del caller
     (ya con el write-lock tomado) para no chocar con otro cobro concurrente."""
-    row = conn.execute("SELECT number FROM sales ORDER BY id DESC LIMIT 1").fetchone()
+    # ADR-067: en el central, las ventas que subieron de un nodo offline (`source_type = 'libraedge:<nodo>'`, con el
+    # prefijo de su sucursal en el número) no cuentan: sin esto la numeración propia del central saltaría al número del
+    # nodo. Una base sin nodos no tiene ninguna, y la consulta devuelve la misma fila de siempre.
+    row = conn.execute(
+        "SELECT number FROM sales WHERE source_type NOT LIKE ? ORDER BY id DESC LIMIT 1", ("libraedge:%",)
+    ).fetchone()
     if row:
         try:
             n = int(row["number"].split("-")[-1]) + 1
@@ -448,6 +453,10 @@ def registrar_venta(conn, *, fecha: str, items: list, subtotal: float, descuento
     if turno:
         vincular_venta_turno(conn, venta_id, turno["id"])
 
+    # ADR-067: toda venta, en cualquier estado, antes de `al_confirmar_venta`. Con el default (no-op) ni se lee la venta:
+    # para quien no lo engancha no hay ninguna consulta nueva.
+    if hooks.al_registrar_venta is not SIN_GANCHOS.al_registrar_venta:
+        hooks.al_registrar_venta(conn, obtener_venta(conn, venta_id))
     if estado == "cobrada":
         hooks.al_confirmar_venta(conn, obtener_venta(conn, venta_id))
     return venta_id
@@ -1623,7 +1632,13 @@ def devolver_items(conn, vid: int, devoluciones: dict[int, float], deposito_id: 
     status_detail = "devuelta" if devuelto_total >= vendido_total else "devuelta_parcial"
     conn.execute("UPDATE sales SET status_detail=? WHERE id=?", (status_detail, vid))
 
-    return {"importe": importe, "venta": obtener_venta(conn, vid), "repetida": False}
+    despues = obtener_venta(conn, vid)
+    # ADR-067: la devolución recién escrita (un reintento con la misma clave volvió más arriba, sin llegar acá).
+    hooks.al_devolver_items(conn, despues, {
+        "lineas": {int(k): float(v) for k, v in devoluciones.items()}, "deposito_id": deposito_id,
+        "medio_pago": medio_pago, "importe": importe, "clave_operacion": clave_op, "usuario_id": usuario_id,
+    })
+    return {"importe": importe, "venta": despues, "repetida": False}
 
 
 def _lineas_de_la_venta(conn, vid: int) -> dict:
@@ -1820,6 +1835,18 @@ def acreditar_pago_qr(conn, venta_id: int, payment_id: str,
         "UPDATE sales SET status=?, status_detail=? WHERE id=?",
         (_ESTADO_A_STATUS[nuevo], nuevo, venta_id),
     )
+    # ADR-067: los pagos que esta llamada acreditó, para quien los sube (el outbox de un nodo offline). Antes de
+    # `al_confirmar_venta`, mismo orden que en `registrar_venta`: primero el hecho, después la consecuencia.
+    if hooks.al_acreditar_pago is not SIN_GANCHOS.al_acreditar_pago:
+        ids = [p["id"] for p in pendientes]
+        marcadores = ",".join("?" for _ in ids)
+        acreditados = [
+            {**dict(f), "payment_id": payment_id} for f in conn.execute(
+                f"SELECT id, medio, monto, referencia, estado FROM ventas_pagos WHERE id IN ({marcadores}) ORDER BY id",
+                ids,
+            ).fetchall()
+        ]
+        hooks.al_acreditar_pago(conn, obtener_venta(conn, venta_id), acreditados)
     if nuevo == "cobrada":
         hooks.al_confirmar_venta(conn, obtener_venta(conn, venta_id))
     return True

@@ -25,6 +25,10 @@ def test_los_defaults_no_hacen_nada():
     assert SIN_GANCHOS.al_anular_venta("conn", "venta") is None
     assert SIN_GANCHOS.lista_de_precio_para("conn", 3) is None
     assert SIN_GANCHOS.canales == ()
+    # ADR-067: los tres ganchos del nodo offline, también no-op por default.
+    assert SIN_GANCHOS.al_registrar_venta("conn", "venta") is None
+    assert SIN_GANCHOS.al_acreditar_pago("conn", "venta", []) is None
+    assert SIN_GANCHOS.al_devolver_items("conn", "venta", {}) is None
 
 
 def test_un_gancho_enganchado_recibe_la_misma_conexion_y_la_venta():

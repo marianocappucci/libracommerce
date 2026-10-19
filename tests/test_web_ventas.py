@@ -199,6 +199,20 @@ def test_los_ganchos_llegan_desde_las_opciones(abrir_ventas):
     assert eventos == [("confirmada", "V-00001"), ("anulada", "V-00001")]
 
 
+def test_anular_sin_conexion_en_un_nodo_es_409_y_no_anula(abrir_ventas):
+    """ADR-067: el gancho de `erp.offline.con_outbox` rechaza anular una venta facturada en un nodo sin conexión
+    (`RequiereConexion`); el router lo contesta 409 y el rollback deja la venta como estaba."""
+
+    def sin_conexion(conn, venta):
+        raise ventas.RequiereConexion("La venta está facturada y este equipo no tiene conexión con el central")
+
+    client = _app(abrir_ventas, OpcionesVentas(hooks=Hooks(al_anular_venta=sin_conexion)))
+    venta = _venta(client)
+    r = client.post(f"/api/ventas/{venta['id']}/anular")
+    assert r.status_code == 409 and "no tiene conexión" in r.json()["detail"]
+    assert client.get(f"/api/ventas/{venta['id']}").json()["estado"] == "cobrada"
+
+
 def test_conflicto_de_numero_es_409(abrir_ventas, monkeypatch):
     client = _app(abrir_ventas)
     _venta(client)
