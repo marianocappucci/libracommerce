@@ -160,7 +160,8 @@ dev = [
     # v1.185.0 -> v1.186.0 (2026-10-19): facturar en el nodo de LibraEdge con ticket prestado por el central y bandeja al volver (ADR-074). Sin migracion.
     # v1.186.0 -> v1.186.1 (2026-10-19): la bandeja no deja descartar a mano una venta del nodo (completa ADR-074). Sin migracion.
     # v1.186.1 -> v1.186.2 (2026-10-19): el motor se puede importar en Windows (bloqueo de archivo portable, nodo de LibraEdge). Sin migracion.
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.186.2",
+    # v1.186.2 -> v1.187.0 (2026-10-20): estado del sistema para la barra del pie (ADR-075). Sin migracion.
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.187.0",
     # SOLO PARA TESTS, como libracore: `tests/test_auditoria_formato_libraauth.py` compara
     # las filas de `RepositorioAuditado` con las de `libraauth.auditoria.registrador_dbapi`
     # (ADR-050). En runtime este motor no importa libraauth: el registrador lo pasa el producto.
