@@ -689,11 +689,11 @@ requires-dist = [
     { name = "libraauth", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libraauth.git?rev=v0.53.0" },
     { name = "libracore", marker = "extra == 'dev'", specifier = ">=1.125,<2" },
     { name = "libracore", marker = "extra == 'dev'", specifier = ">=1.188,<2" },
-    { name = "libracore", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libracore.git?rev=v1.188.0" },
+    { name = "libracore", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libracore.git?rev=v1.188.1" },
     { name = "libracore", marker = "extra == 'erp'", specifier = ">=1.188,<2" },
     { name = "libracore", marker = "extra == 'web'", specifier = ">=1.125,<2" },
-    { name = "libracore", extras = ["migrations"], marker = "extra == 'dev'", specifier = ">=1.188,<2" },
-    { name = "libracore", extras = ["migrations"], marker = "extra == 'migrations'", specifier = ">=1.188,<2" },
+    { name = "libracore", extras = ["migrations"], marker = "extra == 'dev'", specifier = ">=1.188.1,<2" },
+    { name = "libracore", extras = ["migrations"], marker = "extra == 'migrations'", specifier = ">=1.188.1,<2" },
     { name = "libraedge", marker = "extra == 'offline'", git = "https://github.com/marianocappucci/libraedge.git?rev=v0.17.0" },
     { name = "libraedge", extras = ["server"], marker = "extra == 'offline-server'", git = "https://github.com/marianocappucci/libraedge.git?rev=v0.17.0" },
     { name = "openpyxl", marker = "extra == 'dev'", specifier = ">=3.1,<4" },
@@ -711,8 +711,8 @@ provides-extras = ["dev", "erp", "migrations", "offline", "offline-server", "pla
 
 [[package]]
 name = "libracore"
-version = "1.188.0"
-source = { git = "https://github.com/marianocappucci/libracore.git?rev=v1.188.0#b31835a1d5d0e1156ac440d1bbee91a9d1ee89bc" }
+version = "1.188.1"
+source = { git = "https://github.com/marianocappucci/libracore.git?rev=v1.188.1#275a036769e7b66bb372950182015abe430f5896" }
 dependencies = [
     { name = "cryptography" },
     { name = "fastapi" },

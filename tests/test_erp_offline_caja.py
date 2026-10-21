@@ -565,3 +565,20 @@ def test_un_error_de_caja_es_un_value_error():
     for clase in (offline_caja.TurnoNoSincronizado, offline_caja.MovimientoNoSincronizado,
                   offline_caja.CajaNoSincronizada, offline_caja.CajaRechazadaPorElCentral):
         assert issubclass(clase, ValueError)
+
+
+def test_el_cierre_de_turno_de_erp_ventas_sube_desde_el_nodo(puntas):
+    """`erp.ventas.cerrar_turno` (el de ContaLibra y RestoLibra, que arquea contra las ventas) corre `al_cerrar_turno`
+    con los ganchos (v0.69.1): sin eso el cierre del turno no subía."""
+    from libracommerce.erp import ventas
+
+    nodo, _ = puntas
+    ganchos = _ganchos()
+    tid = _abrir_turno(nodo, ganchos)
+    with nodo.abrir() as conn:
+        assert ventas.cerrar_turno(conn, tid, 50.0, "fin", ganchos=ganchos) is True
+        conn.commit()
+    assert [op.operation_type for op in _pendientes(nodo)] == ["turno.abierto", "turno.cerrado"]
+    with nodo.abrir() as conn:
+        assert ventas.cerrar_turno(conn, 999999, 1.0, ganchos=ganchos) is False
+        conn.rollback()
