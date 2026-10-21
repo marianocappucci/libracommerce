@@ -1887,23 +1887,19 @@ def resumen_turno(conn, tid: int) -> dict:
     }
 
 
-def cerrar_turno(conn, tid: int, monto_declarado: float, notas: str = "") -> bool:
-    """Cierra el turno arqueando contra `resumen_turno`. `False` si no existe."""
-    from libracore.db.core import _ar_now
+def cerrar_turno(conn, tid: int, monto_declarado: float, notas: str = "", *, ganchos=None, cierre: str | None = None,
+                 monto_esperado: float | None = None) -> bool:
+    """Cierra el turno arqueando contra `resumen_turno`. `False` si no existe.
 
-    turno = conn.execute("SELECT monto_inicial FROM turnos_caja WHERE id=?", (tid,)).fetchone()
-    if not turno:
-        return False
-    resumen = resumen_turno(conn, tid)
-    monto_esperado = round(turno["monto_inicial"] + resumen["efectivo_ventas"], 2)
-    conn.execute(
-        """UPDATE turnos_caja
-           SET estado='cerrado', cierre=?, monto_declarado_cierre=?,
-               monto_esperado_cierre=?, notas=?
-           WHERE id=?""",
-        (_ar_now(), monto_declarado, monto_esperado, notas, tid),
-    )
-    return True
+    Usa el cierre común del motor (`libracore.db.turnos.cerrar_turno_con`, v1.188.1): con `ganchos` corre
+    `al_cerrar_turno` dentro de la misma transacción, así el cierre del turno de un nodo sube al central (ADR-076 del
+    motor, ADR-069). `cierre` y `monto_esperado` son los de `cerrar_turno_caja`. Sin ellos, todo queda como antes."""
+    from libracore.db.turnos import cerrar_turno_con
+
+    cerrado = cerrar_turno_con(
+        tid, monto_declarado, notas, resumen=lambda t, c: resumen_turno(c, t), conn=conn, ganchos=ganchos,
+        cierre=cierre, monto_esperado=monto_esperado)
+    return cerrado is not None
 
 
 # ── El schema que este módulo necesita y no declara ──────────────────────

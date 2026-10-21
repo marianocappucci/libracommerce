@@ -47,7 +47,8 @@ migrations = [
     # >=1.182 (ADR-065, ADR-070 del motor): `libracommerce.hora` toma el reloj de `libracore.fechas` (un solo «hoy» y «ahora» de Argentina).
     # >=1.186 (ADR-068, ADR-074 del motor): `erp.offline.en_linea_segun_estado` es la de `libracore.nodo_offline`.
     # >=1.188 (ADR-069 de este motor, ADR-076 del motor): `erp.offline_caja` usa `GanchosDeCaja` y los `get_*_de_origen` de la caja del nodo.
-    "libracore[migrations]>=1.188,<2",
+    # >=1.188.1: `erp.ventas.cerrar_turno` usa `libracore.db.turnos.cerrar_turno_con` (corre los ganchos de caja).
+    "libracore[migrations]>=1.188.1,<2",
 ]
 erp = [
     # >=1.87: `libracore.db.logs` con partes componibles y `libracore.reportes`
@@ -164,7 +165,7 @@ dev = [
     # v1.186.1 -> v1.186.2 (2026-10-19): el motor se puede importar en Windows (bloqueo de archivo portable, nodo de LibraEdge). Sin migracion.
     # v1.186.2 -> v1.187.0 (2026-10-20): estado del sistema para la barra del pie (ADR-075). Sin migracion.
     # v1.187.0 -> v1.188.0 (2026-10-21): ganchos de caja y `origen` en turnos, movimientos y cierres: la caja del nodo sube al central (ADR-076). Con migracion 0028 (aditiva; `init_core_schema()` agrega las columnas de turnos_caja y caja_movimientos).
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.188.0",
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.188.1",
     # SOLO PARA TESTS, como libracore: `tests/test_auditoria_formato_libraauth.py` compara
     # las filas de `RepositorioAuditado` con las de `libraauth.auditoria.registrador_dbapi`
     # (ADR-050). En runtime este motor no importa libraauth: el registrador lo pasa el producto.
