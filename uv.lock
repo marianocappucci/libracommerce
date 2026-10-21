@@ -688,14 +688,14 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "libraauth", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libraauth.git?rev=v0.53.0" },
     { name = "libracore", marker = "extra == 'dev'", specifier = ">=1.125,<2" },
-    { name = "libracore", marker = "extra == 'dev'", specifier = ">=1.186,<2" },
-    { name = "libracore", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libracore.git?rev=v1.187.0" },
-    { name = "libracore", marker = "extra == 'erp'", specifier = ">=1.186,<2" },
+    { name = "libracore", marker = "extra == 'dev'", specifier = ">=1.188,<2" },
+    { name = "libracore", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libracore.git?rev=v1.188.0" },
+    { name = "libracore", marker = "extra == 'erp'", specifier = ">=1.188,<2" },
     { name = "libracore", marker = "extra == 'web'", specifier = ">=1.125,<2" },
-    { name = "libracore", extras = ["migrations"], marker = "extra == 'dev'", specifier = ">=1.186,<2" },
-    { name = "libracore", extras = ["migrations"], marker = "extra == 'migrations'", specifier = ">=1.186,<2" },
-    { name = "libraedge", marker = "extra == 'offline'", git = "https://github.com/marianocappucci/libraedge.git?rev=v0.14.0" },
-    { name = "libraedge", extras = ["server"], marker = "extra == 'offline-server'", git = "https://github.com/marianocappucci/libraedge.git?rev=v0.14.0" },
+    { name = "libracore", extras = ["migrations"], marker = "extra == 'dev'", specifier = ">=1.188,<2" },
+    { name = "libracore", extras = ["migrations"], marker = "extra == 'migrations'", specifier = ">=1.188,<2" },
+    { name = "libraedge", marker = "extra == 'offline'", git = "https://github.com/marianocappucci/libraedge.git?rev=v0.17.0" },
+    { name = "libraedge", extras = ["server"], marker = "extra == 'offline-server'", git = "https://github.com/marianocappucci/libraedge.git?rev=v0.17.0" },
     { name = "openpyxl", marker = "extra == 'dev'", specifier = ">=3.1,<4" },
     { name = "openpyxl", marker = "extra == 'planillas'", specifier = ">=3.1,<4" },
     { name = "pydantic", marker = "extra == 'dev'", specifier = ">=2,<3" },
@@ -711,8 +711,8 @@ provides-extras = ["dev", "erp", "migrations", "offline", "offline-server", "pla
 
 [[package]]
 name = "libracore"
-version = "1.187.0"
-source = { git = "https://github.com/marianocappucci/libracore.git?rev=v1.187.0#ed1f5fa4d96e3208e1dd191602798b533b1ab491" }
+version = "1.188.0"
+source = { git = "https://github.com/marianocappucci/libracore.git?rev=v1.188.0#b31835a1d5d0e1156ac440d1bbee91a9d1ee89bc" }
 dependencies = [
     { name = "cryptography" },
     { name = "fastapi" },
@@ -736,8 +736,8 @@ migrations = [
 
 [[package]]
 name = "libraedge"
-version = "0.14.0"
-source = { git = "https://github.com/marianocappucci/libraedge.git?rev=v0.14.0#f8f2941d0b2628ff2e0ca007770d5293512ddfaa" }
+version = "0.17.0"
+source = { git = "https://github.com/marianocappucci/libraedge.git?rev=v0.17.0#daac94c3582fc8472d0119ab84b765833521a0db" }
 
 [package.optional-dependencies]
 server = [

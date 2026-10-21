@@ -19,7 +19,7 @@ from datetime import UTC, timedelta
 import pytest
 from conftest import USUARIO, _restaurar, _schema_de_producto, url_postgres
 
-from libracommerce.erp import SIN_GANCHOS, Hooks, RequiereConexion, catalogo, offline, stock, ventas
+from libracommerce.erp import SIN_GANCHOS, Hooks, RequiereConexion, catalogo, offline, offline_caja, stock, ventas
 
 libraedge = pytest.importorskip("libraedge")
 
@@ -205,8 +205,10 @@ def test_registrar_en_un_despachador_de_libraedge():
     from libraedge.sync.despacho import Despachador
 
     despachador = offline.registrar_en(Despachador())
-    assert despachador.tipos() == tuple(sorted(offline.TIPOS))
-    assert all(despachador.versiones(t) == (offline.SCHEMA_VERSION,) for t in offline.TIPOS)
+    # Los cinco de venta y los cinco de caja (ADR-069, `test_erp_offline_caja.py`).
+    todos = (*offline.TIPOS, *offline_caja.TIPOS_DE_CAJA)
+    assert despachador.tipos() == tuple(sorted(todos))
+    assert all(despachador.versiones(t) == (offline.SCHEMA_VERSION,) for t in todos)
     with pytest.raises(ValueError, match="ya hay un manejador"):
         offline.registrar_en(despachador)
 
