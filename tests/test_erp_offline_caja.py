@@ -585,3 +585,44 @@ def test_el_cierre_de_turno_de_erp_ventas_sube_desde_el_nodo(puntas):
     with nodo.abrir() as conn:
         assert ventas.cerrar_turno(conn, 999999, 1.0, ganchos=ganchos) is False
         conn.rollback()
+
+
+def test_sin_caja_con_turno_el_central_arquea_contra_las_ventas_y_no_marca(puntas):
+    """ContaLibra y RestoLibra (v0.70.1): la caja de la venta va sin turno y el turno se arquea contra las ventas
+    (`erp.ventas.cerrar_turno`). El central tiene que recalcular igual; antes recalculaba con la caja y marcaba siempre
+    (lo encontró la prueba en la VM: esperaba 38000, recalculaba 28000)."""
+    from libracore.db.turnos import get_turno_activo
+
+    nodo, central = puntas
+    outbox = offline.Outbox(nodo=lambda: NODO)
+    ganchos = offline_caja.caja_con_outbox(None, outbox)
+    tid = _abrir_turno(nodo, ganchos, monto=50.0)
+    hooks = offline.con_outbox(replace(SIN_GANCHOS, turno_para=lambda c, uid: get_turno_activo(uid, conn=c)), outbox)
+    pagos = [{"medio": "efectivo", "monto": 100.0, "estado": "aprobado"}]
+    items = [{"nombre": "Yerba", "qty": 1.0, "precio": 100.0, "subtotal": 100.0, "producto_id": 1}]
+    ventas.crear_venta_directa(
+        nodo.fabrica(), fecha=HOY, items=items, subtotal=100.0, descuento=0.0, total=100.0, cliente_id=None,
+        cliente_nombre="", usuario_id=USUARIO["id"], observaciones="", estado="cobrada", pagos=pagos,
+        stock_habilitado=True, hooks=hooks)
+    with nodo.abrir() as conn:
+        assert ventas.cerrar_turno(conn, tid, 150.0, "cierre", ganchos=ganchos) is True
+        conn.commit()
+    ops = _pendientes(nodo)
+    assert [op.operation_type for op in ops] == ["turno.abierto", "venta.registrada", "turno.cerrado"]
+    assert ops[-1].payload["arqueo"] == offline_caja.ARQUEO_POR_VENTAS
+    assert ops[-1].payload["monto_esperado"] == 150.0
+
+    assert [r.result for r in _subir(central, ops)] == ["accepted"] * 3
+    (turno,) = _filas(central, "SELECT * FROM turnos_caja")
+    assert turno["estado"] == "cerrado" and float(turno["monto_esperado_cierre"]) == 150.0
+    assert offline_caja.MARCA_ARQUEO not in (turno["notas"] or "")
+    with central.abrir() as conn:
+        assert offline_caja.arqueos_a_revisar(conn) == []
+
+
+def test_con_caja_con_turno_el_cierre_dice_que_arquea_contra_la_caja(puntas):
+    nodo, _ = puntas
+    ganchos = _ganchos()
+    tid = _abrir_turno(nodo, ganchos)
+    _cerrar_turno(nodo, ganchos, tid, 50.0)
+    assert _pendientes(nodo)[-1].payload["arqueo"] == offline_caja.ARQUEO_POR_CAJA

@@ -131,6 +131,12 @@ AGREGADO_CIERRE = "cierre_diario"
 #: Lo que el central agrega a las `notas` de un turno o de un cierre cuyo arqueo no coincide con el del nodo.
 MARCA_ARQUEO = "[REVISAR ARQUEO]"
 
+#: Contra qué arqueó el nodo el turno que cierra (`arqueo` del payload de `turno.cerrado`, aditivo desde v0.70.1):
+#: `caja` = los movimientos de caja con turno (`get_resumen_turno_caja`, VentaLibra); `ventas` = las ventas del turno
+#: (`erp.ventas.resumen_turno`, ContaLibra y RestoLibra, cuya caja de la venta no lleva turno). Sin el campo, `caja`.
+ARQUEO_POR_CAJA = "caja"
+ARQUEO_POR_VENTAS = "ventas"
+
 #: Diferencia de plata que se toma por distinta (un centavo de redondeo no lo es).
 _TOLERANCIA = 0.005
 
@@ -194,6 +200,10 @@ def caja_con_outbox(ganchos: GanchosDeCaja | None, outbox: Outbox) -> GanchosDeC
             gancho(conn, datos)
             nodo = outbox.nodo()
             if nodo is not None:
+                if tipo == TIPO_TURNO_CERRADO:
+                    # Contra qué arqueó el nodo (aditivo, v0.70.1): el central recalcula igual. Sin turno en la caja
+                    # de la venta (ContaLibra, RestoLibra) el arqueo es contra las ventas del turno.
+                    datos = {**datos, "arqueo": ARQUEO_POR_CAJA if outbox.caja_con_turno else ARQUEO_POR_VENTAS}
                 _encolar(conn, nodo, tipo, agregado, datos[clave], datos)
 
         return compuesto
@@ -314,7 +324,8 @@ def aplicar_turno_cerrado(conn, operacion) -> None:
 
     Si el turno no está en el central, lo crea con los datos de la apertura que trae el payload. Idempotente: un turno
     ya cerrado no se toca. Después recalcula el esperado con los movimientos que tiene el central; si no coincide con el
-    del nodo, guarda el del nodo y deja la `MARCA_ARQUEO` en las `notas` del turno (no rechaza)."""
+    del nodo, guarda el del nodo y deja la `MARCA_ARQUEO` en las `notas` del turno (no rechaza). Recalcula **como arqueó el
+    nodo** (`arqueo` del payload): contra las ventas del turno o contra los movimientos de caja con turno."""
     from libracore.db.turnos import cerrar_turno_caja, get_resumen_turno_caja
 
     datos = _datos(operacion, TIPO_TURNO_CERRADO)
@@ -325,8 +336,13 @@ def aplicar_turno_cerrado(conn, operacion) -> None:
         turno["id"], datos["monto_declarado"], datos.get("notas") or "", conn=conn, cierre=datos["cierre"],
         monto_esperado=datos["monto_esperado"],
     )
-    recalculado = round(
-        float(cerrado["monto_inicial"]) + float(get_resumen_turno_caja(turno["id"], conn=conn)["efectivo_ventas"]), 2)
+    if datos.get("arqueo") == ARQUEO_POR_VENTAS:
+        from libracommerce.erp.ventas import resumen_turno
+
+        efectivo = resumen_turno(conn, turno["id"])["efectivo_ventas"]
+    else:
+        efectivo = get_resumen_turno_caja(turno["id"], conn=conn)["efectivo_ventas"]
+    recalculado = round(float(cerrado["monto_inicial"]) + float(efectivo), 2)
     if _distinto(recalculado, datos["monto_esperado"]):
         _marcar(
             conn, "turnos_caja", turno["id"],
