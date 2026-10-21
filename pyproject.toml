@@ -174,7 +174,8 @@ dev = [
     # (ADR-050). En runtime este motor no importa libraauth: el registrador lo pasa el producto.
     # v0.49.0 (2026-10-12): `registrador_dbapi` y las piezas puras del formato (ADR-022).
     # v0.52.0 -> v0.53.0 (2026-10-20): la marca Secure de la cookie de sesion es configurable (LIBRAAUTH_COOKIE_SECURE, ADR-026); sin la variable no cambia nada. Sin migracion.
-    "libraauth @ git+https://github.com/marianocappucci/libraauth.git@v0.53.0",
+    # v0.53.0 -> v0.55.0 (2026-10-21): en un nodo de LibraEdge no se pide captcha y la IP del bloqueo es el par directo (ADR-028); fuera de un nodo no cambia nada. Sin migracion.
+    "libraauth @ git+https://github.com/marianocappucci/libraauth.git@v0.55.0",
 ]
 # libraedge por TAG, no por rama (2026-10-19, ADR-067): hasta hoy el extra seguia `@develop`, o sea lo que hubiera ahi
 # en el momento del build. v0.7.0 (ADR-007 de libraedge): el `Despachador` por (operation_type, schema_version),
