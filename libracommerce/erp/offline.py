@@ -80,6 +80,13 @@ Si `al_facturar` falla (libracore lo registra y no lo reintenta), la factura que
 de la facturación al volver (`reconciliador(outbox, abrir_conexion)`). Un duplicado por carrera (dos workers, o la
 reconciliación cruzada con `al_facturar`) no rompe nada: el aplicador del central es idempotente.
 
+## Los clientes que se dan de alta en el nodo (ADR-070)
+
+Un cliente dado de alta en el nodo nace con un id provisorio negativo y sube como `cliente.alta` (`erp.offline_clientes`).
+`venta.registrada` lleva ese id tal cual en `cliente_id` y el central lo traduce con el mapeo del alta
+(`offline_clientes.cliente_del_central`): sin mapeo, la venta se rechaza (`ClienteNoSincronizado`, revisión manual) en vez
+de quedar a nombre de otro cliente. El alta sale antes que la venta porque comparten la secuencia del outbox.
+
 ## La caja y los turnos (ADR-069)
 
 Los turnos, los movimientos de caja a mano y el cierre del día suben con cinco operaciones más (`turno.abierto`,
@@ -252,10 +259,12 @@ def payload_venta_registrada(venta: Mapping[str, Any], *, lineas: list[Mapping[s
     `movimientos`, las filas del ledger que descontó la venta (receta y lotes ya resueltos: el central las repite tal
     cual en vez de volver a resolverlas); `promociones`, las de `sale_promotions`.
 
-    Los ids de producto, variante, cliente, depósito y sucursal viajan tal cual: son datos de referencia que el central
-    publica y el nodo espeja con la misma clave. `turno_id_nodo` es el del **nodo**: el central lo traduce al turno que
-    subió con `turno.abierto` (ADR-069) y, si no está, aplica la venta sin turno. `caja_con_turno` (aditivo: un payload
-    sin él es `False`) dice si la caja de lo acreditado lleva ese turno."""
+    Los ids de producto, variante, depósito y sucursal viajan tal cual: son datos de referencia que el central publica y
+    el nodo espeja con la misma clave. El del **cliente** también, salvo uno dado de alta en el nodo: ése viaja con su id
+    provisorio (negativo) y el central lo traduce con el mapeo de su `cliente.alta` (ADR-070, `offline_clientes`).
+    `turno_id_nodo` es el del **nodo**: el central lo traduce al turno que subió con `turno.abierto` (ADR-069) y, si no
+    está, aplica la venta sin turno. `caja_con_turno` (aditivo: un payload sin él es `False`) dice si la caja de lo
+    acreditado lleva ese turno."""
     return {
         "venta_id": venta["id"], "numero": venta["numero"], "fecha": _fecha(venta["fecha"]),
         "estado": venta["estado"], "subtotal": _texto(venta["subtotal"]), "descuento": _texto(venta["descuento"]),
@@ -646,6 +655,7 @@ def aplicar_venta_registrada(conn, operacion, *, hooks: Hooks = SIN_GANCHOS,
 
     from . import promociones as _promociones
     from .offline_caja import turno_del_central
+    from .offline_clientes import cliente_del_central
     from .stock import add_movimiento_stock
     from .ventas import CONCEPTO_VENTA, agregar_pago, crear_venta, obtener_venta, vincular_venta_turno
 
@@ -667,9 +677,12 @@ def aplicar_venta_registrada(conn, operacion, *, hooks: Hooks = SIN_GANCHOS,
          "qty": _num(it["qty"]), "precio": _num(it["precio"])}
         for it in datos["items"]
     ]
+    # El cliente: uno provisorio (negativo) es el que el nodo dio de alta y el central tradujo con su `cliente.alta`
+    # (ADR-070); si ese alta no se aplicó, la venta se rechaza en vez de quedar a nombre de otro cliente.
+    cliente_id = cliente_del_central(conn, operacion.node_id, datos.get("cliente_id"))
     vid = crear_venta(
         conn, numero=numero, fecha=fecha, items=items, subtotal=_num(datos["subtotal"]),
-        descuento=_num(datos["descuento"]), total=_num(datos["total"]), cliente_id=datos.get("cliente_id"),
+        descuento=_num(datos["descuento"]), total=_num(datos["total"]), cliente_id=cliente_id,
         cliente_nombre=datos.get("cliente_nombre") or "", usuario_id=usuario_id,
         observaciones=datos.get("observaciones") or "", estado=datos["estado"],
         sucursal_id=datos.get("sucursal_id"),
@@ -842,11 +855,14 @@ def aplicadores(hooks: Hooks = SIN_GANCHOS, *,
     juntar con `despachar` en un solo `operation_handler`. `hooks` son los del central (`cliente_cc_de` para la
     cuenta corriente, y lo que el producto haga al nacer o anularse una venta). `aplicar_factura` reemplaza
     `libracore.facturas_del_nodo.aplicar_factura_del_nodo` en `venta.facturada`. Suma los cinco de caja y turnos
-    (`offline_caja.aplicadores_de_caja`, ADR-069), que no dependen de los ganchos de venta."""
+    (`offline_caja.aplicadores_de_caja`, ADR-069) y el alta de clientes (`offline_clientes`, ADR-070), que no dependen
+    de los ganchos de venta."""
     from .offline_caja import aplicadores_de_caja
+    from .offline_clientes import aplicadores_de_clientes
 
     return {
         **aplicadores_de_caja(),
+        **aplicadores_de_clientes(),
         TIPO_VENTA_REGISTRADA: lambda conn, op: aplicar_venta_registrada(
             conn, op, hooks=hooks, al_materializar=al_materializar),
         TIPO_PAGO_ACREDITADO: lambda conn, op: aplicar_pago_acreditado(conn, op, hooks=hooks),
@@ -859,7 +875,8 @@ def aplicadores(hooks: Hooks = SIN_GANCHOS, *,
 def registrar_en(despachador, hooks: Hooks = SIN_GANCHOS, *,
                  al_materializar: Callable[[Any, int, Any], None] | None = None,
                  aplicar_factura: AplicarFactura | None = None):
-    """Registra los diez tipos —los cinco de venta y los cinco de caja—, en `SCHEMA_VERSION`, en un `libraedge.sync.despacho.Despachador` (v0.7.0,
+    """Registra los once tipos —los cinco de venta, los cinco de caja y `cliente.alta`—, en `SCHEMA_VERSION`, en un
+    `libraedge.sync.despacho.Despachador` (v0.7.0,
     ADR-007 de libraedge) y lo devuelve. Un producto suma los suyos al mismo despachador; registrar dos veces un tipo
     falla al arrancar (es la regla del `Despachador`)::
 

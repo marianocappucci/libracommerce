@@ -72,7 +72,10 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
   nodo: `caja_con_outbox(ganchos, Outbox(...))` encola `turno.abierto`, `turno.cerrado`, `caja.movimiento`,
   `caja.movimiento_anulado` y `dia.cerrado` con los `GanchosDeCaja` de libracore (ADR-076), y los mismos
   `registrar_en` los aplican en el central con `origen`/`origen_id`, el turno traducido y el arqueo del nodo
-  marcado si no coincide.
+  marcado si no coincide; y `erp.offline_clientes` (ADR-070), los clientes que se dan de alta en el nodo:
+  `altas_en_nodo(Outbox(...))` es la `AltasEnNodo` de libracore (ADR-077) que encola `cliente.alta` con el id
+  provisorio negativo, y el central la aplica (usa al cliente del mismo CUIT/DNI o lo crea con su id), anota el mapeo de
+  libraedge (ADR-021) y traduce el `cliente_id` de `venta.registrada`.
 - **`web/`** (extra `[web]`) — factories de router FastAPI que el producto monta con
   `include_router` y gatea él: `catalogo_router` (`build_productos_router`,
   `build_depositos_router`, `build_stock_router`, con `OpcionesCatalogo`/`OpcionesStock`

@@ -205,8 +205,11 @@ def test_registrar_en_un_despachador_de_libraedge():
     from libraedge.sync.despacho import Despachador
 
     despachador = offline.registrar_en(Despachador())
-    # Los cinco de venta y los cinco de caja (ADR-069, `test_erp_offline_caja.py`).
-    todos = (*offline.TIPOS, *offline_caja.TIPOS_DE_CAJA)
+    # Los cinco de venta, los cinco de caja (ADR-069, `test_erp_offline_caja.py`) y el alta de clientes (ADR-070,
+    # `test_erp_offline_clientes.py`).
+    from libracommerce.erp import offline_clientes
+
+    todos = (*offline.TIPOS, *offline_caja.TIPOS_DE_CAJA, *offline_clientes.TIPOS_DE_CLIENTES)
     assert despachador.tipos() == tuple(sorted(todos))
     assert all(despachador.versiones(t) == (offline.SCHEMA_VERSION,) for t in todos)
     with pytest.raises(ValueError, match="ya hay un manejador"):
