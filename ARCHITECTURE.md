@@ -68,7 +68,11 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
   `venta.anulada` y `venta.devolucion` (en la misma transacción) y el numerador con el
   prefijo de la sucursal (`S02-POS-000123`); `registrar_en(Despachador(), hooks)` (libraedge
   v0.7.0) registra los `(conn, operacion)` que las materializan en el central, idempotentes y con la
-  colisión de número a revisión manual.
+  colisión de número a revisión manual; y `erp.offline_caja` (ADR-069), la caja y los turnos del
+  nodo: `caja_con_outbox(ganchos, Outbox(...))` encola `turno.abierto`, `turno.cerrado`, `caja.movimiento`,
+  `caja.movimiento_anulado` y `dia.cerrado` con los `GanchosDeCaja` de libracore (ADR-076), y los mismos
+  `registrar_en` los aplican en el central con `origen`/`origen_id`, el turno traducido y el arqueo del nodo
+  marcado si no coincide.
 - **`web/`** (extra `[web]`) — factories de router FastAPI que el producto monta con
   `include_router` y gatea él: `catalogo_router` (`build_productos_router`,
   `build_depositos_router`, `build_stock_router`, con `OpcionesCatalogo`/`OpcionesStock`

@@ -46,7 +46,8 @@ migrations = [
     # >=1.168 (ADR-062, ADR-053 del motor): `init_schema()` contra PostgreSQL toma `libracore.candados.esperar_candado_de_transaccion`.
     # >=1.182 (ADR-065, ADR-070 del motor): `libracommerce.hora` toma el reloj de `libracore.fechas` (un solo «hoy» y «ahora» de Argentina).
     # >=1.186 (ADR-068, ADR-074 del motor): `erp.offline.en_linea_segun_estado` es la de `libracore.nodo_offline`.
-    "libracore[migrations]>=1.186,<2",
+    # >=1.188 (ADR-069 de este motor, ADR-076 del motor): `erp.offline_caja` usa `GanchosDeCaja` y los `get_*_de_origen` de la caja del nodo.
+    "libracore[migrations]>=1.188,<2",
 ]
 erp = [
     # >=1.87: `libracore.db.logs` con partes componibles y `libracore.reportes`
@@ -59,7 +60,8 @@ erp = [
     # >=1.168 (ADR-062, ADR-053 del motor): las tablas de cruce y `repuntar_fk_ventas_pagos` toman `esperar_candado_de_transaccion`.
     # >=1.182 (ADR-065, ADR-070 del motor): `libracommerce.hora` toma el reloj de `libracore.fechas` (un solo «hoy» y «ahora» de Argentina).
     # >=1.186 (ADR-068, ADR-074 del motor): `erp.offline.en_linea_segun_estado` es la de `libracore.nodo_offline`.
-    "libracore>=1.186,<2",
+    # >=1.188 (ADR-069 de este motor, ADR-076 del motor): `erp.offline_caja` usa `GanchosDeCaja` y los `get_*_de_origen` de la caja del nodo.
+    "libracore>=1.188,<2",
 ]
 web = [
     "fastapi>=0.115,<1",
@@ -161,7 +163,8 @@ dev = [
     # v1.186.0 -> v1.186.1 (2026-10-19): la bandeja no deja descartar a mano una venta del nodo (completa ADR-074). Sin migracion.
     # v1.186.1 -> v1.186.2 (2026-10-19): el motor se puede importar en Windows (bloqueo de archivo portable, nodo de LibraEdge). Sin migracion.
     # v1.186.2 -> v1.187.0 (2026-10-20): estado del sistema para la barra del pie (ADR-075). Sin migracion.
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.187.0",
+    # v1.187.0 -> v1.188.0 (2026-10-21): ganchos de caja y `origen` en turnos, movimientos y cierres: la caja del nodo sube al central (ADR-076). Con migracion 0028 (aditiva; `init_core_schema()` agrega las columnas de turnos_caja y caja_movimientos).
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.188.0",
     # SOLO PARA TESTS, como libracore: `tests/test_auditoria_formato_libraauth.py` compara
     # las filas de `RepositorioAuditado` con las de `libraauth.auditoria.registrador_dbapi`
     # (ADR-050). En runtime este motor no importa libraauth: el registrador lo pasa el producto.
@@ -178,8 +181,10 @@ dev = [
 # v0.10.0 -> v0.11.0 (2026-10-19): pantalla «Sucursal sin internet» del central (ADR-011). Sin migracion.
 # v0.11.0 -> v0.14.0 (2026-10-20): instalador de Linux y accesos directos (ADR-012/013) y LibraEdge incluido en todos los planes
 # con el codigo de vinculacion (ADR-014: `create_canje_router`, dos tablas que crea `init_schema`). Sin migracion.
-offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@v0.14.0"]
-offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@v0.14.0"]
+# v0.14.0 -> v0.17.0 (2026-10-21): el outbox sube en orden causal y un fallo de transporte corta la tanda (ADR-020): es lo que
+# garantiza que `turno.abierto` llegue antes que los movimientos y las ventas de su turno (ADR-069 de este motor). Sin migracion.
+offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@v0.17.0"]
+offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@v0.17.0"]
 
 [project.scripts]
 # `migrations/` vive ADENTRO de `libracommerce/` para entrar en el wheel: un

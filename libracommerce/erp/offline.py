@@ -79,6 +79,15 @@ Si `al_facturar` falla (libracore lo registra y no lo reintenta), la factura que
 (`venta.registrada` en el outbox) y sin `venta.facturada`, y la encola. Corre al arrancar el producto y en cada vuelta
 de la facturación al volver (`reconciliador(outbox, abrir_conexion)`). Un duplicado por carrera (dos workers, o la
 reconciliación cruzada con `al_facturar`) no rompe nada: el aplicador del central es idempotente.
+
+## La caja y los turnos (ADR-069)
+
+Los turnos, los movimientos de caja a mano y el cierre del día suben con cinco operaciones más (`turno.abierto`,
+`turno.cerrado`, `caja.movimiento`, `caja.movimiento_anulado`, `dia.cerrado`), que viven en `erp.offline_caja`. Acá queda
+lo que cruza con la venta: `venta.registrada` lleva el `turno_id_nodo` y el central lo traduce al turno que subió
+(`offline_caja.turno_del_central`); si el turno no está, la venta se aplica sin turno, como antes. `Outbox.caja_con_turno`
+dice si el producto escribe el turno en los movimientos de caja de la venta (el mismo `caja_con_turno` de
+`registrar_venta`): el central lo reproduce igual para que el arqueo del turno dé lo mismo en las dos puntas.
 """
 
 from __future__ import annotations
@@ -180,11 +189,15 @@ class Outbox:
       cablearlo, un nodo no anula ninguna venta facturada. Ver `en_linea_segun_estado`.
     - `extra_de_venta`: lo propio del producto que viaja con la venta (`(conn, venta) -> dict | None`), en
       `payload["extra"]`. RestoLibra: el pedido y la mesa. Del otro lado lo lee `al_materializar`.
+    - `caja_con_turno`: si los movimientos de caja de la venta llevan el `turno_id` (el `caja_con_turno` que el producto
+      le pasa a `registrar_venta` y `acreditar_pago_qr`; VentaLibra lo prende). Viaja en `venta.registrada` y
+      `venta.pago_acreditado` (ADR-069). El default, `False`, es el de siempre: el central escribe esa caja sin turno.
     """
 
     nodo: Callable[[], NodoLocal | None]
     en_linea: Callable[[], bool] = _sin_conexion
     extra_de_venta: Callable[[Any, Mapping[str, Any]], Mapping[str, Any] | None] | None = None
+    caja_con_turno: bool = False
 
 
 # ── Traducción (puro: sin base) ───────────────────────────────────────────
@@ -231,7 +244,8 @@ def armar_operacion(nodo: NodoLocal, secuencia: int, tipo: str, venta_id: int, p
 
 def payload_venta_registrada(venta: Mapping[str, Any], *, lineas: list[Mapping[str, Any]],
                              movimientos: list[Mapping[str, Any]], promociones: list[Mapping[str, Any]],
-                             sucursal_id: int | None, extra: Mapping[str, Any] | None = None) -> dict:
+                             sucursal_id: int | None, extra: Mapping[str, Any] | None = None,
+                             caja_con_turno: bool = False) -> dict:
     """El payload de `venta.registrada`: la venta entera como la dejó el nodo.
 
     `venta` es `obtener_venta`; `lineas`, las filas de `sale_items` en orden de id (con `unit_cost_snapshot`);
@@ -239,15 +253,16 @@ def payload_venta_registrada(venta: Mapping[str, Any], *, lineas: list[Mapping[s
     cual en vez de volver a resolverlas); `promociones`, las de `sale_promotions`.
 
     Los ids de producto, variante, cliente, depósito y sucursal viajan tal cual: son datos de referencia que el central
-    publica y el nodo espeja con la misma clave. `turno_id` es el del **nodo** y viaja sólo como dato: el central no
-    tiene ese turno (la caja y los turnos suben en la fase 2)."""
+    publica y el nodo espeja con la misma clave. `turno_id_nodo` es el del **nodo**: el central lo traduce al turno que
+    subió con `turno.abierto` (ADR-069) y, si no está, aplica la venta sin turno. `caja_con_turno` (aditivo: un payload
+    sin él es `False`) dice si la caja de lo acreditado lleva ese turno."""
     return {
         "venta_id": venta["id"], "numero": venta["numero"], "fecha": _fecha(venta["fecha"]),
         "estado": venta["estado"], "subtotal": _texto(venta["subtotal"]), "descuento": _texto(venta["descuento"]),
         "total": _texto(venta["total"]), "cliente_id": venta.get("cliente_id"),
         "cliente_nombre": venta.get("cliente_nombre") or "", "usuario_id": venta.get("usuario_id"),
         "observaciones": venta.get("observaciones") or "", "sucursal_id": sucursal_id,
-        "turno_id_nodo": venta.get("turno_id"),
+        "turno_id_nodo": venta.get("turno_id"), "caja_con_turno": bool(caja_con_turno),
         "items": [
             {
                 "producto_id": li["item_id"], "variante_id": li["variant_id"], "nombre": li["description_snapshot"],
@@ -279,13 +294,16 @@ def payload_venta_registrada(venta: Mapping[str, Any], *, lineas: list[Mapping[s
     }
 
 
-def payload_pago_acreditado(venta: Mapping[str, Any], pagos: list[Mapping[str, Any]]) -> dict:
+def payload_pago_acreditado(venta: Mapping[str, Any], pagos: list[Mapping[str, Any]], *,
+                            caja_con_turno: bool = False) -> dict:
     """El payload de `venta.pago_acreditado`. Cada pago va por su **posición** entre los pagos de la venta (en orden
-    de id): el central los escribió en el mismo orden, y el id local no le dice nada."""
+    de id): el central los escribió en el mismo orden, y el id local no le dice nada. `caja_con_turno` (aditivo) dice si
+    la caja de lo que se acredita lleva el turno de la venta (ADR-069)."""
     posiciones = {p["id"]: i for i, p in enumerate(venta["pagos"])}
     return {
         "venta_id": venta["id"], "numero": venta["numero"], "estado": venta["estado"],
         "payment_id": next((p.get("payment_id") for p in pagos if p.get("payment_id")), "") or "",
+        "caja_con_turno": bool(caja_con_turno),
         "pagos": [
             {"posicion": posiciones[p["id"]], "medio": p["medio"], "monto": _texto(p["monto"])} for p in pagos
         ],
@@ -385,17 +403,20 @@ def encolar(conn, nodo: NodoLocal, tipo: str, venta_id: int, payload: dict):
 
 
 def encolar_venta_registrada(conn, nodo: NodoLocal, venta: Mapping[str, Any], *,
-                             extra: Mapping[str, Any] | None = None):
+                             extra: Mapping[str, Any] | None = None, caja_con_turno: bool = False):
     vid = venta["id"]
     payload = payload_venta_registrada(
         venta, lineas=_lineas(conn, vid), movimientos=_movimientos_vendidos(conn, vid),
         promociones=_promociones(conn, vid), sucursal_id=_sucursal(conn, vid), extra=extra,
+        caja_con_turno=caja_con_turno,
     )
     return encolar(conn, nodo, TIPO_VENTA_REGISTRADA, vid, payload)
 
 
-def encolar_pago_acreditado(conn, nodo: NodoLocal, venta: Mapping[str, Any], pagos: list[Mapping[str, Any]]):
-    return encolar(conn, nodo, TIPO_PAGO_ACREDITADO, venta["id"], payload_pago_acreditado(venta, pagos))
+def encolar_pago_acreditado(conn, nodo: NodoLocal, venta: Mapping[str, Any], pagos: list[Mapping[str, Any]], *,
+                            caja_con_turno: bool = False):
+    return encolar(conn, nodo, TIPO_PAGO_ACREDITADO, venta["id"],
+                   payload_pago_acreditado(venta, pagos, caja_con_turno=caja_con_turno))
 
 
 def encolar_venta_anulada(conn, nodo: NodoLocal, venta: Mapping[str, Any]):
@@ -528,13 +549,13 @@ def con_outbox(hooks: Hooks, outbox: Outbox) -> Hooks:
         nodo = outbox.nodo()
         if nodo is not None:
             extra = outbox.extra_de_venta(conn, venta) if outbox.extra_de_venta is not None else None
-            encolar_venta_registrada(conn, nodo, venta, extra=extra)
+            encolar_venta_registrada(conn, nodo, venta, extra=extra, caja_con_turno=outbox.caja_con_turno)
 
     def al_acreditar_pago(conn, venta, pagos):
         hooks.al_acreditar_pago(conn, venta, pagos)
         nodo = outbox.nodo()
         if nodo is not None and pagos:
-            encolar_pago_acreditado(conn, nodo, venta, list(pagos))
+            encolar_pago_acreditado(conn, nodo, venta, list(pagos), caja_con_turno=outbox.caja_con_turno)
 
     def al_anular_venta(conn, venta):
         nodo = outbox.nodo()
@@ -606,10 +627,16 @@ def aplicar_venta_registrada(conn, operacion, *, hooks: Hooks = SIN_GANCHOS,
                              al_materializar: Callable[[Any, int, Any], None] | None = None) -> None:
     """Crea en el central la venta que nació en el nodo, con las mismas piezas que `registrar_venta`.
 
-    No pasa por `registrar_venta`: el número ya lo puso el nodo (con su prefijo), el turno es del nodo, y el stock se
+    No pasa por `registrar_venta`: el número ya lo puso el nodo (con su prefijo), el turno viene traducido, y el stock se
     repite fila por fila desde el ledger del nodo en vez de volver a resolver recetas y lotes acá. Sí usa
     `crear_venta`, `agregar_pago` (el fiado entra al libro de clientes igual que en el nodo) y
-    `create_caja_movimiento` —sin turno— para lo acreditado. Al final corre `hooks.al_registrar_venta`,
+    `create_caja_movimiento` para lo acreditado.
+
+    **El turno (ADR-069).** `turno_id_nodo` se traduce al turno del central que subió con `turno.abierto`
+    (`offline_caja.turno_del_central`): la venta queda atada a él (`venta_links`) y, si el nodo escribía el turno en la
+    caja de la venta (`caja_con_turno` del payload), también sus movimientos. Si el turno no está —la venta sin turno, o un
+    turno que todavía no subió—, la venta se aplica sin turno, como antes: no se rechaza por eso. Al final corre
+    `hooks.al_registrar_venta`,
     `hooks.al_confirmar_venta` si nació cobrada y `al_materializar(conn, venta_id, operacion)`, lo propio del
     producto con `payload["extra"]`."""
     _verificar(operacion, TIPO_VENTA_REGISTRADA)
@@ -618,8 +645,9 @@ def aplicar_venta_registrada(conn, operacion, *, hooks: Hooks = SIN_GANCHOS,
     from libracore.db.caja import create_caja_movimiento
 
     from . import promociones as _promociones
+    from .offline_caja import turno_del_central
     from .stock import add_movimiento_stock
-    from .ventas import CONCEPTO_VENTA, agregar_pago, crear_venta, obtener_venta
+    from .ventas import CONCEPTO_VENTA, agregar_pago, crear_venta, obtener_venta, vincular_venta_turno
 
     datos = operacion.payload
     if venta_del_central(conn, operacion.node_id, datos["venta_id"]) is not None:
@@ -632,6 +660,8 @@ def aplicar_venta_registrada(conn, operacion, *, hooks: Hooks = SIN_GANCHOS,
         )
     usuario_id = datos.get("usuario_id")
     fecha = datos["fecha"]
+    turno = turno_del_central(conn, operacion.node_id, datos.get("turno_id_nodo"))
+    turno_id_caja = turno["id"] if turno is not None and datos.get("caja_con_turno") else None
     items = [
         {"producto_id": it["producto_id"], "variante_id": it["variante_id"], "nombre": it["nombre"],
          "qty": _num(it["qty"]), "precio": _num(it["precio"])}
@@ -663,8 +693,10 @@ def aplicar_venta_registrada(conn, operacion, *, hooks: Hooks = SIN_GANCHOS,
         create_caja_movimiento(
             fecha=fecha, tipo="ingreso", concepto=CONCEPTO_VENTA.format(numero=numero) + medios_pago.label(p["medio"]),
             monto=_num(p["monto"]), referencia=p.get("referencia") or "", medio_pago=p["medio"],
-            usuario_id=usuario_id, conn=conn,
+            usuario_id=usuario_id, turno_id=turno_id_caja, conn=conn,
         )
+    if turno is not None:
+        vincular_venta_turno(conn, vid, turno["id"])
     for m in datos["stock"]:
         # Lo que el nodo ya vendió, en el depósito y el lote de donde salió: es un hecho consumado, así que va
         # `sobre_existencias` (el depósito pudo darse de baja en el central mientras tanto).
@@ -693,7 +725,8 @@ def aplicar_pago_acreditado(conn, operacion, *, hooks: Hooks = SIN_GANCHOS) -> N
 
     datos = operacion.payload
     vid = _venta_existente(conn, operacion)
-    acreditar_pago_qr(conn, vid, datos.get("payment_id") or "", usuario_id=None, hooks=hooks)
+    acreditar_pago_qr(conn, vid, datos.get("payment_id") or "", usuario_id=None, hooks=hooks,
+                      caja_con_turno=bool(datos.get("caja_con_turno")))
     venta = obtener_venta(conn, vid)
     for p in datos["pagos"]:
         posicion = p["posicion"]
@@ -808,8 +841,12 @@ def aplicadores(hooks: Hooks = SIN_GANCHOS, *,
     """`{operation_type: (conn, operacion) -> None}`, para registrar en el despachador de LibraEdge (uno por tipo) o
     juntar con `despachar` en un solo `operation_handler`. `hooks` son los del central (`cliente_cc_de` para la
     cuenta corriente, y lo que el producto haga al nacer o anularse una venta). `aplicar_factura` reemplaza
-    `libracore.facturas_del_nodo.aplicar_factura_del_nodo` en `venta.facturada`."""
+    `libracore.facturas_del_nodo.aplicar_factura_del_nodo` en `venta.facturada`. Suma los cinco de caja y turnos
+    (`offline_caja.aplicadores_de_caja`, ADR-069), que no dependen de los ganchos de venta."""
+    from .offline_caja import aplicadores_de_caja
+
     return {
+        **aplicadores_de_caja(),
         TIPO_VENTA_REGISTRADA: lambda conn, op: aplicar_venta_registrada(
             conn, op, hooks=hooks, al_materializar=al_materializar),
         TIPO_PAGO_ACREDITADO: lambda conn, op: aplicar_pago_acreditado(conn, op, hooks=hooks),
@@ -822,7 +859,7 @@ def aplicadores(hooks: Hooks = SIN_GANCHOS, *,
 def registrar_en(despachador, hooks: Hooks = SIN_GANCHOS, *,
                  al_materializar: Callable[[Any, int, Any], None] | None = None,
                  aplicar_factura: AplicarFactura | None = None):
-    """Registra los cinco tipos de venta, en `SCHEMA_VERSION`, en un `libraedge.sync.despacho.Despachador` (v0.7.0,
+    """Registra los diez tipos —los cinco de venta y los cinco de caja—, en `SCHEMA_VERSION`, en un `libraedge.sync.despacho.Despachador` (v0.7.0,
     ADR-007 de libraedge) y lo devuelve. Un producto suma los suyos al mismo despachador; registrar dos veces un tipo
     falla al arrancar (es la regla del `Despachador`)::
 

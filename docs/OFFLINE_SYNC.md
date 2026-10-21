@@ -10,6 +10,11 @@ LibraCommerce ya no mantiene tablas propias de `node_identity`/`local_sequences`
 > materializa en el central. `integrations/libraedge` (`sale.confirmed` sobre la capa vieja `Sale`, con venta y outbox
 > en dos pasos) se retiró: ningún producto la usaba. Lo de abajo sobre «dos pasos separados» describe aquella versión;
 > la de hoy vuelve a ser atómica (`enqueue_operation(commit=False)`).
+>
+> **Desde 2026-10-21 (ADR-069) también suben la caja y los turnos del nodo** (`libracommerce.erp.offline_caja`):
+> `turno.abierto`, `turno.cerrado`, `caja.movimiento`, `caja.movimiento_anulado` y `dia.cerrado`, con los ganchos de
+> caja de libracore (`caja_con_outbox`). Los movimientos que nacen de una venta no suben aparte: los reproduce el
+> central al aplicar la venta.
 
 - La generación de `sequence` y el enqueue/worker/transporte/recepción usan las clases de `libraedge.db.repository.NodeRepository`, `libraedge.sync.worker.OutboxWorker`, `libraedge.sync.http.HttpSyncTransport` y `libraedge.sync.receiver.SyncReceiver` directamente — LibraCommerce no las reimplementa.
 
