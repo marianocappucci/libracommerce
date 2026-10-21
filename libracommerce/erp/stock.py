@@ -31,6 +31,8 @@ from typing import Any
 from libracommerce.domain.inventory import DepositoInexistente
 
 from .. import hora
+from ..db import ganchos_de_movimientos as _ganchos
+from ..db.ganchos_de_movimientos import configurar_al_mover, configurar_antes_de_mover  # noqa: F401  (se reexportan)
 from . import lotes
 from .catalogo import get_default_deposito_id, validar_deposito
 from .hooks import SIN_GANCHOS, Hooks
@@ -163,6 +165,10 @@ def add_movimiento_stock(conn, producto_id: int, tipo: str, cantidad: float,
     costo cambia después la merma conserva el que tenía. `unit_cost` fija ese costo en vez de resolverlo (`dar_de_baja_lote` lo resuelve una vez para
     devolverlo en su respuesta) y vale para cualquier `tipo`; sin `unit_cost` ni `guardar_costo`, o con `guardar_costo` en un tipo que no es `merma`,
     el `INSERT` es el de siempre.
+
+    🔑 **Ganchos del ledger (ADR-071).** Con un nodo offline de LibraEdge configurado (`erp.offline_stock.configurar`), antes del `INSERT` corre la guarda del central
+    (`configurar_antes_de_mover`: `DepositoDeSucursalConNodo` si el depósito es de una sucursal con nodo) y después, dentro de la misma transacción, el encolado del nodo
+    (`configurar_al_mover`). Sin nada configurado no hacen nada: el camino de siempre.
     """
     if not cantidad:
         return
@@ -185,8 +191,10 @@ def add_movimiento_stock(conn, producto_id: int, tipo: str, cantidad: float,
     # `tests/` y `libracommerce/`, 2026-09-15).
     _deposito = _deposito_del_movimiento(conn, deposito_id, sobre_existencias)
     _costo = str(unit_cost) if unit_cost is not None else (costo_vigente(conn, producto_id) if guardar_costo and tipo == "merma" else None)
+    # ADR-071: la guarda del central (un depósito de una sucursal con nodo no se mueve desde acá) corre con el depósito ya resuelto y antes de escribir.
+    _ganchos.antes_de_mover(conn, _deposito)
     if _costo is not None:
-        conn.execute(
+        cur = conn.execute(
             """INSERT INTO stock_movements
                (item_id, variant_id, location_id, movement_type, quantity_delta, occurred_at,
                 source_type, source_id, note, created_by, reason_code, lot_code, expires_at, unit_cost)
@@ -194,9 +202,10 @@ def add_movimiento_stock(conn, producto_id: int, tipo: str, cantidad: float,
             (producto_id, variant_id, _deposito, _TIPO_A_MOVEMENT_TYPE[tipo], cantidad, _fecha,
              "venta" if venta_id else None, venta_id, referencia, usuario_id, tipo, _lote, _vence, _costo),
         )
+        _ganchos.despues_de_mover(conn, cur.lastrowid)   # ADR-071: el nodo encola acá, en la misma transacción
         return
     if _lote is not None or _vence is not None:
-        conn.execute(
+        cur = conn.execute(
             """INSERT INTO stock_movements
                (item_id, variant_id, location_id, movement_type, quantity_delta, occurred_at,
                 source_type, source_id, note, created_by, reason_code, lot_code, expires_at)
@@ -204,8 +213,9 @@ def add_movimiento_stock(conn, producto_id: int, tipo: str, cantidad: float,
             (producto_id, variant_id, _deposito, _TIPO_A_MOVEMENT_TYPE[tipo], cantidad, _fecha,
              "venta" if venta_id else None, venta_id, referencia, usuario_id, tipo, _lote, _vence),
         )
+        _ganchos.despues_de_mover(conn, cur.lastrowid)
         return
-    conn.execute(
+    cur = conn.execute(
         """INSERT INTO stock_movements
            (item_id, variant_id, location_id, movement_type, quantity_delta, occurred_at,
             source_type, source_id, note, created_by, reason_code)
@@ -213,6 +223,7 @@ def add_movimiento_stock(conn, producto_id: int, tipo: str, cantidad: float,
         (producto_id, variant_id, _deposito, _TIPO_A_MOVEMENT_TYPE[tipo], cantidad, _fecha,
          "venta" if venta_id else None, venta_id, referencia, usuario_id, tipo),
     )
+    _ganchos.despues_de_mover(conn, cur.lastrowid)
 
 
 def get_stock_actual(conn, producto_id: int, deposito_id: int | None = None,

@@ -21,6 +21,13 @@ LibraCommerce ya no mantiene tablas propias de `node_identity`/`local_sequences`
 > con su propio id y anota el mapeo `(nodo, id provisorio) -> id` en `libraedge_mapeo`; `venta.registrada` lleva el id
 > provisorio en `cliente_id` y el central lo traduce con ese mapeo (sin mapeo, la venta se rechaza). El mapeo baja por el espejo
 > y el nodo reapunta lo que tenía a nombre del provisorio (ADR-021 de libraedge).
+>
+> **Desde 2026-10-21 (ADR-071) también sube el stock de la sucursal** (`libracommerce.erp.offline_stock`): `stock.movimiento` por cada
+> fila del ledger que escribe el nodo (menos las de una venta, que viajan con su operación, y las de una recepción) y `compra.recibida`
+> por lo que se recibe contra las órdenes de la web. **Desde la carga inicial manda el nodo**: al vincular trae las existencias de su
+> sucursal del central, y el central contesta 409 a todo movimiento sobre los depósitos de una sucursal con nodo (ventas web, anular
+> desde la web una venta del nodo, recibir desde la web). Las transferencias son sólo entre depósitos de la sucursal del nodo, y los
+> depósitos sin sucursal se asignan antes de vincular.
 
 - La generación de `sequence` y el enqueue/worker/transporte/recepción usan las clases de `libraedge.db.repository.NodeRepository`, `libraedge.sync.worker.OutboxWorker`, `libraedge.sync.http.HttpSyncTransport` y `libraedge.sync.receiver.SyncReceiver` directamente — LibraCommerce no las reimplementa.
 

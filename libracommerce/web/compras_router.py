@@ -107,12 +107,15 @@ class OpcionesCompras:
       exige la FK. Levanta lo que quiera (`HTTPException` incluida: el motor no sabe qué código le toca a un
       proveedor inexistente para cada producto). Default: identidad.
     - `proveedor_de(conn, party_id) -> proveedor_id`: la inversa, para lo que se devuelve. Default: identidad.
+    - `al_recibir(conn, recepcion, deposito_id)` (ADR-071): corre **dentro de la transacción** de «Recibir mercadería» y de «Confirmar recepción», con la recepción ya confirmada (`erp.compras.AlRecibir`).
+      En un nodo offline de LibraEdge es `erp.offline_stock.recepcion_con_outbox(OUTBOX)`, que encola `compra.recibida`. Default: ninguno.
     """
 
     autorizar_escritura: Any = None
     numerador: compras.Numerador = compras.numero_por_defecto
     resolver_proveedor: Callable[[Any, int], int] = field(default=_sin_traduccion)
     proveedor_de: Callable[[Any, int], int] = field(default=_sin_traduccion)
+    al_recibir: compras.AlRecibir | None = None
 
 
 def build_compras_router(*, conexion: Conexion | None = None,
@@ -247,7 +250,7 @@ def build_compras_router(*, conexion: Conexion | None = None,
                     conn, supplier_party_id=party_id, deposito_id=payload.deposito_id,
                     items=[i.model_dump() for i in payload.items], clave_operacion=payload.clave_operacion,
                     occurred_at=hora.ahora_utc(), purchase_order_id=payload.purchase_order_id,
-                    document_reference=payload.document_reference,
+                    document_reference=payload.document_reference, al_recibir=opt.al_recibir,
                 )
             except compras.OrdenNoEncontrada as e:
                 raise HTTPException(404, "purchase order not found") from e
@@ -268,6 +271,7 @@ def build_compras_router(*, conexion: Conexion | None = None,
             try:
                 recepcion = compras.confirmar_recepcion(
                     conn, recepcion_id, location_id=payload.deposito_id, occurred_at=hora.ahora_utc(),
+                    al_recibir=opt.al_recibir,
                 )
             except compras.RecepcionNoEncontrada as e:
                 raise HTTPException(404, "purchase receipt not found") from e

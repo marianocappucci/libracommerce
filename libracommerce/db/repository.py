@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 
+from libracommerce.db import ganchos_de_movimientos
 from libracommerce.domain.catalog import (
     CatalogItem,
     CatalogItemType,
@@ -747,6 +748,8 @@ class SqliteCommerceRepository:
     # inventory
 
     def append_stock_movement(self, movement: StockMovement) -> StockMovement:
+        # ADR-071: la guarda del central corre con el depósito ya resuelto y antes de escribir.
+        ganchos_de_movimientos.antes_de_mover(self._conn, movement.location_id)
         cur = self._conn.cursor()
         cur.execute(
             """
@@ -773,6 +776,15 @@ class SqliteCommerceRepository:
                 movement.reason_code,
             ),
         )
+        # ADR-071: el nodo encola `stock.movimiento` acá, ANTES del commit: el movimiento y su operación viven o mueren
+        # juntos. Fuera de `transaction()` el INSERT ya está escrito y sin commit, así que si el gancho falla se revierte
+        # (si no, el próximo commit de la conexión lo confirmaría sin su operación).
+        try:
+            ganchos_de_movimientos.despues_de_mover(self._conn, cur.lastrowid)
+        except BaseException:
+            if not self._en_transaccion:
+                self._conn.rollback()
+            raise
         self._commit()
         return replace(movement, id=cur.lastrowid)
 
