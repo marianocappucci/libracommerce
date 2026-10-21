@@ -15,6 +15,12 @@ LibraCommerce ya no mantiene tablas propias de `node_identity`/`local_sequences`
 > `turno.abierto`, `turno.cerrado`, `caja.movimiento`, `caja.movimiento_anulado` y `dia.cerrado`, con los ganchos de
 > caja de libracore (`caja_con_outbox`). Los movimientos que nacen de una venta no suben aparte: los reproduce el
 > central al aplicar la venta.
+>
+> **Desde 2026-10-21 (ADR-070) también suben los clientes que se dan de alta en el nodo** (`libracommerce.erp.offline_clientes`,
+> `cliente.alta`): el cliente nace con un **id provisorio negativo**, el central lo crea (o usa al que ya tiene con ese CUIT/DNI)
+> con su propio id y anota el mapeo `(nodo, id provisorio) -> id` en `libraedge_mapeo`; `venta.registrada` lleva el id
+> provisorio en `cliente_id` y el central lo traduce con ese mapeo (sin mapeo, la venta se rechaza). El mapeo baja por el espejo
+> y el nodo reapunta lo que tenía a nombre del provisorio (ADR-021 de libraedge).
 
 - La generación de `sequence` y el enqueue/worker/transporte/recepción usan las clases de `libraedge.db.repository.NodeRepository`, `libraedge.sync.worker.OutboxWorker`, `libraedge.sync.http.HttpSyncTransport` y `libraedge.sync.receiver.SyncReceiver` directamente — LibraCommerce no las reimplementa.
 
