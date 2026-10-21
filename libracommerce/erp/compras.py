@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
@@ -54,6 +55,10 @@ class EstadoInvalido(Exception):
 class SinRevision(Exception):
     """503: a la base le falta la revisión `0006_clave_operacion_recepciones` del motor (la columna `purchase_receipts.clave_operacion`)."""
 
+
+#: `(conn, recepcion, deposito_id) -> None`: lo que corre **dentro de la transacción** cuando una recepción se confirma, con la recepción ya confirmada (`_recepcion_dict`: líneas con costo,
+#: lote y vencimiento, `received_at`) y el depósito donde entró. Lo usa el nodo offline para encolar `compra.recibida` (`erp.offline_stock`, ADR-071). Si levanta, la recepción entera se revierte.
+AlRecibir = Callable[[Any, Mapping[str, Any], int], None]
 
 #: `conn -> "OC-000001"`. El default no toma un lock: lee `MAX(id)+1` sobre una tabla sin baja (no hay `DELETE`), es
 #: el mismo criterio de `erp.catalogo.generar_codigo_producto`. Un producto con alta concurrencia real pasa el suyo
@@ -254,7 +259,12 @@ def agregar_linea_recepcion(conn, recepcion_id: int, *, item_id: int, quantity: 
     return _recepcion_dict(repositorio_de(conn).save_purchase_receipt(actualizada))
 
 
-def confirmar_recepcion(conn, recepcion_id: int, *, location_id: int, occurred_at: datetime) -> dict:
+def confirmar_recepcion(conn, recepcion_id: int, *, location_id: int, occurred_at: datetime,
+                        al_recibir: AlRecibir | None = None) -> dict:
+    """Confirma una recepción en borrador: entra el stock en `location_id`, se actualiza el último costo y avanza la orden.
+
+    `al_recibir` (ADR-071) corre dentro de la transacción con la recepción confirmada; para eso, **con `al_recibir`** la confirmación entera es una transacción (sin él, cada escritura confirma sola,
+    como siempre)."""
     recepcion = _obtener_recepcion_domain(conn, recepcion_id)
     if recepcion.status != PurchaseReceiptStatus.DRAFT:
         raise EstadoInvalido(f"la recepción {recepcion_id} no está en borrador (status={recepcion.status})")
@@ -264,8 +274,12 @@ def confirmar_recepcion(conn, recepcion_id: int, *, location_id: int, occurred_a
         orden = repositorio_de(conn).get_purchase_order(recepcion.purchase_order_id)
         if orden is not None:
             _exigir_orden_abierta_para_recibir(orden)     # se pudo cancelar la orden después de crear esta recepción
-    confirmada = confirm_purchase_receipt(repositorio_de(conn), recepcion, location_id, occurred_at)
-    return _recepcion_dict(confirmada)
+    repo = repositorio_de(conn)
+    with repo.transaction() if al_recibir is not None else nullcontext():
+        confirmada = _recepcion_dict(confirm_purchase_receipt(repo, recepcion, location_id, occurred_at))
+        if al_recibir is not None:
+            al_recibir(conn, confirmada, location_id)
+    return confirmada
 
 
 # ── Recibir mercadería de una vez, idempotente (ADR-046) ────────────────────
@@ -311,7 +325,7 @@ def _huella_del_pedido(supplier_party_id: int, purchase_order_id: int | None, do
 
 def recibir_mercaderia(conn, *, supplier_party_id: int, deposito_id: int, items: list[dict], clave_operacion: str,
                        occurred_at: datetime, purchase_order_id: int | None = None,
-                       document_reference: str | None = None) -> dict:
+                       document_reference: str | None = None, al_recibir: AlRecibir | None = None) -> dict:
     """Crea la recepción con sus líneas y la confirma (entra el stock, se actualiza el último costo y el avance de la orden) **en una sola transacción**: o queda todo o no queda nada.
 
     **Idempotente por `clave_operacion`** (obligatoria: un texto no vacío de hasta 64 caracteres, sin corchetes; p. ej. un UUID que el cliente genera una vez por intento). La clave se
@@ -320,7 +334,10 @@ def recibir_mercaderia(conn, *, supplier_party_id: int, deposito_id: int, items:
 
     `items` es una lista de `{item_id, quantity, unit_cost, lot_code?, expires_at?}`. `ValueError` con datos inválidos (clave mal formada, sin líneas, cantidad ≤ 0, costo < 0, un producto o
     el depósito inexistente); `OrdenNoEncontrada`; `SinRevision` sin la revisión `0006`. Confirma la transacción (las demás funciones de este módulo confirman cada escritura).
-    Devuelve la recepción (`_recepcion_dict`) más `repetida`."""
+    Devuelve la recepción (`_recepcion_dict`) más `repetida`.
+
+    `al_recibir(conn, recepcion, deposito_id)` (ADR-071) corre dentro de la transacción, con la recepción ya confirmada, **sólo cuando se escribió una recepción nueva**: un reintento (`repetida`) no
+    lo vuelve a llamar. Si levanta, no queda nada."""
     clave = claves.normalizar_clave(clave_operacion)
     if not items:
         raise ValueError("no se puede recibir mercadería sin líneas")
@@ -364,7 +381,10 @@ def recibir_mercaderia(conn, *, supplier_party_id: int, deposito_id: int, items:
         confirm_purchase_receipt(repo, recepcion, deposito_id, occurred_at)
         # Se vuelve a leer lo escrito, en vez de devolver lo que se armó en memoria: así la respuesta de la primera vez y la de un reintento son la misma, letra por letra
         # (PostgreSQL devuelve `8.0` para lo que se mandó como `8`).
-        return {**obtener_recepcion(conn, recepcion.id), "repetida": False}
+        escrita = obtener_recepcion(conn, recepcion.id)
+        if al_recibir is not None:
+            al_recibir(conn, escrita, deposito_id)
+        return {**escrita, "repetida": False}
 
 
 def _recepcion_repetida(conn, recepcion_id: int, pedido: dict) -> dict:

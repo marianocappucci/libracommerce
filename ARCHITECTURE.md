@@ -75,7 +75,13 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
   marcado si no coincide; y `erp.offline_clientes` (ADR-070), los clientes que se dan de alta en el nodo:
   `altas_en_nodo(Outbox(...))` es la `AltasEnNodo` de libracore (ADR-077) que encola `cliente.alta` con el id
   provisorio negativo, y el central la aplica (usa al cliente del mismo CUIT/DNI o lo crea con su id), anota el mapeo de
-  libraedge (ADR-021) y traduce el `cliente_id` de `venta.registrada`.
+  libraedge (ADR-021) y traduce el `cliente_id` de `venta.registrada`; y `erp.offline_stock` (ADR-071), el stock de la
+  sucursal del nodo: `configurar(Outbox(...))` registra dos ganchos de `db.ganchos_de_movimientos` que llaman los dos escritores
+  del ledger (`add_movimiento_stock` y `append_stock_movement`) — en el nodo encola `stock.movimiento` por fila (menos las de una
+  venta, una recepción o la carga inicial), en el central se niega (`DepositoDeSucursalConNodo`, a 409 por el producto) a mover un
+  depósito de una sucursal con nodo—, `compra.recibida` sube lo que se recibe en el nodo contra las órdenes de la web, y la carga
+  inicial (`carga_inicial_del_central` / `aplicar_carga_inicial`) trae las existencias al vincular. Con la revisión `0008`
+  (`stock_movements.origen`/`origen_id`).
 - **`web/`** (extra `[web]`) — factories de router FastAPI que el producto monta con
   `include_router` y gatea él: `catalogo_router` (`build_productos_router`,
   `build_depositos_router`, `build_stock_router`, con `OpcionesCatalogo`/`OpcionesStock`

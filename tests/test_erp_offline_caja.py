@@ -542,15 +542,15 @@ def test_un_cierre_diario_con_otros_totales_se_marca(puntas):
 # ── Piezas puras ───────────────────────────────────────────────────────────
 
 
-def test_registrar_en_registra_los_once_tipos():
+def test_registrar_en_registra_los_trece_tipos():
     from libraedge.sync.despacho import Despachador
 
-    from libracommerce.erp import offline_clientes
+    from libracommerce.erp import offline_clientes, offline_stock
 
     despachador = offline.registrar_en(Despachador())
     assert despachador.tipos() == tuple(sorted(
-        (*offline.TIPOS, *offline_caja.TIPOS_DE_CAJA, *offline_clientes.TIPOS_DE_CLIENTES)))
-    assert len(despachador) == 11
+        (*offline.TIPOS, *offline_caja.TIPOS_DE_CAJA, *offline_clientes.TIPOS_DE_CLIENTES, *offline_stock.TIPOS_DE_STOCK)))
+    assert len(despachador) == 13
 
 
 def test_una_version_de_datos_desconocida_se_rechaza():

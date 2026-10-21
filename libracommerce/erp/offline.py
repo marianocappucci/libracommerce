@@ -855,14 +855,19 @@ def aplicadores(hooks: Hooks = SIN_GANCHOS, *,
     juntar con `despachar` en un solo `operation_handler`. `hooks` son los del central (`cliente_cc_de` para la
     cuenta corriente, y lo que el producto haga al nacer o anularse una venta). `aplicar_factura` reemplaza
     `libracore.facturas_del_nodo.aplicar_factura_del_nodo` en `venta.facturada`. Suma los cinco de caja y turnos
-    (`offline_caja.aplicadores_de_caja`, ADR-069) y el alta de clientes (`offline_clientes`, ADR-070), que no dependen
-    de los ganchos de venta."""
+    (`offline_caja.aplicadores_de_caja`, ADR-069), el alta de clientes (`offline_clientes`, ADR-070) y los dos de stock
+    (`offline_stock`, ADR-071), que no dependen de los ganchos de venta.
+
+    **Todos corren con `offline_stock.aplicando_del_nodo` prendido** (ADR-071): lo que un aplicador escribe es el nodo moviendo
+    lo suyo, y la guarda del central —que se niega a mover el stock de una sucursal con nodo— no tiene que frenarlo."""
     from .offline_caja import aplicadores_de_caja
     from .offline_clientes import aplicadores_de_clientes
+    from .offline_stock import aplicador_del_nodo, aplicadores_de_stock
 
-    return {
+    por_tipo = {
         **aplicadores_de_caja(),
         **aplicadores_de_clientes(),
+        **aplicadores_de_stock(),
         TIPO_VENTA_REGISTRADA: lambda conn, op: aplicar_venta_registrada(
             conn, op, hooks=hooks, al_materializar=al_materializar),
         TIPO_PAGO_ACREDITADO: lambda conn, op: aplicar_pago_acreditado(conn, op, hooks=hooks),
@@ -870,12 +875,13 @@ def aplicadores(hooks: Hooks = SIN_GANCHOS, *,
         TIPO_VENTA_DEVOLUCION: lambda conn, op: aplicar_venta_devolucion(conn, op, hooks=hooks),
         TIPO_VENTA_FACTURADA: lambda conn, op: aplicar_venta_facturada(conn, op, aplicar_factura=aplicar_factura),
     }
+    return {tipo: aplicador_del_nodo(aplicador) for tipo, aplicador in por_tipo.items()}
 
 
 def registrar_en(despachador, hooks: Hooks = SIN_GANCHOS, *,
                  al_materializar: Callable[[Any, int, Any], None] | None = None,
                  aplicar_factura: AplicarFactura | None = None):
-    """Registra los once tipos —los cinco de venta, los cinco de caja y `cliente.alta`—, en `SCHEMA_VERSION`, en un
+    """Registra los trece tipos —los cinco de venta, los cinco de caja, `cliente.alta`, `stock.movimiento` y `compra.recibida`—, en `SCHEMA_VERSION`, en un
     `libraedge.sync.despacho.Despachador` (v0.7.0,
     ADR-007 de libraedge) y lo devuelve. Un producto suma los suyos al mismo despachador; registrar dos veces un tipo
     falla al arrancar (es la regla del `Despachador`)::
