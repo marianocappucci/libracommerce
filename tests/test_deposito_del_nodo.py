@@ -127,13 +127,15 @@ def test_un_ajuste_sin_deposito_en_el_nodo_de_la_sucursal_2_cae_en_su_deposito_y
     movimientos = _filas(nodo, "SELECT location_id, movement_type, quantity_delta FROM stock_movements WHERE reason_code <> 'carga_inicial' "
                                "AND note IN ('recuento', 'mercadería') ORDER BY id")
     assert {m["location_id"] for m in movimientos} == {DEPOSITO_DEL_NODO}, movimientos
-    assert (_saldo(nodo, DEPOSITO_DE_LA_INSTANCIA), _saldo(nodo, DEPOSITO_DEL_NODO)) == (10.0, 9.0)
+    # El depósito 1 (de Casa central) el nodo lo tenía en 10 de antes de vincularse: la carga lo llevó a cero, y el conteo (que fija el TOTAL del producto
+    # en 17) y la entrada caen en el 3. En el central el 1 sigue en 10: su stock es del central.
+    assert (_saldo(nodo, DEPOSITO_DE_LA_INSTANCIA), _saldo(nodo, DEPOSITO_DEL_NODO)) == (0.0, 19.0)
 
     operaciones = _pendientes(nodo)
     assert _tipos(operaciones) == ["stock.movimiento"] * 2
     assert [o.payload["deposito_id"] for o in operaciones] == [DEPOSITO_DEL_NODO] * 2
     _aceptar(central, operaciones)                      # el central NO lo manda a revisión (`DepositoFueraDeLaSucursal`)
-    assert (_saldo(central, DEPOSITO_DE_LA_INSTANCIA), _saldo(central, DEPOSITO_DEL_NODO)) == (10.0, 9.0)
+    assert (_saldo(central, DEPOSITO_DE_LA_INSTANCIA), _saldo(central, DEPOSITO_DEL_NODO)) == (10.0, 19.0)
 
 
 def test_una_venta_en_el_nodo_de_la_sucursal_2_descuenta_de_su_deposito_y_anota_su_sucursal(stock_puntas):
@@ -142,7 +144,7 @@ def test_una_venta_en_el_nodo_de_la_sucursal_2_descuenta_de_su_deposito_y_anota_
     hooks = offline.con_outbox(SIN_GANCHOS, offline.Outbox(nodo=lambda: NODO_S3, en_linea=lambda: False))
     with _como_nodo_s3():
         _vender(nodo, hooks, PAGO_EFECTIVO)
-    assert (_saldo(nodo, DEPOSITO_DE_LA_INSTANCIA), _saldo(nodo, DEPOSITO_DEL_NODO)) == (10.0, 8.0)
+    assert (_saldo(nodo, DEPOSITO_DE_LA_INSTANCIA), _saldo(nodo, DEPOSITO_DEL_NODO)) == (0.0, 8.0)      # el 1, a cero por la carga (era de otra sucursal)
     (venta,) = _pendientes(nodo)
     assert venta.operation_type == "venta.registrada" and venta.payload["sucursal_id"] == SUCURSAL_DEL_NODO
     assert {m["deposito_id"] for m in venta.payload["stock"]} == {DEPOSITO_DEL_NODO}
@@ -242,10 +244,10 @@ def test_la_carga_inicial_guarda_la_sucursal_en_la_misma_transaccion_que_los_aju
     _central_con_stock_en_la_sucursal_2(central)
     with _como_nodo_s3(), nodo.abrir() as conn:
         resumen = offline_stock.aplicar_carga_inicial(conn, _traer(central))
-        assert resumen == {"hecha": True, "motivo": None, "ajustes": 1, "buckets": 1}
+        assert resumen == {"hecha": True, "motivo": None, "ajustes": 2, "ajustes_ajenos": 1, "buckets": 1}      # el depósito 3 y el 1 (ajeno) a cero
         conn.rollback()                                  # el worker hace rollback si no confirma: ni los ajustes ni la sucursal quedan
     assert _sucursal_guardada(nodo) is None and _filas(nodo, "SELECT id FROM stock_movements WHERE reason_code = 'carga_inicial'") == []
-    assert _cargar(nodo, _traer(central))["ajustes"] == 1
+    assert _cargar(nodo, _traer(central))["ajustes"] == 2
     assert _sucursal_guardada(nodo) == SUCURSAL_DEL_NODO
 
 
@@ -258,7 +260,7 @@ def test_volver_a_aplicar_la_carga_guarda_la_sucursal_sin_mover_stock(stock_punt
         conn.commit()
     assert _sucursal_guardada(nodo) is None
     ledger = _filas(nodo, "SELECT * FROM stock_movements ORDER BY id")
-    assert _cargar(nodo, _traer(central)) == {"hecha": True, "motivo": None, "ajustes": 0, "buckets": 1}
+    assert _cargar(nodo, _traer(central)) == {"hecha": True, "motivo": None, "ajustes": 0, "ajustes_ajenos": 0, "buckets": 1}
     assert _sucursal_guardada(nodo) == SUCURSAL_DEL_NODO
     assert _filas(nodo, "SELECT * FROM stock_movements ORDER BY id") == ledger
     assert _cargar(nodo, _traer(central))["ajustes"] == 0                                    # idempotente

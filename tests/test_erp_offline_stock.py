@@ -27,7 +27,7 @@ from test_web_compras import _app, _deposito, _proveedor
 
 from libracommerce.db import ganchos_de_movimientos
 from libracommerce.domain.entities import Party, PartyType
-from libracommerce.erp import catalogo, compras, offline, offline_stock, stock, ventas
+from libracommerce.erp import catalogo, compras, lotes, offline, offline_stock, stock, ventas
 from libracommerce.web.compras_router import OpcionesCompras, build_compras_router
 
 libraedge = pytest.importorskip("libraedge")
@@ -655,7 +655,7 @@ def test_un_nodo_nuevo_trae_las_existencias_y_no_las_sube_de_vuelta(stock_puntas
     _vaciar_el_ledger(nodo)
 
     resumen = _cargar(nodo, _traer(central))
-    assert resumen == {"hecha": True, "motivo": None, "ajustes": 2, "buckets": 2}
+    assert resumen == {"hecha": True, "motivo": None, "ajustes": 2, "ajustes_ajenos": 0, "buckets": 2}
     filas = _filas(nodo, "SELECT * FROM stock_movements ORDER BY id")
     assert {f["reason_code"] for f in filas} == {"carga_inicial"} and {f["movement_type"] for f in filas} == {"adjustment"}
     assert (_saldo(nodo, 1), _saldo(nodo, 2)) == (10.0, 3.0)
@@ -668,7 +668,7 @@ def test_la_carga_inicial_es_idempotente(stock_puntas):
     _vaciar_el_ledger(nodo)
     assert _cargar(nodo, _traer(central))["ajustes"] == 1
     for _ in range(2):
-        assert _cargar(nodo, _traer(central)) == {"hecha": True, "motivo": None, "ajustes": 0, "buckets": 1}
+        assert _cargar(nodo, _traer(central)) == {"hecha": True, "motivo": None, "ajustes": 0, "ajustes_ajenos": 0, "buckets": 1}
     assert len(_filas(nodo, "SELECT id FROM stock_movements")) == 1 and _saldo(nodo) == 10.0
 
 
@@ -680,7 +680,7 @@ def test_ventas_antes_de_la_carga_no_se_cuentan_dos_veces(stock_puntas):
     _aceptar(central, _pendientes(nodo))
     _confirmar(nodo)
     assert (_saldo(nodo), _saldo(central)) == (8.0, 8.0)
-    assert _cargar(nodo, _traer(central)) == {"hecha": True, "motivo": None, "ajustes": 0, "buckets": 1}
+    assert _cargar(nodo, _traer(central)) == {"hecha": True, "motivo": None, "ajustes": 0, "ajustes_ajenos": 0, "buckets": 1}
     assert _saldo(nodo) == _saldo(central) == 8.0
 
 
@@ -689,7 +689,7 @@ def test_si_el_central_tenia_mas_la_carga_suma_la_diferencia_y_la_venta_posterio
     with offline_stock_sin_guarda(), central.abrir() as conn:
         stock.add_movimiento_stock(conn, 1, "entrada", 5, "se contó de más en el central", fecha=HOY, deposito_id=1)
         conn.commit()
-    assert _cargar(nodo, _traer(central)) == {"hecha": True, "motivo": None, "ajustes": 1, "buckets": 1}
+    assert _cargar(nodo, _traer(central)) == {"hecha": True, "motivo": None, "ajustes": 1, "ajustes_ajenos": 0, "buckets": 1}
     (ajuste,) = _filas(nodo, "SELECT quantity_delta, reason_code FROM stock_movements WHERE reason_code = 'carga_inicial'")
     assert float(ajuste["quantity_delta"]) == 5.0 and _saldo(nodo) == 15.0
     # Después de la carga el nodo vende, la venta sube y se aplica en el central: las dos puntas dan lo mismo y volver a cargar no cambia nada.
@@ -768,6 +768,146 @@ def test_la_carga_pide_un_nodo_y_una_version_que_entienda(stock_puntas):
         offline_stock.aplicar_carga_inicial(sqlite3.connect(":memory:"), lambda: {})
     with pytest.raises(ValueError, match="versión"):
         _cargar(nodo, lambda: {"version": 9})
+
+
+# ── La carga inicial: los depósitos ajenos (v0.72.1) ────────────────────────
+#
+# Una PC del local que estuvo vinculada a la sucursal 1 y se volvió a vincular (con otro `node_id`) a la sucursal 2 conserva en su base el stock de los
+# depósitos de la sucursal 1: la carga vieja se lo trajo y sus ventas lo movieron. Ahora la carga lo lleva a cero.
+
+SUCURSAL_NUEVA = "2"                  # el depósito 3 es de la sucursal 2; el 1 y el 2, de la 1; el 4 no tiene sucursal
+
+
+def _pc_mudada(nodo, central):
+    """El nodo con stock de la sucursal 1 (depósito 1: 10, ya estaba; depósito 2: 4 con lote; depósito 4 sin sucursal: un bucket en +2 y otro en -2) y
+    el central con 7 en el depósito 3, el de la sucursal 2 a la que se vincula ahora."""
+    with offline_stock_sin_guarda(), nodo.abrir() as conn:
+        stock.add_movimiento_stock(conn, 1, "entrada", 4, "de la sucursal 1", fecha=HOY, deposito_id=2, lot_code="L1", expires_at="2027-01-31")
+        stock.add_movimiento_stock(conn, 1, "entrada", 2, "sin sucursal", fecha=HOY, deposito_id=4)
+        conn.execute(
+            "INSERT INTO stock_movements (item_id, location_id, movement_type, quantity_delta, occurred_at, lot_code, note, reason_code) "
+            "VALUES (1, 4, 'adjustment', '-2', ?, 'N1', 'negativo', 'ajuste')", (HOY,))
+        conn.commit()
+    with offline_stock_sin_guarda(), central.abrir() as conn:
+        stock.add_movimiento_stock(conn, 1, "entrada", 7, "stock de la sucursal 2", fecha=HOY, deposito_id=3)
+        conn.commit()
+
+
+def _saldos_del_nodo(nodo):
+    with nodo.abrir() as conn:
+        return {(k[1], k[3]): v for k, v in lotes.saldos_por_bucket(conn, "1 = 1", []).items()}
+
+
+def _sucursal_guardada(nodo):
+    with nodo.abrir() as conn:
+        return offline_stock.sucursal_guardada_del_nodo(conn)
+
+
+def test_una_pc_que_pasa_de_la_sucursal_1_a_la_2_lleva_a_cero_los_depositos_ajenos_y_no_sube_nada(stock_puntas):
+    nodo, central = stock_puntas
+    _pc_mudada(nodo, central)
+    del_central = _filas(central, "SELECT * FROM stock_movements ORDER BY id")
+    assert _saldos_del_nodo(nodo) == {(1, None): Decimal("10"), (2, "L1"): Decimal("4"), (4, None): Decimal("2"), (4, "N1"): Decimal("-2")}
+
+    resumen = _cargar(nodo, _traer(central, SUCURSAL_NUEVA))
+    # 4 buckets ajenos a cero + el depósito 3 al saldo del central.
+    assert resumen == {"hecha": True, "motivo": None, "ajustes": 5, "ajustes_ajenos": 4, "buckets": 1}
+    assert _saldos_del_nodo(nodo) == {(3, None): Decimal("7")}                                  # los depósitos 1, 2 y 4: en cero
+    assert (_saldo(nodo, 1), _saldo(nodo, 2), _saldo(nodo, 3), _saldo(nodo, 4)) == (0.0, 0.0, 7.0, 0.0)
+
+    ajustes = _filas(nodo, "SELECT location_id, quantity_delta, lot_code, note, movement_type FROM stock_movements WHERE reason_code = 'carga_inicial' ORDER BY id")
+    assert len(ajustes) == 5 and {a["movement_type"] for a in ajustes} == {"adjustment"}
+    assert [a["location_id"] for a in ajustes if a["note"] == offline_stock.NOTA_CARGA_INICIAL] == [3]
+    assert {(a["location_id"], a["lot_code"], float(a["quantity_delta"])) for a in ajustes if a["note"] == offline_stock.NOTA_CARGA_INICIAL_AJENO} == {
+        (1, None, -10.0), (2, "L1", -4.0), (4, "N1", 2.0), (4, None, -2.0)}
+
+    # Nada sube: son de la carga inicial (vienen del central) y el central ni se entera.
+    assert _pendientes(nodo) == [] and _filas(nodo, "SELECT operation_id FROM sync_outbox") == []
+    assert _filas(central, "SELECT * FROM stock_movements ORDER BY id") == del_central
+    assert _saldo(central, 1) == 10.0
+    assert _sucursal_guardada(nodo) == 2
+
+    # Idempotente: volver a correrla (`--forzar`) no escribe nada.
+    ledger = _filas(nodo, "SELECT * FROM stock_movements ORDER BY id")
+    for _ in range(2):
+        assert _cargar(nodo, _traer(central, SUCURSAL_NUEVA)) == {"hecha": True, "motivo": None, "ajustes": 0, "ajustes_ajenos": 0, "buckets": 1}
+    assert _filas(nodo, "SELECT * FROM stock_movements ORDER BY id") == ledger
+
+
+def test_los_ajustes_de_los_depositos_ajenos_no_los_encola_ni_el_gancho_de_movimientos(stock_puntas):
+    """`carga_inicial` está excluido del encolado (`sube_como_movimiento`): aunque el ajuste pasara por el gancho de movimientos, no subiría."""
+    nodo, central = stock_puntas
+    _pc_mudada(nodo, central)
+    _cargar(nodo, _traer(central, SUCURSAL_NUEVA))
+    for fila in _filas(nodo, "SELECT * FROM stock_movements WHERE reason_code = 'carga_inicial' AND note = ?", (offline_stock.NOTA_CARGA_INICIAL_AJENO,)):
+        assert offline_stock.sube_como_movimiento(fila) is False
+        assert fila["source_type"] != "purchase_receipt" and fila["location_id"] in (1, 2, 4)
+    assert _pendientes(nodo) == [] and _filas(nodo, "SELECT operation_id FROM sync_outbox") == []
+
+
+def test_los_depositos_ajenos_a_cero_van_en_la_misma_transaccion_que_la_sucursal_guardada(stock_puntas):
+    nodo, central = stock_puntas
+    _pc_mudada(nodo, central)
+    antes = _saldos_del_nodo(nodo)
+    with como_nodo(), nodo.abrir() as conn:
+        assert offline_stock.aplicar_carga_inicial(conn, _traer(central, SUCURSAL_NUEVA))["ajustes_ajenos"] == 4
+        conn.rollback()                                  # el worker hace rollback si no confirma: ni los ceros, ni el depósito 3, ni la sucursal
+    assert _saldos_del_nodo(nodo) == antes and _sucursal_guardada(nodo) is None
+    assert _filas(nodo, "SELECT id FROM stock_movements WHERE reason_code = 'carga_inicial'") == []
+
+
+def test_si_la_carga_espera_no_toca_los_depositos_ajenos(stock_puntas):
+    nodo, central = stock_puntas
+    _pc_mudada(nodo, central)
+    with como_nodo():
+        _vender(nodo, _hooks_de_nodo(), PAGO_EFECTIVO)                 # una operación sin confirmar
+    antes = _saldos_del_nodo(nodo)
+    resumen = _cargar(nodo, _traer(central, SUCURSAL_NUEVA))
+    assert resumen["hecha"] is False and resumen["motivo"] == "operaciones_pendientes" and resumen["ajustes_ajenos"] == 0
+    assert _saldos_del_nodo(nodo) == antes
+
+
+def test_sin_la_sucursal_en_la_carga_no_se_toca_nada_fuera(stock_puntas):
+    """Un central anterior a v0.72.0 no manda `sucursal_id`: el nodo trae lo de la sucursal y deja el resto como estaba (comportamiento de siempre)."""
+    nodo, central = stock_puntas
+    _pc_mudada(nodo, central)
+
+    def de_un_central_viejo():
+        carga = _traer(central, SUCURSAL_NUEVA)()
+        del carga["sucursal_id"]
+        return carga
+
+    resumen = _cargar(nodo, de_un_central_viejo)
+    assert resumen == {"hecha": True, "motivo": None, "ajustes": 1, "ajustes_ajenos": 0, "buckets": 1}
+    assert _saldos_del_nodo(nodo) == {(1, None): Decimal("10"), (2, "L1"): Decimal("4"), (3, None): Decimal("7"), (4, None): Decimal("2"),
+                                      (4, "N1"): Decimal("-2")}
+    assert _filas(nodo, "SELECT id FROM stock_movements WHERE reason_code = 'carga_inicial' AND note = ?", (offline_stock.NOTA_CARGA_INICIAL_AJENO,)) == []
+
+
+def test_una_sucursal_sin_depositos_no_vacia_el_nodo(stock_puntas):
+    """Si la carga no trae ningún depósito no se sabe qué sería «propio»: no se lleva a cero nada (y no se borra un nodo por una sucursal mal armada)."""
+    nodo, central = stock_puntas
+    _pc_mudada(nodo, central)
+    antes = _saldos_del_nodo(nodo)
+    resumen = _cargar(nodo, _traer(central, "77"))
+    assert resumen == {"hecha": True, "motivo": None, "ajustes": 0, "ajustes_ajenos": 0, "buckets": 0}
+    assert _saldos_del_nodo(nodo) == antes
+
+
+def test_un_nodo_de_una_sola_sucursal_desde_siempre_carga_como_hoy(stock_puntas):
+    """Todo su stock está en depósitos de su sucursal: no hay nada ajeno que llevar a cero y la carga hace lo de siempre."""
+    nodo, central = stock_puntas
+    with offline_stock_sin_guarda(), nodo.abrir() as conn:
+        stock.add_movimiento_stock(conn, 1, "entrada", 4, "de la sucursal 1", fecha=HOY, deposito_id=2, lot_code="L1", expires_at="2027-01-31")
+        conn.commit()
+    with offline_stock_sin_guarda(), central.abrir() as conn:
+        stock.add_movimiento_stock(conn, 1, "entrada", 4, "de la sucursal 1", fecha=HOY, deposito_id=2, lot_code="L1", expires_at="2027-01-31")
+        stock.add_movimiento_stock(conn, 1, "entrada", 5, "se contó de más en el central", fecha=HOY, deposito_id=1)
+        conn.commit()
+    resumen = _cargar(nodo, _traer(central))                                  # sucursal 1
+    assert resumen == {"hecha": True, "motivo": None, "ajustes": 1, "ajustes_ajenos": 0, "buckets": 2}
+    assert _saldos_del_nodo(nodo) == {(1, None): Decimal("15"), (2, "L1"): Decimal("4")}
+    assert _cargar(nodo, _traer(central)) == {"hecha": True, "motivo": None, "ajustes": 0, "ajustes_ajenos": 0, "buckets": 2}
 
 
 # ── compra.recibida ─────────────────────────────────────────────────────────
