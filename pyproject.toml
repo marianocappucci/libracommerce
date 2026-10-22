@@ -168,7 +168,8 @@ dev = [
     # v1.186.2 -> v1.187.0 (2026-10-20): estado del sistema para la barra del pie (ADR-075). Sin migracion.
     # v1.187.0 -> v1.188.0 (2026-10-21): ganchos de caja y `origen` en turnos, movimientos y cierres: la caja del nodo sube al central (ADR-076). Con migracion 0028 (aditiva; `init_core_schema()` agrega las columnas de turnos_caja y caja_movimientos).
     # v1.188.1 -> v1.189.0 (2026-10-21): las altas de clientes en un nodo offline: id provisorio negativo y gancho dentro de la transaccion (`libracore.altas_en_nodo`, ADR-077), `crear_cliente(conn=)` y `get_client_by_cuit(conn=)`. Sin migracion.
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.189.0",
+    # v1.189.0 -> v1.190.0 (2026-10-22): libracore-unir-bases para unir la base core dentro de la del dominio (ADR-078). Sin migracion.
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.190.0",
     # SOLO PARA TESTS, como libracore: `tests/test_auditoria_formato_libraauth.py` compara
     # las filas de `RepositorioAuditado` con las de `libraauth.auditoria.registrador_dbapi`
     # (ADR-050). En runtime este motor no importa libraauth: el registrador lo pasa el producto.
