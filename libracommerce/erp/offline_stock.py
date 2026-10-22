@@ -109,6 +109,13 @@ Al vincular, el nodo trae las existencias de **su** sucursal del central; desde 
   | `True` | se escribió (o no hacía falta: `ajustes` puede ser 0) | commitea las escrituras junto con la marca de «ya hecha» |
   | `False` | `motivo` dice por qué: `operaciones_pendientes` (hay operaciones sin confirmar), `stock_en_revision` (una de stock en `manual_review`), `el_stock_cambio` (se movió stock mientras se traía la carga), `espejo_incompleto` (falta un producto, variante o depósito en el espejo) | no marca nada, hace rollback y reintenta en el ciclo siguiente |
 
+  **Los depósitos de otra sucursal se llevan a cero (v0.72.1).** Si la carga trae `sucursal_id` y los depósitos de esa sucursal, el saldo local de cada
+  bucket en un depósito que **no** es de ella se lleva a cero con un ajuste `carga_inicial` más (nota `NOTA_CARGA_INICIAL_AJENO`) y el resumen lo cuenta
+  en `ajustes_ajenos` (que es parte de `ajustes`). Es el caso de una PC del local que estuvo vinculada a otra sucursal y se volvió a vincular, con otro
+  `node_id`: la carga vieja le trajo el stock de la anterior y sus ventas lo movieron, y ese stock no es suyo (el nodo no mueve stock de otra sucursal y el
+  central es la verdad ahí). No sube (es `carga_inicial`), va en la misma transacción que los demás ajustes y la sucursal guardada, y volver a
+  correrla da 0. Sin `sucursal_id` (un central anterior) o sin depósitos en la carga no se toca nada fuera, como antes.
+
   La carga espera a que el outbox esté limpio **porque** el delta supone que el central ya aplicó todo lo que el nodo tiene: una operación
   pendiente se contaría dos veces (la carga la descontaría y después subiría). Para no perderse un movimiento que entra mientras se trae
   la carga, toma el saldo local y el último id del ledger **antes** de llamar a `traer()` y verifica **después** que ni el ledger ni el
@@ -211,6 +218,9 @@ VERSION_CARGA_INICIAL = 1
 
 #: El `reason_code` de los ajustes de la carga inicial: no suben (vienen del central).
 MOTIVO_CARGA_INICIAL = "carga_inicial"
+#: Las notas de esos ajustes: la de los depósitos de la sucursal del nodo y la de los que no lo son (que se llevan a cero).
+NOTA_CARGA_INICIAL = "Carga inicial desde el central"
+NOTA_CARGA_INICIAL_AJENO = "Carga inicial: depósito de otra sucursal, a cero"
 
 #: La tabla de la revisión `0009_sucursal_del_nodo` donde el nodo guarda lo suyo (`clave`, `valor`) y la clave de su sucursal.
 TABLA_NODO_LOCAL = "nodo_local"
@@ -785,6 +795,11 @@ def _por_que_esperar(conn) -> str | None:
     return None
 
 
+def _orden_de_bucket(clave: tuple) -> tuple:
+    """Orden estable de los buckets `(producto, depósito, variante, lote, vence)`, con `None` primero."""
+    return tuple("" if x is None else str(x) for x in clave)
+
+
 def _ultimo_movimiento(conn) -> int:
     return conn.execute("SELECT COALESCE(MAX(id), 0) FROM stock_movements").fetchone()[0]
 
@@ -805,13 +820,21 @@ def aplicar_carga_inicial(conn, traer: Callable[[], Mapping[str, Any]]) -> dict:
     vencimiento)`, un `ajuste` con `reason_code = "carga_inicial"` y delta = saldo del central − saldo local. **Idempotente** (volver a correrla da
     delta 0) y **sin duplicar**: una venta del nodo que ya subió está en las dos puntas y no entra en el delta.
 
+    **Depósitos ajenos.** Si la carga informa la sucursal (`sucursal_id`, un central desde v0.72.0) y trae sus depósitos, el saldo local de cada bucket
+    en un depósito que **no** es de esa sucursal se lleva a **cero** con otro ajuste `carga_inicial` (nota `NOTA_CARGA_INICIAL_AJENO`). Es el caso de
+    una PC que estuvo vinculada a otra sucursal y se volvió a vincular a ésta: conserva el stock que la carga vieja le trajo y que movieron sus
+    ventas, y ese stock es basura (un nodo no mueve stock de otra sucursal, ADR-071; el central es la verdad allá). Como todo `carga_inicial`, esos
+    ajustes no suben al central (se escriben directo, sin pasar por el gancho de encolado, y `sube_como_movimiento` los excluye). Sin `sucursal_id`
+    (un central anterior) o sin depósitos en la carga (una sucursal sin depósitos: no se sabe qué sería «propio») no se toca nada fuera, como antes.
+
     Es la firma que LibraEdge llama: `(conn, traer) -> dict`. `conn` es la conexión del nodo y **no se commitea acá** (es de quien llama: que
     confirme sólo si `hecha`); `traer()` devuelve lo de `carga_inicial_del_central`. Devuelve `{"hecha": bool, "motivo": str | None, "ajustes": int,
-    "buckets": int}`:
+    "ajustes_ajenos": int, "buckets": int}`:
 
     - `hecha = False` y `motivo` (`operaciones_pendientes`, `stock_en_revision`, `el_stock_cambio`, `espejo_incompleto`): no escribió nada y se reintenta
       en el ciclo siguiente. Ver el docstring del módulo.
-    - `hecha = True`: `ajustes` es cuántos ajustes escribió y `buckets` cuántos buckets del central miró (0 ajustes = ya estaba al día).
+    - `hecha = True`: `ajustes` es cuántos ajustes escribió **en total**, `ajustes_ajenos` cuántos de ésos fueron a cero de depósitos ajenos (el resto son
+      de los depósitos de la sucursal) y `buckets` cuántos buckets del central miró (0 ajustes = ya estaba al día).
 
     Si la carga trae `sucursal_id` (un central desde v0.72.0), también la **guarda** en `nodo_local`, en la misma transacción que los ajustes, y es
     lo que hace que el depósito por defecto del nodo sea el de su sucursal (`deposito_por_defecto_del_nodo`). Sin la revisión `0009` levanta
@@ -824,7 +847,7 @@ def aplicar_carga_inicial(conn, traer: Callable[[], Mapping[str, Any]]) -> dict:
     espera = _por_que_esperar(conn)
     if espera:
         logger.info("carga inicial: espera (%s)", espera)
-        return {"hecha": False, "motivo": espera, "ajustes": 0, "buckets": 0}
+        return {"hecha": False, "motivo": espera, "ajustes": 0, "ajustes_ajenos": 0, "buckets": 0}
     ultimo = _ultimo_movimiento(conn)
     locales = lotes.saldos_por_bucket(conn, "1 = 1", [])
     datos = traer()
@@ -838,17 +861,20 @@ def aplicar_carga_inicial(conn, traer: Callable[[], Mapping[str, Any]]) -> dict:
         _exigir_nodo_local(conn)                           # antes de escribir nada
     if _ultimo_movimiento(conn) != ultimo or _por_que_esperar(conn):
         logger.info("carga inicial: el stock del nodo cambió mientras se traía; se reintenta")
-        return {"hecha": False, "motivo": "el_stock_cambio", "ajustes": 0, "buckets": 0}
+        return {"hecha": False, "motivo": "el_stock_cambio", "ajustes": 0, "ajustes_ajenos": 0, "buckets": 0}
     depositos = {d["id"] for d in datos["depositos"]}
     centrales = {
         (s["item_id"], s["location_id"], s["variant_id"], s["lote"], s["vence"]): _decimal(s["cantidad"], "el saldo")
         for s in datos["saldos"] if s["location_id"] in depositos
     }
     deltas = []
-    for clave in sorted(set(centrales) | {k for k in locales if k[1] in depositos}, key=lambda k: tuple("" if x is None else str(x) for x in k)):
+    for clave in sorted(set(centrales) | {k for k in locales if k[1] in depositos}, key=_orden_de_bucket):
         delta = lotes.saldo_limpio(centrales.get(clave, lotes.CERO) - locales.get(clave, lotes.CERO))
         if delta != 0:
             deltas.append((clave, delta))
+    ajenos = []                                            # los depósitos que no son de la sucursal del nodo: a cero
+    if sucursal is not None and depositos:
+        ajenos = [(clave, -saldo) for clave, saldo in sorted(locales.items(), key=lambda kv: _orden_de_bucket(kv[0])) if clave[1] not in depositos]
     faltan = {
         "productos": sorted({k[0] for k, _ in deltas} - _existentes(conn, "catalog_items", {k[0] for k, _ in deltas})),
         "variantes": sorted({k[2] for k, _ in deltas if k[2] is not None}
@@ -857,18 +883,19 @@ def aplicar_carga_inicial(conn, traer: Callable[[], Mapping[str, Any]]) -> dict:
     }
     if any(faltan.values()):
         logger.warning("carga inicial: el espejo del nodo todavía no tiene %s", faltan)
-        return {"hecha": False, "motivo": "espejo_incompleto", "ajustes": 0, "buckets": len(centrales),
+        return {"hecha": False, "motivo": "espejo_incompleto", "ajustes": 0, "ajustes_ajenos": 0, "buckets": len(centrales),
                 "faltan": {k: v[:20] for k, v in faltan.items() if v}}
     ocurrido = hora.ahora_local().replace(microsecond=0).isoformat()
-    for (item, deposito, variante, lote, vence), delta in deltas:
-        conn.execute(
-            """INSERT INTO stock_movements
-               (item_id, variant_id, location_id, movement_type, quantity_delta, occurred_at, lot_code, expires_at, note, reason_code)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (item, variante, deposito, "adjustment", _cantidad_en_texto(delta), ocurrido, lote, vence, "Carga inicial desde el central",
-             MOTIVO_CARGA_INICIAL),
-        )
+    for nota, ajustes in ((NOTA_CARGA_INICIAL, deltas), (NOTA_CARGA_INICIAL_AJENO, ajenos)):
+        for (item, deposito, variante, lote, vence), delta in ajustes:
+            conn.execute(
+                """INSERT INTO stock_movements
+                   (item_id, variant_id, location_id, movement_type, quantity_delta, occurred_at, lot_code, expires_at, note, reason_code)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (item, variante, deposito, "adjustment", _cantidad_en_texto(delta), ocurrido, lote, vence, nota, MOTIVO_CARGA_INICIAL),
+            )
     if sucursal is not None:
         guardar_sucursal_del_nodo(conn, sucursal)
-    logger.info("carga inicial: %d ajustes sobre %d buckets del central (sucursal del nodo: %s)", len(deltas), len(centrales), sucursal)
-    return {"hecha": True, "motivo": None, "ajustes": len(deltas), "buckets": len(centrales)}
+    logger.info("carga inicial: %d ajustes (%d a cero de depósitos ajenos) sobre %d buckets del central (sucursal del nodo: %s)",
+                len(deltas) + len(ajenos), len(ajenos), len(centrales), sucursal)
+    return {"hecha": True, "motivo": None, "ajustes": len(deltas) + len(ajenos), "ajustes_ajenos": len(ajenos), "buckets": len(centrales)}

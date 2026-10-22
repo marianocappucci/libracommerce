@@ -33,6 +33,10 @@ LibraCommerce ya no mantiene tablas propias de `node_identity`/`local_sequences`
 > la guarda en `nodo_local` (revisión `0009`), así un movimiento o una venta sin `deposito_id` cae en un depósito de la sucursal del nodo y no en el
 > «por defecto de la instancia» del espejo. Al actualizar un nodo ya instalado: correr `libracommerce-migrar upgrade` (deduce la sucursal de la
 > carga inicial que ya tenga) y, si su sucursal no tenía stock al vincular, `libraedge-nodo carga-inicial --forzar` (delta 0; guarda la sucursal).
+>
+> **Desde v0.72.1 la carga inicial también lleva a cero el stock local de los depósitos que no son de la sucursal del nodo** (enmienda al ADR-071): una PC
+> que estuvo vinculada a otra sucursal y se volvió a vincular conserva el stock de la anterior, que no es suyo (un nodo no mueve stock de otra sucursal y el
+> central es la verdad ahí). Son ajustes `carga_inicial` (no suben) y el resumen de `aplicar_carga_inicial` suma `ajustes_ajenos`. Sin cambios de migración.
 
 - La generación de `sequence` y el enqueue/worker/transporte/recepción usan las clases de `libraedge.db.repository.NodeRepository`, `libraedge.sync.worker.OutboxWorker`, `libraedge.sync.http.HttpSyncTransport` y `libraedge.sync.receiver.SyncReceiver` directamente — LibraCommerce no las reimplementa.
 
