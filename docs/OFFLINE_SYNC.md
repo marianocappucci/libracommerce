@@ -28,6 +28,11 @@ LibraCommerce ya no mantiene tablas propias de `node_identity`/`local_sequences`
 > sucursal del central, y el central contesta 409 a todo movimiento sobre los depósitos de una sucursal con nodo (ventas web, anular
 > desde la web una venta del nodo, recibir desde la web). Las transferencias son sólo entre depósitos de la sucursal del nodo, y los
 > depósitos sin sucursal se asignan antes de vincular.
+>
+> **Desde v0.72.0 el depósito por defecto de un nodo es el de su sucursal** (enmienda al ADR-071): la carga inicial trae `sucursal_id` y el nodo
+> la guarda en `nodo_local` (revisión `0009`), así un movimiento o una venta sin `deposito_id` cae en un depósito de la sucursal del nodo y no en el
+> «por defecto de la instancia» del espejo. Al actualizar un nodo ya instalado: correr `libracommerce-migrar upgrade` (deduce la sucursal de la
+> carga inicial que ya tenga) y, si su sucursal no tenía stock al vincular, `libraedge-nodo carga-inicial --forzar` (delta 0; guarda la sucursal).
 
 - La generación de `sequence` y el enqueue/worker/transporte/recepción usan las clases de `libraedge.db.repository.NodeRepository`, `libraedge.sync.worker.OutboxWorker`, `libraedge.sync.http.HttpSyncTransport` y `libraedge.sync.receiver.SyncReceiver` directamente — LibraCommerce no las reimplementa.
 

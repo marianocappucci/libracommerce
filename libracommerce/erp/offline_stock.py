@@ -90,10 +90,13 @@ Al vincular, el nodo trae las existencias de **su** sucursal del central; desde 
   sucursal y el saldo de cada `(producto, variante, depósito, lote, vencimiento)` con stock (`erp.lotes.saldos_por_bucket`), JSON puro:
 
   ```json
-  {"version": 1, "depositos": [{"id": 3, "nombre": "Salón", "activo": true}],
+  {"version": 1, "sucursal_id": 2, "depositos": [{"id": 3, "nombre": "Salón", "activo": true}],
    "saldos": [{"item_id": 7, "variant_id": null, "location_id": 3, "lote": null, "vence": null, "cantidad": "8"}],
    "corte": {"movimiento_id": 1250, "a": "2026-10-21T16:00:00+00:00"}}
   ```
+
+  `sucursal_id` (aditivo desde v0.72.0, la `version` sigue en 1) es la sucursal del nodo según `node_identity`: el nodo la guarda (ver «El depósito
+  por defecto de un nodo»). Un central anterior no la manda y un nodo anterior no la lee: no hay nada que romper.
 
 - En el nodo, `aplicar_carga_inicial(conn, traer) -> dict` es lo que LibraEdge llama
   (`LIBRAEDGE_CARGA_INICIAL=libracommerce.erp.offline_stock:aplicar_carga_inicial`). `conn` es la conexión del nodo (ya abierta, **sin
@@ -110,6 +113,29 @@ Al vincular, el nodo trae las existencias de **su** sucursal del central; desde 
   pendiente se contaría dos veces (la carga la descontaría y después subiría). Para no perderse un movimiento que entra mientras se trae
   la carga, toma el saldo local y el último id del ledger **antes** de llamar a `traer()` y verifica **después** que ni el ledger ni el
   outbox cambiaron; si cambiaron, no escribe nada.
+
+## El depósito por defecto de un nodo (v0.72.0)
+
+🔴 Un movimiento sin `deposito_id` (el ajuste de ContaLibra, que no usa `OpcionesStock.por_deposito`; la producción; una venta sin depósito) cae en
+`catalogo.get_default_deposito_id`, y el espejo del nodo trae el `locations.is_default` **del central**: el de «Casa central». Un nodo de otra
+sucursal escribía en un depósito que no es suyo y el central lo mandaba a revisión manual (`DepositoFueraDeLaSucursal`). Ahora, **en un nodo, el
+depósito por defecto es el activo de la sucursal del nodo** (`catalogo.deposito_activo_de_la_sucursal`: el `branches.default_location_id` si sigue
+activo y, si no, el activo de menor id). Son tres piezas:
+
+- **El nodo sabe su sucursal.** `carga_inicial_del_central` suma `sucursal_id` al payload y `aplicar_carga_inicial` lo guarda, **en la misma transacción
+  que los ajustes**, en `nodo_local(clave, valor)` (revisión `0009_sucursal_del_nodo`; `clave = "sucursal_id"`). Es una tabla chica y propia de
+  LibraCommerce: no toca las tablas de LibraEdge (`node_identity` es del central; el nodo no la tiene). `sucursal_guardada_del_nodo(conn)` la lee
+  (`None` si no hay tabla o no hay valor) y `guardar_sucursal_del_nodo(conn, id)` la escribe.
+- **El resolvedor.** `configurar(OUTBOX)` registra `deposito_por_defecto_del_nodo(OUTBOX)` en `db.ganchos_de_movimientos.configurar_deposito_por_defecto`
+  (global, como los otros dos ganchos). Contesta sólo si `outbox.nodo()` no es `None` y el nodo tiene su sucursal guardada; en cualquier otro caso
+  contesta `None` y `get_default_deposito_id` hace lo de siempre. En el central y fuera de un nodo no cambia nada.
+- **Nodos ya instalados.** La revisión `0009` **deduce** la sucursal de las filas `reason_code = 'carga_inicial'` que ya tienen (esas filas sólo las
+  escribe un nodo y sólo en depósitos de su sucursal): si todas son de una sola sucursal, la guarda. Un nodo cuya sucursal no tenía stock al vincular
+  no tiene esas filas: ahí se actualiza el central **primero** y se corre en el nodo `libraedge-nodo carga-inicial --forzar`, que borra la marca y
+  vuelve a llamar a `aplicar_carga_inicial` (delta 0 si el nodo está al día; espera si hay operaciones sin confirmar) y deja guardada la sucursal.
+
+Quedan **sin cambio** `get_default_sucursal_id` (el `is_default` de `branches`: sólo lo usa la alta de depósitos de la web y `adoptar_sucursal_unica`,
+que no corren en un nodo) y todo lo que ya pasa `deposito_id` explícito.
 
 ## Los depósitos sin sucursal
 
@@ -186,6 +212,10 @@ VERSION_CARGA_INICIAL = 1
 #: El `reason_code` de los ajustes de la carga inicial: no suben (vienen del central).
 MOTIVO_CARGA_INICIAL = "carga_inicial"
 
+#: La tabla de la revisión `0009_sucursal_del_nodo` donde el nodo guarda lo suyo (`clave`, `valor`) y la clave de su sucursal.
+TABLA_NODO_LOCAL = "nodo_local"
+CLAVE_SUCURSAL = "sucursal_id"
+
 #: Los `source_type` de las filas que viajan con una venta y por eso no suben como `stock.movimiento`.
 _ORIGENES_DE_VENTA = ("venta", "sale", "sale_return")
 _ORIGEN_DE_RECEPCION = "purchase_receipt"
@@ -203,6 +233,10 @@ class StockDelNodoError(ValueError):
 
 class StockSinRevision(StockDelNodoError):
     """A la base del central le falta la revisión `0008_origen_del_stock` (las columnas `stock_movements.origen` y `origen_id`)."""
+
+
+class NodoSinRevision(StockDelNodoError):
+    """A la base del nodo le falta la revisión `0009_sucursal_del_nodo` (la tabla `nodo_local`): no puede guardar su sucursal."""
 
 
 class NodoDesconocido(StockDelNodoError):
@@ -390,6 +424,64 @@ def recepcion_con_outbox(outbox: Outbox, al_recibir: Callable[[Any, Mapping[str,
     return compuesto
 
 
+# ── En el nodo: su sucursal y su depósito por defecto ───────────────────────
+
+
+def tiene_nodo_local(conn) -> bool:
+    """Si la base tiene la revisión `0009_sucursal_del_nodo` (la tabla `nodo_local`). Por metadatos, como `tiene_origen`."""
+    return _tiene_tabla(conn, TABLA_NODO_LOCAL)
+
+
+def sucursal_guardada_del_nodo(conn) -> int | None:
+    """El id de la sucursal que el nodo guardó en la carga inicial, o `None` (sin la revisión `0009`, sin carga todavía, o un valor que no es un id)."""
+    if not tiene_nodo_local(conn):
+        return None
+    fila = conn.execute(f"SELECT valor FROM {TABLA_NODO_LOCAL} WHERE clave = ?", (CLAVE_SUCURSAL,)).fetchone()
+    if fila is None:
+        return None
+    try:
+        return int(str(fila[0]))
+    except ValueError:
+        logger.warning("nodo_local.%s no es un id de sucursal: %r", CLAVE_SUCURSAL, fila[0])
+        return None
+
+
+def _exigir_nodo_local(conn) -> None:
+    if not tiene_nodo_local(conn):
+        raise NodoSinRevision(
+            "a la base del nodo le falta la revisión 0009_sucursal_del_nodo (la tabla nodo_local): correr `libracommerce-migrar upgrade "
+            "--prefijo <producto>` y reintentar la carga inicial"
+        )
+
+
+def guardar_sucursal_del_nodo(conn, sucursal_id) -> None:
+    """Deja `sucursal_id` como la sucursal del nodo (la pisa si ya había otra). No commitea: es de quien llama. `NodoSinRevision` si falta la `0009`."""
+    sucursal = _id_de_sucursal(sucursal_id)
+    _exigir_nodo_local(conn)
+    conn.execute(
+        f"INSERT INTO {TABLA_NODO_LOCAL} (clave, valor) VALUES (?, ?) ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor",
+        (CLAVE_SUCURSAL, str(sucursal)),
+    )
+
+
+def deposito_por_defecto_del_nodo(outbox: Outbox) -> Callable[[Any], int | None]:
+    """El resolvedor `(conn) -> int | None` para `db.ganchos_de_movimientos.configurar_deposito_por_defecto`: en un nodo (`outbox.nodo()` no es
+    `None`) que ya guardó su sucursal, el depósito activo de esa sucursal; en cualquier otro caso `None` y `get_default_deposito_id` sigue como
+    siempre (el central, una instalación común, un nodo que todavía no hizo la carga o sin la `0009`, o cuya sucursal no tiene depósito activo)."""
+
+    def resolver(conn) -> int | None:
+        if outbox.nodo() is None:
+            return None
+        sucursal = sucursal_guardada_del_nodo(conn)
+        if sucursal is None:
+            return None
+        from .catalogo import deposito_activo_de_la_sucursal
+
+        return deposito_activo_de_la_sucursal(conn, sucursal)
+
+    return resolver
+
+
 # ── En el central: la guarda ────────────────────────────────────────────────
 
 
@@ -422,15 +514,18 @@ def guarda_del_central(outbox: Outbox) -> Callable[[Any, int], None]:
 
 def configurar(outbox: Outbox) -> None:
     """Arma las dos mitades en el proceso, **una vez**, al armar la app y en las dos puntas (como `altas_en_nodo.configurar`): el encolado
-    de `stock.movimiento` (sólo hace algo en un nodo) y la guarda (sólo hace algo en el central). Es global y reemplaza a la anterior."""
+    de `stock.movimiento` (sólo hace algo en un nodo), la guarda (sólo hace algo en el central) y el depósito por defecto del nodo (sólo hace algo en
+    un nodo que ya sabe su sucursal). Es global y reemplaza a la anterior."""
     ganchos_de_movimientos.configurar_al_mover(movimientos_con_outbox(outbox))
     ganchos_de_movimientos.configurar_antes_de_mover(guarda_del_central(outbox))
+    ganchos_de_movimientos.configurar_deposito_por_defecto(deposito_por_defecto_del_nodo(outbox))
 
 
 def desconfigurar() -> None:
-    """Saca los dos ganchos (para los tests, que comparten el proceso)."""
+    """Saca los tres ganchos (para los tests, que comparten el proceso)."""
     ganchos_de_movimientos.configurar_al_mover(None)
     ganchos_de_movimientos.configurar_antes_de_mover(None)
+    ganchos_de_movimientos.configurar_deposito_por_defecto(None)
 
 
 def instalar_manejador_409(app) -> None:
@@ -644,13 +739,14 @@ def _cantidad_en_texto(cantidad: Decimal) -> str:
 
 def carga_inicial_del_central(conn, node_id: str, branch_id) -> dict:
     """Las existencias de la sucursal `branch_id` del nodo `node_id`, para que el nodo las traiga al vincularse. JSON puro:
-    `{"version", "depositos": [{"id", "nombre", "activo"}], "saldos": [{"item_id", "variant_id", "location_id", "lote", "vence", "cantidad"}],
+    `{"version", "sucursal_id", "depositos": [{"id", "nombre", "activo"}], "saldos": [{"item_id", "variant_id", "location_id", "lote", "vence", "cantidad"}],
     "corte": {"movimiento_id", "a"}}`.
 
     Los saldos son los de `erp.lotes.saldos_por_bucket` sobre todos los depósitos de la sucursal (activos o no: las existencias de un depósito
     dado de baja siguen existiendo), con el lote y el vencimiento normalizados y sin los saldos en cero. `corte` dice hasta qué fila del ledger
     del central llegó la foto (`movimiento_id`, el mayor id de esos depósitos) y cuándo se sacó (`a`, UTC): es información, el nodo no la usa para
-    decidir. Es una lectura: no escribe ni commitea."""
+    decidir. `sucursal_id` es la sucursal del nodo (un entero): el nodo la guarda para saber cuál es su depósito por defecto. Es una lectura:
+    no escribe ni commitea."""
     sucursal = _id_de_sucursal(branch_id)
     depositos = [{"id": f[0], "nombre": f[1], "activo": bool(f[2])} for f in conn.execute(
         "SELECT id, name, active FROM locations WHERE branch_id = ? ORDER BY id", (sucursal,)).fetchall()]
@@ -666,7 +762,7 @@ def carga_inicial_del_central(conn, node_id: str, branch_id) -> dict:
                            "cantidad": _cantidad_en_texto(saldo)})
         corte_id = conn.execute(f"SELECT MAX(id) FROM stock_movements WHERE location_id IN ({marcadores})", ids).fetchone()[0]
     logger.info("carga inicial del nodo %s (sucursal %s): %d depósitos, %d saldos", node_id, sucursal, len(depositos), len(saldos))
-    return {"version": VERSION_CARGA_INICIAL, "depositos": depositos, "saldos": saldos,
+    return {"version": VERSION_CARGA_INICIAL, "sucursal_id": sucursal, "depositos": depositos, "saldos": saldos,
             "corte": {"movimiento_id": corte_id, "a": hora.ahora_utc().isoformat()}}
 
 
@@ -717,6 +813,10 @@ def aplicar_carga_inicial(conn, traer: Callable[[], Mapping[str, Any]]) -> dict:
       en el ciclo siguiente. Ver el docstring del módulo.
     - `hecha = True`: `ajustes` es cuántos ajustes escribió y `buckets` cuántos buckets del central miró (0 ajustes = ya estaba al día).
 
+    Si la carga trae `sucursal_id` (un central desde v0.72.0), también la **guarda** en `nodo_local`, en la misma transacción que los ajustes, y es
+    lo que hace que el depósito por defecto del nodo sea el de su sucursal (`deposito_por_defecto_del_nodo`). Sin la revisión `0009` levanta
+    `NodoSinRevision` **antes de escribir** (el worker de LibraEdge lo muestra como error y reintenta); un central anterior no la manda y no se guarda nada.
+
     Orden: (1) outbox limpio; (2) saldo local y último id del ledger; (3) `traer()`; (4) que ni el ledger ni el outbox hayan cambiado
     desde (2); (5) que el espejo tenga los productos, variantes y depósitos; (6) los ajustes."""
     if not _tiene_tabla(conn, "sync_outbox"):
@@ -730,6 +830,12 @@ def aplicar_carga_inicial(conn, traer: Callable[[], Mapping[str, Any]]) -> dict:
     datos = traer()
     if datos.get("version") != VERSION_CARGA_INICIAL:
         raise ValueError(f"versión {datos.get('version')!r} de la carga inicial desconocida (se entiende {VERSION_CARGA_INICIAL})")
+    sucursal = datos.get("sucursal_id")
+    if sucursal is None:
+        logger.warning("carga inicial: el central no informó la sucursal del nodo (es anterior a v0.72.0): el depósito por defecto sigue siendo el de la instancia")
+    else:
+        sucursal = _id_de_sucursal(sucursal)
+        _exigir_nodo_local(conn)                           # antes de escribir nada
     if _ultimo_movimiento(conn) != ultimo or _por_que_esperar(conn):
         logger.info("carga inicial: el stock del nodo cambió mientras se traía; se reintenta")
         return {"hecha": False, "motivo": "el_stock_cambio", "ajustes": 0, "buckets": 0}
@@ -762,5 +868,7 @@ def aplicar_carga_inicial(conn, traer: Callable[[], Mapping[str, Any]]) -> dict:
             (item, variante, deposito, "adjustment", _cantidad_en_texto(delta), ocurrido, lote, vence, "Carga inicial desde el central",
              MOTIVO_CARGA_INICIAL),
         )
-    logger.info("carga inicial: %d ajustes sobre %d buckets del central", len(deltas), len(centrales))
+    if sucursal is not None:
+        guardar_sucursal_del_nodo(conn, sucursal)
+    logger.info("carga inicial: %d ajustes sobre %d buckets del central (sucursal del nodo: %s)", len(deltas), len(centrales), sucursal)
     return {"hecha": True, "motivo": None, "ajustes": len(deltas), "buckets": len(centrales)}

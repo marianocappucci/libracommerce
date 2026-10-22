@@ -82,8 +82,14 @@ def _revision_0008(conn):
     conn.execute("CREATE UNIQUE INDEX idx_stock_movements_origen ON stock_movements(origen, origen_id) WHERE origen IS NOT NULL")
 
 
+def _revision_0009(conn):
+    """Lo que hace la revisión `0009_sucursal_del_nodo` (su propio test la corre de verdad, en `test_deposito_del_nodo.py`)."""
+    conn.execute("CREATE TABLE nodo_local (clave TEXT PRIMARY KEY, valor TEXT NOT NULL)")
+
+
 def _preparar(puntas, *, con_0008=True):
-    """Sucursales 1 y 2; depósitos 1 y 2 (sucursal 1), 3 (sucursal 2) y 4 (sin sucursal); en el central, el nodo registrado y la revisión `0008`."""
+    """Sucursales 1 y 2; depósitos 1 y 2 (sucursal 1), 3 (sucursal 2) y 4 (sin sucursal); en el central, el nodo registrado y la revisión `0008`; en
+    el nodo, la `0009` (donde guarda su sucursal la carga inicial)."""
 
     def sucursales(conn):
         conn.execute("INSERT INTO branches (name, is_default) VALUES ('Casa central', 1)")
@@ -95,6 +101,9 @@ def _preparar(puntas, *, con_0008=True):
 
     _en_las_dos(puntas, sucursales)
     nodo, central = puntas
+    with nodo.abrir() as conn:
+        _revision_0009(conn)
+        conn.commit()
     with central.abrir() as conn:
         NodeRepository(conn).register_node(NODO_ID, "1")
         if con_0008:
@@ -1012,9 +1021,9 @@ def test_la_revision_0008_agrega_las_columnas_y_el_indice_sin_tocar_el_ledger(de
         assert conn.execute("SELECT COUNT(*) FROM stock_movements WHERE origen IS NOT NULL").fetchone()[0] == 0
         return [f[0] for f in conn.execute("SELECT version_num FROM alembic_version_libracommerce").fetchall()]
 
-    assert _con_conexion(destino, verificar) == ["0008_origen_del_stock"]
+    assert _con_conexion(destino, verificar) == [_vto._CABEZA]
     migrar.upgrade(destino)                                    # idempotente
-    assert _con_conexion(destino, verificar) == ["0008_origen_del_stock"]
+    assert _con_conexion(destino, verificar) == [_vto._CABEZA]
 
 
 def test_el_indice_de_origen_es_unico_solo_sobre_las_filas_con_origen(destino):
