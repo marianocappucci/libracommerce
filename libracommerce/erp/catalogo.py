@@ -31,6 +31,7 @@ from datetime import datetime as _datetime
 from decimal import Decimal
 from typing import Any
 
+from libracommerce.db import ganchos_de_movimientos
 from libracommerce.db.repository import repositorio_de
 from libracommerce.domain.catalog import (
     CatalogItem,
@@ -190,7 +191,16 @@ def get_default_deposito_id(conn) -> int | None:
     """El depósito donde cae un movimiento sin `deposito_id`: el marcado por defecto, y si no hay ninguno (o el marcado está inactivo)
     el activo de menor id. **Nunca un depósito inactivo** (ADR-051): desde que `save_location` no deja guardar un default inactivo
     no debería pasar, pero una base de antes de esa regla puede tenerlo (LibraDesk desactivaba el default por `save_location`), y
-    cargarle stock en silencio a un depósito dado de baja era justo el defecto. `None` si no hay ningún depósito activo."""
+    cargarle stock en silencio a un depósito dado de baja era justo el defecto. `None` si no hay ningún depósito activo.
+
+    🔴 **En un nodo offline de LibraEdge el depósito por defecto es el de la SUCURSAL del nodo**, no el de la instancia (ADR-071, enmienda
+    de v0.72.0): el espejo trae `locations.is_default` del central, y ese es el de «Casa central». Un movimiento sin `deposito_id` hecho en
+    otra sucursal iba a un depósito que no es suyo y el central lo rechazaba (`DepositoFueraDeLaSucursal`). Lo resuelve el gancho de
+    `db.ganchos_de_movimientos.configurar_deposito_por_defecto` (que registra `offline_stock.configurar`); fuera de un nodo, o en un nodo
+    que todavía no sabe su sucursal, no hay gancho que conteste y vale lo de siempre."""
+    de_nodo = ganchos_de_movimientos.deposito_por_defecto(conn)
+    if de_nodo is not None:
+        return de_nodo
     row = conn.execute("SELECT id FROM locations WHERE is_default=1 AND active=1 LIMIT 1").fetchone()
     if not row:
         row = conn.execute("SELECT id FROM locations WHERE active=1 ORDER BY id LIMIT 1").fetchone()
@@ -705,6 +715,19 @@ def get_deposito_de_venta(conn, sucursal_id: int) -> int | None:
         return None
     _asegurar_deposito_predeterminado(conn, sucursal_id)
     return conn.execute("SELECT default_location_id FROM branches WHERE id=?", (sucursal_id,)).fetchone()[0]
+
+
+def deposito_activo_de_la_sucursal(conn, sucursal_id: int) -> int | None:
+    """El depósito activo donde cae lo que se mueve en esa sucursal sin decir de cuál: su predeterminado (`branches.default_location_id`) si
+    sigue activo y es de ella, y si no el activo de menor id. `None` si la sucursal no tiene ninguno activo. Es la **lectura pura** de lo que
+    `get_deposito_de_venta` deja resuelto (que además repara el predeterminado con un `UPDATE`): no escribe, así que sirve en medio de
+    un movimiento."""
+    fila = conn.execute(
+        "SELECT l.id FROM locations l JOIN branches b ON b.id = l.branch_id "
+        "WHERE l.branch_id=? AND l.active=1 ORDER BY (l.id = b.default_location_id) DESC, l.id LIMIT 1",
+        (sucursal_id,),
+    ).fetchone()
+    return fila[0] if fila else None
 
 
 def set_deposito_predeterminado(conn, sucursal_id: int, deposito_id: int):

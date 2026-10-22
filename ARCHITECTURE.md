@@ -80,8 +80,9 @@ que distingue a este motor del acceso a datos más plano de `libracore.db`:
   del ledger (`add_movimiento_stock` y `append_stock_movement`) — en el nodo encola `stock.movimiento` por fila (menos las de una
   venta, una recepción o la carga inicial), en el central se niega (`DepositoDeSucursalConNodo`, a 409 por el producto) a mover un
   depósito de una sucursal con nodo—, `compra.recibida` sube lo que se recibe en el nodo contra las órdenes de la web, y la carga
-  inicial (`carga_inicial_del_central` / `aplicar_carga_inicial`) trae las existencias al vincular. Con la revisión `0008`
-  (`stock_movements.origen`/`origen_id`).
+  inicial (`carga_inicial_del_central` / `aplicar_carga_inicial`) trae las existencias al vincular y guarda la sucursal del nodo en
+  `nodo_local` (revisión `0009`), con lo que un tercer gancho (`configurar_deposito_por_defecto`) hace que el depósito por defecto de
+  un nodo sea el de su sucursal y no el de la instancia. Con la revisión `0008` (`stock_movements.origen`/`origen_id`).
 - **`web/`** (extra `[web]`) — factories de router FastAPI que el producto monta con
   `include_router` y gatea él: `catalogo_router` (`build_productos_router`,
   `build_depositos_router`, `build_stock_router`, con `OpcionesCatalogo`/`OpcionesStock`
@@ -179,8 +180,9 @@ congelado, **esa columna no existe en una base que sólo corrió el arranque**: 
 (`SinRevision`, 503 en el router) en vez de fallar con un error de SQL.
 
 Las revisiones siguientes siguen el mismo criterio (aditivas, idempotentes, y el código sondea por metadatos si existen): `0003` y `0004` (parámetros y proveedor
-por producto de la reposición), `0005` (`item_branch_min_stock`), `0006` (`purchase_receipts.clave_operacion`, ADR-046) y `0007_devoluciones_de_servicio`
-(`sale_service_returns`, ADR-054: lo devuelto de un servicio, que no tiene stock en el ledger).
+por producto de la reposición), `0005` (`item_branch_min_stock`), `0006` (`purchase_receipts.clave_operacion`, ADR-046), `0007_devoluciones_de_servicio`
+(`sale_service_returns`, ADR-054: lo devuelto de un servicio, que no tiene stock en el ledger), `0008` (`stock_movements.origen`/`origen_id`, ADR-071) y `0009_sucursal_del_nodo`
+(`nodo_local`: la sucursal del nodo, que deduce de la carga inicial que ya tenga; enmienda al ADR-071).
 
 **El DDL se corre de a un proceso por vez (ADR-062).** Con `uvicorn --workers N` cada worker corre en su arranque `init_schema()` y, en el
 producto, las tablas de cruce y `repuntar_fk_ventas_pagos`; en PostgreSQL ese «si no existe, crear» no es atómico y dos procesos sobre una
