@@ -170,7 +170,8 @@ dev = [
     # v1.188.1 -> v1.189.0 (2026-10-21): las altas de clientes en un nodo offline: id provisorio negativo y gancho dentro de la transaccion (`libracore.altas_en_nodo`, ADR-077), `crear_cliente(conn=)` y `get_client_by_cuit(conn=)`. Sin migracion.
     # v1.189.0 -> v1.190.0 (2026-10-22): libracore-unir-bases para unir la base core dentro de la del dominio (ADR-078). Sin migracion.
     # v1.190.0 -> v1.190.1 (2026-10-22): LibraCargo y LibraClub en _UNA_SOLA_BASE (ADR-078). Sin migracion.
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.190.1",
+    # v1.190.1 -> v1.191.0 (2026-10-23): cola de comprobantes del nodo offline (cola_arca, ADR-079). Migracion 0029 aditiva.
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.191.0",
     # SOLO PARA TESTS, como libracore: `tests/test_auditoria_formato_libraauth.py` compara
     # las filas de `RepositorioAuditado` con las de `libraauth.auditoria.registrador_dbapi`
     # (ADR-050). En runtime este motor no importa libraauth: el registrador lo pasa el producto.
