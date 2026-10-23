@@ -182,7 +182,8 @@ congelado, **esa columna no existe en una base que sólo corrió el arranque**: 
 Las revisiones siguientes siguen el mismo criterio (aditivas, idempotentes, y el código sondea por metadatos si existen): `0003` y `0004` (parámetros y proveedor
 por producto de la reposición), `0005` (`item_branch_min_stock`), `0006` (`purchase_receipts.clave_operacion`, ADR-046), `0007_devoluciones_de_servicio`
 (`sale_service_returns`, ADR-054: lo devuelto de un servicio, que no tiene stock en el ledger), `0008` (`stock_movements.origen`/`origen_id`, ADR-071) y `0009_sucursal_del_nodo`
-(`nodo_local`: la sucursal del nodo, que deduce de la carga inicial que ya tenga; enmienda al ADR-071).
+(`nodo_local`: la sucursal del nodo, que deduce de la carga inicial que ya tenga; enmienda al ADR-071) y `0010_vinculo_de_la_venta`
+(`venta_origen_nodo`: la identidad de nodo de una venta que subió con el `source_type` / `source_id` propios del producto, ADR-072).
 
 **El DDL se corre de a un proceso por vez (ADR-062).** Con `uvicorn --workers N` cada worker corre en su arranque `init_schema()` y, en el
 producto, las tablas de cruce y `repuntar_fk_ventas_pagos`; en PostgreSQL ese «si no existe, crear» no es atómico y dos procesos sobre una

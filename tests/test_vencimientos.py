@@ -209,7 +209,7 @@ def _nombres(reporte) -> list[str]:
 # ═════════════════════════════════════════════════════════ La revisión 0002
 
 #: La cabeza de la cadena: sube con cada revisión nueva (la 0002 queda verificada igual: la columna y el índice).
-_CABEZA = "0009_sucursal_del_nodo"
+_CABEZA = "0010_vinculo_de_la_venta"
 
 
 def test_la_revision_0002_corre_sobre_datos_previos_sin_tocar_una_fila(destino):

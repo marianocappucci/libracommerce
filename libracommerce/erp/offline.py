@@ -34,7 +34,8 @@ Los ganchos reciben la conexión de la venta, y el encolado usa `next_sequence(c
 `SyncReceiver` ya descarta un `operation_id` repetido. Además, cada aplicador es idempotente por sí mismo:
 
 - `venta.registrada`, por el agregado: la venta del central queda con `source_type = "libraedge:<node_id>"` y
-  `source_id = <id local>`; si ya está, no hace nada. Si el **número** ya lo tiene otra venta, es una **colisión de
+  `source_id = <id local>` (o, si el producto le puso su propio vínculo, anotada en `venta_origen_nodo`: ver más abajo); si ya
+  está, no hace nada. Si el **número** ya lo tiene otra venta, es una **colisión de
   numeración** y levanta `ColisionDeNumero` (un `ValueError`: el receptor la rechaza y el nodo la deja en revisión
   manual). No se deja llegar al `INSERT`: el `UNIQUE` de `sales.number` sería un `IntegrityError`, que el receptor lee
   como «duplicado», y la venta se perdería pareciendo un reintento.
@@ -95,6 +96,30 @@ lo que cruza con la venta: `venta.registrada` lleva el `turno_id_nodo` y el cent
 (`offline_caja.turno_del_central`); si el turno no está, la venta se aplica sin turno, como antes. `Outbox.caja_con_turno`
 dice si el producto escribe el turno en los movimientos de caja de la venta (el mismo `caja_con_turno` de
 `registrar_venta`): el central lo reproduce igual para que el arqueo del turno dé lo mismo en las dos puntas.
+
+## El vínculo propio del producto (ADR-072)
+
+Un producto puede atar la venta a algo suyo con `sales.source_type` / `sales.source_id` (el buffet de LibraClub: `'reserva'` y
+el id de la reserva; el consumo se busca por ahí). Hasta ADR-071 el aplicador del central pisaba esas dos columnas con
+`libraedge:<node_id>` / id del nodo, porque eran su clave de idempotencia, y el vínculo se perdía. Ahora:
+
+- **Sube.** Si en el nodo la venta tiene un vínculo (`source_type` distinto del `'pos'` de siempre, o un `source_id`),
+  `venta.registrada` lo lleva en `source_type` / `source_id` del payload (aditivo: sin vínculo el payload es el de antes). Lo
+  propio del producto que no cabe en esas dos columnas va en `extra` (`Outbox.extra_de_venta`), como siempre.
+- **Se conserva.** El central deja en la venta el `source_type` / `source_id` **del producto**. Su identidad de nodo (qué venta
+  del nodo es) ya no puede ir en esas columnas: va en `venta_origen_nodo(node_id, venta_id_nodo, venta_id)`, de la revisión
+  `0010_vinculo_de_la_venta`. Una venta **sin** vínculo no la toca: sigue marcada `libraedge:<node_id>`, sin tabla ni migración.
+  `venta_del_central` busca por las dos vías, así que `venta.pago_acreditado`, `.anulada`, `.devolucion` y `.facturada` la
+  encuentran igual.
+- **Se traduce.** Un `source_id` negativo es de una entidad que el nodo dio de alta (id provisorio, ADR-077 del motor): el
+  producto declara a qué tabla del mapeo corresponde cada `source_type` (`tablas_de_origen={"reserva": "reservas"}`) y el
+  central lo traduce con `libraedge_mapeo`. Sin tabla declarada o sin mapeo, `VinculoNoSincronizado`: revisión manual, no una
+  venta atada a otra cosa. Lo que viaja en `extra` lo traduce el producto con `id_del_central`.
+- **Se rehace.** `al_materializar(conn, venta_id, operacion)` corre al final, dentro de la misma transacción, con la venta ya
+  creada (y su vínculo puesto): el producto rehace lo suyo con `operacion.payload["extra"]`. Si levanta, no queda nada de la
+  operación (la venta, el stock, la caja y la fila de `venta_origen_nodo` se deshacen) y queda para revisión o reintento
+  como cualquier otro error del aplicador.
+- **Sin vínculo y sin gancho, nada cambia.**
 """
 
 from __future__ import annotations
@@ -125,6 +150,14 @@ SCHEMA_VERSION = 1
 #: El `source_type` de una venta del central que subió de un nodo: `libraedge:<node_id>`.
 ORIGEN_NODO = "libraedge:"
 
+#: La tabla de la revisión `0010_vinculo_de_la_venta`: `(node_id, venta_id_nodo) -> venta_id` de las ventas del central cuyo
+#: `source_type` / `source_id` es el vínculo del producto y no `libraedge:<node_id>` (ADR-072).
+TABLA_ORIGEN_NODO = "venta_origen_nodo"
+REVISION_ORIGEN_NODO = "0010_vinculo_de_la_venta"
+
+#: El `sales.source_type` con que nace toda venta de `crear_venta` (`'pos'`): no es un vínculo del producto.
+ORIGEN_POR_DEFECTO = "pos"
+
 _PREFIJO_VALIDO = re.compile(r"^[A-Z0-9]{1,8}$")
 
 
@@ -139,6 +172,25 @@ class VentaNoSincronizada(ValueError):
 
 class VentaConOtraFactura(ValueError):
     """La venta del central ya está vinculada a una factura distinta de la que emitió el nodo. Revisión manual."""
+
+
+class VinculoDeVentaError(ValueError):
+    """El vínculo del producto que trae `venta.registrada` (`source_type` / `source_id`) no se puede materializar. Es un
+    `ValueError` a propósito: el receptor lo manda a revisión manual y el nodo no traba la cola (ADR-020 de libraedge)."""
+
+
+class VinculoInvalido(VinculoDeVentaError):
+    """El `source_type` / `source_id` del payload no se entiende (o pisa el marcador reservado `libraedge:`)."""
+
+
+class VinculoNoSincronizado(VinculoDeVentaError):
+    """El `source_id` es de una entidad provisoria del nodo cuyo alta no está mapeada en el central (o el producto no dijo a qué
+    tabla corresponde su `source_type`)."""
+
+
+class VentaSinRevision(VinculoDeVentaError):
+    """A la base del central le falta la revisión `0010_vinculo_de_la_venta` (la tabla `venta_origen_nodo`) y llega una venta con
+    vínculo del producto: no se puede guardar a la vez su vínculo y su identidad de nodo."""
 
 
 # ── El nodo ────────────────────────────────────────────────────────────────
@@ -252,7 +304,8 @@ def armar_operacion(nodo: NodoLocal, secuencia: int, tipo: str, venta_id: int, p
 def payload_venta_registrada(venta: Mapping[str, Any], *, lineas: list[Mapping[str, Any]],
                              movimientos: list[Mapping[str, Any]], promociones: list[Mapping[str, Any]],
                              sucursal_id: int | None, extra: Mapping[str, Any] | None = None,
-                             caja_con_turno: bool = False) -> dict:
+                             caja_con_turno: bool = False,
+                             vinculo: tuple[str | None, int | None] | None = None) -> dict:
     """El payload de `venta.registrada`: la venta entera como la dejó el nodo.
 
     `venta` es `obtener_venta`; `lineas`, las filas de `sale_items` en orden de id (con `unit_cost_snapshot`);
@@ -264,8 +317,12 @@ def payload_venta_registrada(venta: Mapping[str, Any], *, lineas: list[Mapping[s
     provisorio (negativo) y el central lo traduce con el mapeo de su `cliente.alta` (ADR-070, `offline_clientes`).
     `turno_id_nodo` es el del **nodo**: el central lo traduce al turno que subió con `turno.abierto` (ADR-069) y, si no
     está, aplica la venta sin turno. `caja_con_turno` (aditivo: un payload sin él es `False`) dice si la caja de lo
-    acreditado lleva ese turno."""
-    return {
+    acreditado lleva ese turno.
+
+    `vinculo` es el `(source_type, source_id)` propio del producto (ADR-072), o `None` si la venta no tiene ninguno: con él, el
+    payload suma `source_type` y `source_id` (aditivo: sin vínculo no están las claves, y un central anterior ignora las que
+    vienen). `source_id` negativo es de una entidad que el nodo dio de alta: el central lo traduce con el mapeo."""
+    payload = {
         "venta_id": venta["id"], "numero": venta["numero"], "fecha": _fecha(venta["fecha"]),
         "estado": venta["estado"], "subtotal": _texto(venta["subtotal"]), "descuento": _texto(venta["descuento"]),
         "total": _texto(venta["total"]), "cliente_id": venta.get("cliente_id"),
@@ -301,6 +358,9 @@ def payload_venta_registrada(venta: Mapping[str, Any], *, lineas: list[Mapping[s
         ],
         "extra": dict(extra) if extra else None,
     }
+    if vinculo is not None:
+        payload["source_type"], payload["source_id"] = vinculo
+    return payload
 
 
 def payload_pago_acreditado(venta: Mapping[str, Any], pagos: list[Mapping[str, Any]], *,
@@ -397,6 +457,18 @@ def _sucursal(conn, venta_id: int) -> int | None:
     return fila[0] if fila else None
 
 
+def _vinculo_en_el_nodo(conn, venta_id: int) -> tuple[str, int | None] | None:
+    """El `(source_type, source_id)` que el producto le puso a la venta del nodo, o `None` si no le puso ninguno: el `'pos'` con
+    que nace toda venta de `crear_venta` y sin `source_id` no es un vínculo."""
+    fila = conn.execute("SELECT source_type, source_id FROM sales WHERE id=?", (venta_id,)).fetchone()
+    if not fila:
+        return None
+    tipo, id_ = fila[0], fila[1]
+    if (tipo in (None, "", ORIGEN_POR_DEFECTO)) and id_ is None:
+        return None
+    return tipo, id_
+
+
 # ── Encolado (en la transacción del llamador) ─────────────────────────────
 
 
@@ -417,7 +489,7 @@ def encolar_venta_registrada(conn, nodo: NodoLocal, venta: Mapping[str, Any], *,
     payload = payload_venta_registrada(
         venta, lineas=_lineas(conn, vid), movimientos=_movimientos_vendidos(conn, vid),
         promociones=_promociones(conn, vid), sucursal_id=_sucursal(conn, vid), extra=extra,
-        caja_con_turno=caja_con_turno,
+        caja_con_turno=caja_con_turno, vinculo=_vinculo_en_el_nodo(conn, vid),
     )
     return encolar(conn, nodo, TIPO_VENTA_REGISTRADA, vid, payload)
 
@@ -610,11 +682,67 @@ def origen_de(node_id: str) -> str:
 
 
 def venta_del_central(conn, node_id: str, venta_id_nodo: int) -> int | None:
-    """El id en el central de la venta `venta_id_nodo` del nodo `node_id`, o `None` si no subió."""
+    """El id en el central de la venta `venta_id_nodo` del nodo `node_id`, o `None` si no subió.
+
+    Por dos vías (ADR-072): la marca `libraedge:<node_id>` de `sales` —toda venta sin vínculo propio del producto— y, si la
+    base tiene la revisión `0010`, `venta_origen_nodo`, donde queda la identidad de la que sí lo tiene (su `source_type` /
+    `source_id` son los del producto y no pueden ser la clave)."""
     fila = conn.execute(
         "SELECT id FROM sales WHERE source_type=? AND source_id=?", (origen_de(node_id), venta_id_nodo),
     ).fetchone()
+    if fila:
+        return fila[0]
+    if not _tiene_tabla(conn, TABLA_ORIGEN_NODO):
+        return None
+    fila = conn.execute(
+        f"SELECT venta_id FROM {TABLA_ORIGEN_NODO} WHERE node_id=? AND venta_id_nodo=?", (node_id, venta_id_nodo),
+    ).fetchone()
     return fila[0] if fila else None
+
+
+def id_del_central(conn, node_id: str, tabla: str, id_nodo):
+    """El id en el central de una entidad del nodo `node_id` que viaja con una venta (ADR-072): `None` y un id no negativo pasan
+    igual (el nodo usó una fila que ya era del central); uno negativo es provisorio y se traduce con el mapeo de `tabla`
+    (`libraedge.mapeo`, ADR-021 de libraedge). Si el alta no se aplicó, `VinculoNoSincronizado`: la venta va a revisión manual
+    en vez de quedar atada a otra cosa. Es lo que un producto usa en su `al_materializar` para los ids de su `extra`."""
+    if id_nodo is None or int(id_nodo) >= 0:
+        return id_nodo
+    from libraedge.mapeo import SinMapeo, traducir_id
+
+    try:
+        return traducir_id(conn, node_id, tabla, int(id_nodo))
+    except SinMapeo as exc:
+        raise VinculoNoSincronizado(
+            f"el id provisorio {id_nodo} de {tabla} del nodo {node_id} no está en el central: falta aplicar el alta que lo "
+            "creó (quedó en revisión manual o todavía no subió)"
+        ) from exc
+
+
+def _vinculo_del_central(conn, operacion, tablas_de_origen: Mapping[str, str] | None) -> tuple[str, int | None] | None:
+    """El `(source_type, source_id)` del producto que trae `venta.registrada`, con el `source_id` ya traducido al id del central,
+    o `None` si la venta no trae ninguno (la de siempre: queda marcada `libraedge:<node_id>`)."""
+    datos = operacion.payload
+    tipo, id_ = datos.get("source_type"), datos.get("source_id")
+    if tipo is None and id_ is None:
+        return None
+    if not isinstance(tipo, str) or not tipo.strip():
+        raise VinculoInvalido(f"el source_type {tipo!r} de la venta {datos.get('numero')!r} del nodo {operacion.node_id} no es un texto")
+    if tipo.startswith(ORIGEN_NODO):
+        raise VinculoInvalido(
+            f"el source_type {tipo!r} de la venta {datos.get('numero')!r} del nodo {operacion.node_id} usa el marcador reservado "
+            f"{ORIGEN_NODO!r}: es el que el central le pone a las ventas que subieron de un nodo"
+        )
+    if id_ is not None and (isinstance(id_, bool) or not isinstance(id_, int)):
+        raise VinculoInvalido(f"el source_id {id_!r} de la venta {datos.get('numero')!r} del nodo {operacion.node_id} no es un entero")
+    if id_ is not None and id_ < 0:
+        tabla = (tablas_de_origen or {}).get(tipo)
+        if tabla is None:
+            raise VinculoNoSincronizado(
+                f"la venta {datos.get('numero')!r} del nodo {operacion.node_id} apunta a un {tipo!r} provisorio ({id_}) y el producto "
+                f"no declaró a qué tabla del mapeo corresponde ese source_type (tablas_de_origen)"
+            )
+        id_ = id_del_central(conn, operacion.node_id, tabla, id_)
+    return tipo, id_
 
 
 def _venta_existente(conn, operacion) -> int:
@@ -633,7 +761,8 @@ def _num(valor) -> float:
 
 
 def aplicar_venta_registrada(conn, operacion, *, hooks: Hooks = SIN_GANCHOS,
-                             al_materializar: Callable[[Any, int, Any], None] | None = None) -> None:
+                             al_materializar: Callable[[Any, int, Any], None] | None = None,
+                             tablas_de_origen: Mapping[str, str] | None = None) -> None:
     """Crea en el central la venta que nació en el nodo, con las mismas piezas que `registrar_venta`.
 
     No pasa por `registrar_venta`: el número ya lo puso el nodo (con su prefijo), el turno viene traducido, y el stock se
@@ -647,7 +776,12 @@ def aplicar_venta_registrada(conn, operacion, *, hooks: Hooks = SIN_GANCHOS,
     turno que todavía no subió—, la venta se aplica sin turno, como antes: no se rechaza por eso. Al final corre
     `hooks.al_registrar_venta`,
     `hooks.al_confirmar_venta` si nació cobrada y `al_materializar(conn, venta_id, operacion)`, lo propio del
-    producto con `payload["extra"]`."""
+    producto con `payload["extra"]`.
+
+    **El vínculo del producto (ADR-072).** Si el payload trae `source_type` / `source_id`, la venta del central los conserva
+    (con el `source_id` traducido por `tablas_de_origen` si es provisorio) y su identidad de nodo queda en `venta_origen_nodo`;
+    sin ellos, la marca `libraedge:<node_id>` de siempre. Todo en la transacción del llamador: si algo levanta (el vínculo, el
+    gancho del producto), no queda la venta ni nada de lo que escribió."""
     _verificar(operacion, TIPO_VENTA_REGISTRADA)
     from libracore import medios_pago
     from libracore import pagos as acreditacion
@@ -668,6 +802,13 @@ def aplicar_venta_registrada(conn, operacion, *, hooks: Hooks = SIN_GANCHOS,
             f"el número de venta {numero!r} del nodo {operacion.node_id} ya existe en el central: colisión de "
             "numeración, no un duplicado"
         )
+    vinculo = _vinculo_del_central(conn, operacion, tablas_de_origen)
+    if vinculo is not None and not _tiene_tabla(conn, TABLA_ORIGEN_NODO):
+        raise VentaSinRevision(
+            f"la venta {numero!r} del nodo {operacion.node_id} trae un vínculo propio del producto ({vinculo[0]!r}) y a la base del "
+            f"central le falta la revisión {REVISION_ORIGEN_NODO} (la tabla {TABLA_ORIGEN_NODO}): correr `libracommerce-migrar "
+            "upgrade --prefijo <producto>` y reintentar"
+        )
     usuario_id = datos.get("usuario_id")
     fecha = datos["fecha"]
     turno = turno_del_central(conn, operacion.node_id, datos.get("turno_id_nodo"))
@@ -687,8 +828,13 @@ def aplicar_venta_registrada(conn, operacion, *, hooks: Hooks = SIN_GANCHOS,
         observaciones=datos.get("observaciones") or "", estado=datos["estado"],
         sucursal_id=datos.get("sucursal_id"),
     )
-    conn.execute("UPDATE sales SET source_type=?, source_id=? WHERE id=?",
-                 (origen_de(operacion.node_id), datos["venta_id"], vid))
+    if vinculo is None:
+        conn.execute("UPDATE sales SET source_type=?, source_id=? WHERE id=?",
+                     (origen_de(operacion.node_id), datos["venta_id"], vid))
+    else:
+        conn.execute("UPDATE sales SET source_type=?, source_id=? WHERE id=?", (vinculo[0], vinculo[1], vid))
+        conn.execute(f"INSERT INTO {TABLA_ORIGEN_NODO} (node_id, venta_id_nodo, venta_id) VALUES (?, ?, ?)",
+                     (operacion.node_id, datos["venta_id"], vid))
     # El costo que estampó el nodo (ADR-016), línea por línea en el mismo orden; sin costo queda NULL, como allá.
     ids = [f[0] for f in conn.execute("SELECT id FROM sale_items WHERE sale_id=? ORDER BY id", (vid,)).fetchall()]
     for sid, it in zip(ids, datos["items"], strict=True):
@@ -850,11 +996,13 @@ Aplicador = Callable[[Any, Any], None]
 
 def aplicadores(hooks: Hooks = SIN_GANCHOS, *,
                 al_materializar: Callable[[Any, int, Any], None] | None = None,
-                aplicar_factura: AplicarFactura | None = None) -> dict[str, Aplicador]:
+                aplicar_factura: AplicarFactura | None = None,
+                tablas_de_origen: Mapping[str, str] | None = None) -> dict[str, Aplicador]:
     """`{operation_type: (conn, operacion) -> None}`, para registrar en el despachador de LibraEdge (uno por tipo) o
     juntar con `despachar` en un solo `operation_handler`. `hooks` son los del central (`cliente_cc_de` para la
     cuenta corriente, y lo que el producto haga al nacer o anularse una venta). `aplicar_factura` reemplaza
-    `libracore.facturas_del_nodo.aplicar_factura_del_nodo` en `venta.facturada`. Suma los cinco de caja y turnos
+    `libracore.facturas_del_nodo.aplicar_factura_del_nodo` en `venta.facturada`. `tablas_de_origen` (`{source_type: tabla del
+    mapeo}`, ADR-072) dice a qué tabla corresponde el `source_id` provisorio de cada vínculo propio del producto. Suma los cinco de caja y turnos
     (`offline_caja.aplicadores_de_caja`, ADR-069), el alta de clientes (`offline_clientes`, ADR-070) y los dos de stock
     (`offline_stock`, ADR-071), que no dependen de los ganchos de venta.
 
@@ -869,7 +1017,7 @@ def aplicadores(hooks: Hooks = SIN_GANCHOS, *,
         **aplicadores_de_clientes(),
         **aplicadores_de_stock(),
         TIPO_VENTA_REGISTRADA: lambda conn, op: aplicar_venta_registrada(
-            conn, op, hooks=hooks, al_materializar=al_materializar),
+            conn, op, hooks=hooks, al_materializar=al_materializar, tablas_de_origen=tablas_de_origen),
         TIPO_PAGO_ACREDITADO: lambda conn, op: aplicar_pago_acreditado(conn, op, hooks=hooks),
         TIPO_VENTA_ANULADA: lambda conn, op: aplicar_venta_anulada(conn, op, hooks=hooks),
         TIPO_VENTA_DEVOLUCION: lambda conn, op: aplicar_venta_devolucion(conn, op, hooks=hooks),
@@ -880,17 +1028,19 @@ def aplicadores(hooks: Hooks = SIN_GANCHOS, *,
 
 def registrar_en(despachador, hooks: Hooks = SIN_GANCHOS, *,
                  al_materializar: Callable[[Any, int, Any], None] | None = None,
-                 aplicar_factura: AplicarFactura | None = None):
+                 aplicar_factura: AplicarFactura | None = None,
+                 tablas_de_origen: Mapping[str, str] | None = None):
     """Registra los trece tipos —los cinco de venta, los cinco de caja, `cliente.alta`, `stock.movimiento` y `compra.recibida`—, en `SCHEMA_VERSION`, en un
     `libraedge.sync.despacho.Despachador` (v0.7.0,
     ADR-007 de libraedge) y lo devuelve. Un producto suma los suyos al mismo despachador; registrar dos veces un tipo
-    falla al arrancar (es la regla del `Despachador`)::
+    falla al arrancar (es la regla del `Despachador`). `tablas_de_origen` (`{source_type: tabla del mapeo}`) es de los productos que le
+    ponen a la venta un vínculo propio con un id que el nodo puede dar de alta (ADR-072)::
 
         despachador = registrar_en(Despachador(), GANCHOS)
         router = create_sync_router(get_connection, despachador=despachador)
     """
-    for tipo, aplicador in aplicadores(hooks, al_materializar=al_materializar,
-                                       aplicar_factura=aplicar_factura).items():
+    for tipo, aplicador in aplicadores(hooks, al_materializar=al_materializar, aplicar_factura=aplicar_factura,
+                                       tablas_de_origen=tablas_de_origen).items():
         despachador.registrar(tipo, SCHEMA_VERSION, aplicador)
     return despachador
 

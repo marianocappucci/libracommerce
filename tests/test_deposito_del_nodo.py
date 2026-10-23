@@ -392,9 +392,9 @@ def test_la_revision_0009_crea_la_tabla_y_deduce_la_sucursal_de_la_carga_inicial
         assert _ledger(conn) == antes, "la revisión modificó el ledger"
         return [f[0] for f in conn.execute("SELECT version_num FROM alembic_version_libracommerce").fetchall()]
 
-    assert _con_conexion(destino, verificar) == ["0009_sucursal_del_nodo"]
+    assert _con_conexion(destino, verificar) == [_vto._CABEZA]
     migrar.upgrade(destino)                                                          # idempotente
-    assert _con_conexion(destino, verificar) == ["0009_sucursal_del_nodo"]
+    assert _con_conexion(destino, verificar) == [_vto._CABEZA]
 
 
 def test_la_revision_0009_no_pisa_una_sucursal_ya_guardada(destino):
