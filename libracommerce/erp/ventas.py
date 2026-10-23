@@ -192,8 +192,14 @@ def siguiente_numero(conn) -> str:
     # ADR-067: en el central, las ventas que subieron de un nodo offline (`source_type = 'libraedge:<nodo>'`, con el
     # prefijo de su sucursal en el número) no cuentan: sin esto la numeración propia del central saltaría al número del
     # nodo. Una base sin nodos no tiene ninguna, y la consulta devuelve la misma fila de siempre.
+    # ADR-072: tampoco cuentan las que subieron con un vínculo propio del producto (`source_type = 'reserva'`): su identidad de
+    # nodo está en `venta_origen_nodo` (revisión 0010), que sólo se mira si la base la tiene.
+    solo_del_central = ""
+    if conn.execute("PRAGMA table_info(venta_origen_nodo)").fetchall():
+        solo_del_central = " AND id NOT IN (SELECT venta_id FROM venta_origen_nodo)"
     row = conn.execute(
-        "SELECT number FROM sales WHERE source_type NOT LIKE ? ORDER BY id DESC LIMIT 1", ("libraedge:%",)
+        "SELECT number FROM sales WHERE source_type NOT LIKE ?" + solo_del_central + " ORDER BY id DESC LIMIT 1",
+        ("libraedge:%",),
     ).fetchone()
     if row:
         try:

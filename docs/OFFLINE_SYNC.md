@@ -37,6 +37,12 @@ LibraCommerce ya no mantiene tablas propias de `node_identity`/`local_sequences`
 > **Desde v0.72.1 la carga inicial también lleva a cero el stock local de los depósitos que no son de la sucursal del nodo** (enmienda al ADR-071): una PC
 > que estuvo vinculada a otra sucursal y se volvió a vincular conserva el stock de la anterior, que no es suyo (un nodo no mueve stock de otra sucursal y el
 > central es la verdad ahí). Son ajustes `carga_inicial` (no suben) y el resumen de `aplicar_carga_inicial` suma `ajustes_ajenos`. Sin cambios de migración.
+>
+> **Desde v0.73.0 el vínculo propio del producto sobrevive a la venta que sube** (ADR-072): si el producto le puso a la venta del nodo su `source_type` /
+> `source_id` (el buffet de LibraClub: `'reserva'` y la reserva), `venta.registrada` los lleva y el central los **conserva**; su identidad de nodo pasa a
+> `venta_origen_nodo` (revisión `0010`) en vez de las columnas `libraedge:<node_id>`. Un `source_id` provisorio se traduce con el mapeo
+> (`registrar_en(..., tablas_de_origen={"reserva": "reservas"})`) y `al_materializar(conn, venta_id, operacion)` rehace lo propio del producto en la misma
+> transacción. Al actualizar el **central**: correr `libracommerce-migrar upgrade`. Una venta sin vínculo no cambia.
 
 - La generación de `sequence` y el enqueue/worker/transporte/recepción usan las clases de `libraedge.db.repository.NodeRepository`, `libraedge.sync.worker.OutboxWorker`, `libraedge.sync.http.HttpSyncTransport` y `libraedge.sync.receiver.SyncReceiver` directamente — LibraCommerce no las reimplementa.
 

@@ -111,7 +111,7 @@ def test_no_hace_falta_una_revision_la_columna_ya_esta_en_la_baseline(abrir_merm
     with abrir_merma() as conn:
         assert "unit_cost" in {f[1] for f in conn.execute("PRAGMA table_info(stock_movements)").fetchall()}
         assert [f[0] for f in conn.execute("SELECT version_num FROM alembic_version_libracommerce").fetchall()] == [
-            "0009_sucursal_del_nodo"]
+            "0010_vinculo_de_la_venta"]
 
 
 # ═════════════════════════════════════════════════════ add_movimiento_stock: el candado y el snapshot
