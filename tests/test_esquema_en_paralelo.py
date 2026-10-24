@@ -14,6 +14,12 @@ arreglo, `init_schema()` sobre una base vacía falló en 30 de 30 corridas y las
 Sobre una base ya armada `init_schema()` no falla (medido: 0 de 60 sin el candado): no escribe nada, sólo mira. Por eso acá
 no hay un test de «base armada» para él, y sí uno del mecanismo, que no depende de la suerte.
 
+**El orden de los candados (ADR-073).** `libracore.db.schema.init_core_schema` toma el candado del core y *después* el de
+este motor; las funciones de este motor lo tomaban solas, sin el del core. Con dos workers eso es un ciclo (A: tiene el de
+LibraCommerce y espera una tabla del core; B: tiene la tabla y espera el de LibraCommerce) que PostgreSQL no veía y duraba
+120 s (`TimeoutError: 'libracommerce.esquema' ... 120 s`, medido en LibraClub el 2026-10-24). Al final del archivo, el ciclo
+armado con dos conexiones y el orden de los candados función por función.
+
 Se saltea sin `LIBRACORE_POSTGRES_URL`. Tarda unos 25 s.
 """
 from __future__ import annotations
@@ -208,3 +214,141 @@ def test_contra_postgres_sin_el_candado_del_motor_falla_diciendo_que_falta(monke
     monkeypatch.setitem(sys.modules, "libracore.candados", None)
     with pytest.raises(ImportError, match=r"libracore>=1\.168"):
         serializar_esquema(object())  # no es una `sqlite3.Connection`: se toma por PostgreSQL
+
+
+# ── El orden de los candados: primero el del core, después el de LibraCommerce (ADR-073) ────────────────────────────
+
+
+def _esperando_un_bloqueo(url: str, pid: int, tope: float = 3.0) -> bool:
+    """Espera a que el backend `pid` esté dormido en la cola de bloqueos de PostgreSQL; `False` si no llegó en `tope` s.
+
+    Con libracore >= 1.192.1 quien espera un candado está en esa cola (ADR-081 del motor). Con uno anterior espera en un
+    bucle de Python y nunca aparece: el test sigue igual, con el respiro que dan los `tope` segundos.
+    """
+    limite = time.monotonic() + tope
+    with psycopg.connect(url.replace("postgresql+psycopg://", "postgresql://", 1), autocommit=True) as admin:
+        while time.monotonic() < limite:
+            fila = admin.execute("SELECT wait_event_type FROM pg_stat_activity WHERE pid = %s", (pid,)).fetchone()
+            if fila and fila[0] == "Lock":
+                return True
+            time.sleep(0.05)
+    return False
+
+
+@pytest.mark.parametrize("funcion", [crear_venta_links, crear_cliente_lista_precio], ids=lambda f: f.__name__)
+def test_una_tabla_de_cruce_no_se_cruza_con_el_arranque_del_core_de_otro_worker(bases, monkeypatch, funcion):
+    """El entrelazado de LibraClub (2026-10-24), con dos conexiones: A crea una tabla de cruce mientras B arma el core.
+
+    B corrió `init_core_schema()` y todavía no commitea: tiene el candado del core **y** locks de las tablas del core
+    (`clients`, `turnos_caja`... con `CREATE INDEX IF NOT EXISTS`). A entra con `crear_venta_links()` / `crear_cliente_lista_precio()`:
+    su `CREATE TABLE ... REFERENCES` pide `SHARE ROW EXCLUSIVE` sobre una de esas tablas. Después B sigue con
+    `init_schema()`, o sea que pide el candado de LibraCommerce.
+
+    - **Sin el arreglo**, A tomaba el candado de LibraCommerce *sin* el del core y esperaba la tabla; B esperaba el de
+      LibraCommerce: ciclo. Con el reintento de `pg_try_advisory_xact_lock` (libracore < 1.192.1) PostgreSQL no lo veía y
+      B se rendía a los 120 s; con la espera bloqueante lo ve y mata a uno con `deadlock detected`. Las dos cosas son un
+      error acá.
+    - **Con el arreglo**, A se queda esperando el candado **del core** sin haber tomado nada, B toma el de LibraCommerce y
+      commitea, y A sigue sobre lo que dejó B. Las dos terminan, y en segundos.
+    """
+    url_postgres()
+    from libracore import candados
+
+    monkeypatch.setitem(candados.esperar_candado_de_transaccion.__kwdefaults__, "espera", 6.0)
+    url = bases()
+    _armar_los_dos_motores(url)                                     # sin `venta_links` ni `cliente_lista_precio`
+    a, b = core.conectar(url), core.conectar(url)
+    errores: dict[str, BaseException] = {}
+
+    def correr_a():
+        try:
+            funcion(a)
+            a.commit()
+        except BaseException as e:  # noqa: BLE001 - se devuelve al hilo principal
+            errores["A"] = e
+            a.rollback()
+
+    try:
+        pid_a = a.execute("SELECT pg_backend_pid()").fetchone()[0]
+        a.rollback()
+        init_core_schema(b)                                         # B: candado del core + locks de sus tablas
+        t0 = time.monotonic()
+        hilo = threading.Thread(target=correr_a, daemon=True)
+        hilo.start()
+        _esperando_un_bloqueo(url, pid_a)                           # A ya está esperando (el core, o la tabla)
+        try:
+            serializar_esquema(b)                                   # B sigue con `init_schema()`: el de LibraCommerce
+            b.commit()
+        except BaseException as e:  # noqa: BLE001
+            errores["B"] = e
+            b.rollback()
+        hilo.join(timeout=30)
+        assert not hilo.is_alive(), "A sigue colgada"
+        assert not errores, f"se cruzaron: {errores}"
+        assert time.monotonic() - t0 < 5, "tardó de más: ¿esperó a un tope en lugar de a B?"
+        tabla = "venta_links" if funcion is crear_venta_links else "cliente_lista_precio"
+        assert _uno(url, f"SELECT to_regclass('{tabla}') IS NOT NULL")
+    finally:
+        a.close()
+        b.close()
+
+
+@pytest.mark.parametrize("funcion", _FUNCIONES, ids=lambda f: f.__name__)
+def test_cada_funcion_de_esquema_toma_el_candado_del_core_antes_que_el_suyo(bases, funcion):
+    """El orden, sin carreras: con el candado del **core** tomado por otra conexión la función espera *sin* tener el suyo.
+
+    Es lo que evita el ciclo: quien espera al core no tiene nada tomado, así que nadie puede estar esperándolo a él. La
+    contraprueba está en la segunda aserción: mientras la función espera, el candado de LibraCommerce está libre.
+    """
+    url_postgres()
+    from libracore.db.schema import CANDADO_DEL_ESQUEMA as CANDADO_DEL_CORE
+
+    url = bases()
+    _armar_los_dos_motores(url)
+    otra, propia, curiosa = core.conectar(url), core.conectar(url), core.conectar(url)
+    terminado = threading.Event()
+    errores: list[BaseException] = []
+
+    def correr():
+        try:
+            funcion(propia)
+            propia.commit()
+        except BaseException as e:  # noqa: BLE001 - se devuelve al hilo principal
+            errores.append(e)
+        finally:
+            terminado.set()
+
+    try:
+        candados.esperar_candado_de_transaccion(otra, CANDADO_DEL_CORE)
+        hilo = threading.Thread(target=correr, daemon=True)
+        hilo.start()
+        assert not terminado.wait(1.5), f"{funcion.__name__}() corrió con el candado del core tomado por otro"
+        assert candados.esperar_candado_de_transaccion(curiosa, CANDADO_DEL_ESQUEMA, espera=1.0) is True, (
+            f"{funcion.__name__}() esperaba al core con el candado de LibraCommerce ya tomado: orden invertido"
+        )
+        curiosa.rollback()
+        otra.commit()
+        assert terminado.wait(30), "no terminó al soltarse el candado del core"
+        hilo.join()
+        assert not errores, errores
+    finally:
+        otra.close()
+        propia.close()
+        curiosa.close()
+
+
+def test_los_dos_candados_en_la_misma_conexion_no_se_esperan_a_si_mismos(bases):
+    """`init_core_schema()` + `init_schema()` + una tabla de cruce en una transacción: reentrante, sin espera ni tope."""
+    url_postgres()
+    url = bases()
+    conn = core.conectar(url)
+    try:
+        t0 = time.monotonic()
+        init_core_schema(conn)
+        init_schema(conn)
+        crear_venta_links(conn)
+        conn.commit()
+        assert time.monotonic() - t0 < 30
+        assert _uno(url, "SELECT to_regclass('venta_links') IS NOT NULL")
+    finally:
+        conn.close()
