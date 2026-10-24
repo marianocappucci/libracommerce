@@ -194,8 +194,9 @@ dev = [
 # garantiza que `turno.abierto` llegue antes que los movimientos y las ventas de su turno (ADR-069 de este motor). Sin migracion.
 # v0.17.0 -> v0.18.0 (2026-10-21): los ids provisorios del nodo, `libraedge_mapeo` y el reapuntado cuando el central asigna el id
 # definitivo (ADR-021): es lo que usa `cliente.alta` (ADR-070 de este motor). `init_schema` crea `libraedge_mapeo`. Sin migracion.
-offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@v0.18.0"]
-offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@v0.18.0"]
+# v0.18.0 -> v0.22.0 (2026-10-24): ticket de ARCA por servicio y LibraCargo/LibraClub en el instalador (ADR-025). Sin migracion.
+offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@v0.22.0"]
+offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@v0.22.0"]
 
 [project.scripts]
 # `migrations/` vive ADENTRO de `libracommerce/` para entrar en el wheel: un
