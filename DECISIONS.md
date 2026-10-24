@@ -2376,3 +2376,30 @@ Todas las corridas sin error dejaron la base idéntica a la esperada (mismas tab
 - **RestoLibra, VentaLibra y ContaLibra no cambian**: no ponen vínculo, y su venta sigue marcada `libraedge:<node_id>`. LibraCargo no usa `sales` (no depende de este motor): su vínculo (órdenes, comprobantes) irá con sus propias operaciones `cargo.*` y el mapeo de `libraedge`.
 
 **Cómo se adopta** (v0.73.0: menor, migración nueva). Subir el pin; **correr `libracommerce-migrar upgrade --prefijo <producto>` en el central antes de que un nodo suba una venta con vínculo** (sin la `0010` esa venta queda en revisión manual y se reaplica al migrar). Un producto con vínculo propio: lo pone en su `al_registrar_venta`, lo lee `extra_de_venta` si necesita algo más que las dos columnas, y registra `registrar_en(Despachador(), GANCHOS, al_materializar=..., tablas_de_origen={...})` en el central. Sin cambios en libracore ni en libraedge.
+
+
+## ADR-073 — `serializar_esquema` toma siempre antes el candado del esquema del core: un orden global core → LibraCommerce (2026-10-24)
+
+**El problema (medido).** Con `WEB_CONCURRENCY=2`, un worker de LibraClub murió al arrancar con `TimeoutError: 'libracommerce.esquema': no se pudo tomar el candado en 120 s` (PR `fix/arranque-dos-workers` de LibraClub, demo). Reproducido acá con dos conexiones (`tests/test_esquema_en_paralelo.py::test_una_tabla_de_cruce_no_se_cruza_con_el_arranque_del_core_de_otro_worker`, rojo con el `TimeoutError` exacto a los 6 s del tope del test). La causa es el **orden de los candados**:
+- `libracore.db.schema.init_core_schema` toma el candado del core (`CANDADO_DEL_ESQUEMA`) y **después**, cuando el producto sigue con `init_schema()` en la misma transacción, `libracommerce.esquema`. Hasta el commit guarda, además, locks de las tablas del core (`SHARE` por sus `CREATE INDEX IF NOT EXISTS`, y un `ROW EXCLUSIVE` por un `UPDATE ... WHERE caja_id IS NULL` incondicional, éste ya condicional en el motor v1.192.1).
+- `serializar_esquema` (ADR-062) tomaba **sólo** `libracommerce.esquema`, en una transacción propia, y las tablas de cruce (`crear_venta_links`, `crear_cliente_lista_precio`) hacen `CREATE TABLE ... REFERENCES` sobre tablas del core, que pide `SHARE ROW EXCLUSIVE` sobre la referenciada.
+- Ciclo: A tiene `libracommerce.esquema` y espera la tabla; B tiene la tabla y espera `libracommerce.esquema`. Los dos candados no se ven entre sí como una sola cosa, y con el reintento de `pg_try_advisory_xact_lock` de libracore < 1.192.1 PostgreSQL ni siquiera lo veía como deadlock: 120 s mudos.
+
+**Qué ya existe** (se miró antes): el ADR-062 (esta costura), `libracore.candados.esperar_candado_de_transaccion` y `libracore.db.schema.CANDADO_DEL_ESQUEMA` (ADR-053 del motor, desde v1.168.0). El producto ya lo mitigaba con `una_vez_al_arrancar` (LibraClub, VentaLibra, Contalibra), que oculta el ciclo para su propio arranque sin quitarlo del motor: RestoLibra y cualquier producto nuevo lo siguen teniendo.
+
+**Decisión.** `db.candado.serializar_esquema(conn)` toma **primero el candado del core y después el propio**, siempre. Con un orden único los candados no pueden formar un ciclo entre ellos, y quien espera el del core todavía no tocó ninguna tabla, así que tampoco hay ciclo con las de tabla.
+- **Es gratis cuando ya se lo tiene:** los candados asesores son reentrantes por sesión, así que `init_core_schema(conn)` + `init_schema(conn)` + `crear_venta_links(conn)` en la misma conexión (el arranque de un producto) no esperan.
+- **Sin cambio de API ni de libracore:** usa `CANDADO_DEL_ESQUEMA` de `libracore.db.schema`, que existe desde v1.168.0 (el piso que ya pide el motor). El arreglo funciona con cualquier libracore >= 1.168; v1.192.1 suma que, si alguien rompe el orden, el ciclo salga como `deadlock detected` en ~1 s y no a los 120 s (ADR-081 del motor).
+- **SQLite sigue sin hacer nada ni importar libracore.** El mensaje de `ImportError` con libracore < 1.168 se conserva.
+- Mismas garantías de `espera`: el mismo tope para cada uno de los dos candados.
+
+**Alternativas descartadas.**
+- **Que `init_core_schema` no tome nada de este motor / separar las transacciones del producto:** el producto elige cómo arma su arranque; el motor no puede obligar a que sus `crear_*` corran siempre dentro de la transacción del core. Un orden de candados es una regla que el motor sí cumple solo.
+- **Un solo candado para los dos motores:** el core y este motor se instalan por separado (hay productos de LibraCore sin LibraCommerce) y `init_core_schema` no debe saber de este motor.
+- **Que cada producto envuelva el arranque en `una_vez_al_arrancar`:** sigue siendo válido y barato (conexión propia), pero deja al motor con el defecto para el próximo producto. Se mantiene en los que ya lo tienen.
+
+**Alcance dicho.** Sólo cubre los candados del esquema. `erp/compras.py` (`recepcion-de-mercaderia:`) y `erp/reposicion_ordenes.py` toman candados asesores por pedido, no de esquema, y no se tocaron. **No cubre** un DDL propio de un producto que se corra fuera de las funciones de este motor y toque tablas del core sin pasar por `serializar_esquema` (ver el ADR-062).
+
+**Tests.** `tests/test_esquema_en_paralelo.py`: el entrelazado de LibraClub con dos conexiones y `init_core_schema` real (`crear_venta_links` y `crear_cliente_lista_precio`; sin el arreglo falla con el `TimeoutError` del candado de LibraCommerce con libracore anterior y con `deadlock detected` con el v1.192.1), el orden función por función (con el candado del core ocupado, la función espera **sin tener el suyo**: cinco funciones) y la reentrancia. Los 7 que prueban el orden y el entrelazado fallan sin el arreglo.
+
+**Cómo se adopta** (v0.73.1: parche, sin migración, sin cambio de esquema). Subir el pin. Los productos que mitigaron con `una_vez_al_arrancar` pueden dejarlo: es inofensivo.

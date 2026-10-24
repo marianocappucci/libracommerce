@@ -191,6 +191,8 @@ base sin las tablas chocan en el catálogo (`duplicate key … pg_type_typname_n
 `db.candado.serializar_esquema(conn)`, que es `libracore.candados.esperar_candado_de_transaccion` (ADR-053 del motor) con el nombre
 `libracommerce.esquema`: el segundo proceso espera al `commit` del primero y corre sobre lo que dejó. Sobre SQLite no hace nada ni
 importa libracore. No cambia ninguna tabla (el esquema sigue congelado). Lo que **no** cubre es el DDL propio de cada producto.
+**Orden de los candados (ADR-073):** `serializar_esquema` toma siempre antes el del core (`libracore.db.schema.CANDADO_DEL_ESQUEMA`), el mismo
+orden que `init_core_schema`; tomarlos al revés es un ciclo con las tablas del core (`CREATE TABLE ... REFERENCES`) que daba `TimeoutError ... 120 s`.
 
 ## Capas ERP y web (P9)
 
