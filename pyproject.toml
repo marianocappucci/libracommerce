@@ -199,8 +199,9 @@ dev = [
 # v0.18.0 -> v0.22.0 (2026-10-24): ticket de ARCA por servicio y LibraCargo/LibraClub en el instalador (ADR-025). Sin migracion.
 # v0.22.0 -> v0.22.1 (2026-10-24): LibraCargo y LibraClub en el instalador publicado. Sin migracion.
 # v0.22.1 -> v0.23.0 (2026-10-25): ids provisorios de texto, tabla libraedge_mapeo_texto (ADR-026). Sin migracion de los productos.
-offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@v0.23.0"]
-offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@v0.23.0"]
+# v0.23.0 -> v0.24.1 (2026-10-25): instalador publicado de GestioLibra y MedLibra (ADR-027). Sin migracion.
+offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@v0.24.1"]
+offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@v0.24.1"]
 
 [project.scripts]
 # `migrations/` vive ADENTRO de `libracommerce/` para entrar en el wheel: un
