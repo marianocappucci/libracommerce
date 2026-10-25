@@ -689,13 +689,13 @@ requires-dist = [
     { name = "libraauth", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libraauth.git?rev=v0.55.0" },
     { name = "libracore", marker = "extra == 'dev'", specifier = ">=1.125,<2" },
     { name = "libracore", marker = "extra == 'dev'", specifier = ">=1.189,<2" },
-    { name = "libracore", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libracore.git?rev=v1.192.1" },
+    { name = "libracore", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libracore.git?rev=v1.194.0" },
     { name = "libracore", marker = "extra == 'erp'", specifier = ">=1.189,<2" },
     { name = "libracore", marker = "extra == 'web'", specifier = ">=1.125,<2" },
     { name = "libracore", extras = ["migrations"], marker = "extra == 'dev'", specifier = ">=1.189,<2" },
     { name = "libracore", extras = ["migrations"], marker = "extra == 'migrations'", specifier = ">=1.189,<2" },
-    { name = "libraedge", marker = "extra == 'offline'", git = "https://github.com/marianocappucci/libraedge.git?rev=v0.22.1" },
-    { name = "libraedge", extras = ["server"], marker = "extra == 'offline-server'", git = "https://github.com/marianocappucci/libraedge.git?rev=v0.22.1" },
+    { name = "libraedge", marker = "extra == 'offline'", git = "https://github.com/marianocappucci/libraedge.git?rev=v0.23.0" },
+    { name = "libraedge", extras = ["server"], marker = "extra == 'offline-server'", git = "https://github.com/marianocappucci/libraedge.git?rev=v0.23.0" },
     { name = "openpyxl", marker = "extra == 'dev'", specifier = ">=3.1,<4" },
     { name = "openpyxl", marker = "extra == 'planillas'", specifier = ">=3.1,<4" },
     { name = "pydantic", marker = "extra == 'dev'", specifier = ">=2,<3" },
@@ -711,8 +711,8 @@ provides-extras = ["dev", "erp", "migrations", "offline", "offline-server", "pla
 
 [[package]]
 name = "libracore"
-version = "1.192.1"
-source = { git = "https://github.com/marianocappucci/libracore.git?rev=v1.192.1#e95efde11d03a7627b0ae891ff39261f7b2f930d" }
+version = "1.194.0"
+source = { git = "https://github.com/marianocappucci/libracore.git?rev=v1.194.0#1b42e5599126c02f7bad598775f2a6c2fb0375c9" }
 dependencies = [
     { name = "cryptography" },
     { name = "fastapi" },
@@ -736,8 +736,8 @@ migrations = [
 
 [[package]]
 name = "libraedge"
-version = "0.22.1"
-source = { git = "https://github.com/marianocappucci/libraedge.git?rev=v0.22.1#8c74233289d8fbdbce03e4dda51ab1a65891da5b" }
+version = "0.23.0"
+source = { git = "https://github.com/marianocappucci/libraedge.git?rev=v0.23.0#a6e94771d73e792bab6c482746f67ab2ea79144f" }
 
 [package.optional-dependencies]
 server = [

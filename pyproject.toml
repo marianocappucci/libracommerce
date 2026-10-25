@@ -173,7 +173,8 @@ dev = [
     # v1.190.1 -> v1.191.0 (2026-10-23): cola de comprobantes del nodo offline (cola_arca, ADR-079). Migracion 0029 aditiva.
     # v1.191.0 -> v1.192.0 (2026-10-24): costuras de caja: corregir, extra y gancho del central (ADR-080). Sin migracion.
     # v1.192.0 -> v1.192.1 (2026-10-24): un ciclo con el candado del esquema da deadlock en 1 s, no a los 120 s (ADR-081). Sin migracion.
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.192.1",
+    # v1.192.1 -> v1.194.0 (2026-10-25): unir-bases con libraauth en el core (ADR-082), GestioLibra y MedLibra de una sola base y tabla de modulos del producto (ADR-083). Sin migracion.
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.194.0",
     # SOLO PARA TESTS, como libracore: `tests/test_auditoria_formato_libraauth.py` compara
     # las filas de `RepositorioAuditado` con las de `libraauth.auditoria.registrador_dbapi`
     # (ADR-050). En runtime este motor no importa libraauth: el registrador lo pasa el producto.
@@ -197,8 +198,9 @@ dev = [
 # definitivo (ADR-021): es lo que usa `cliente.alta` (ADR-070 de este motor). `init_schema` crea `libraedge_mapeo`. Sin migracion.
 # v0.18.0 -> v0.22.0 (2026-10-24): ticket de ARCA por servicio y LibraCargo/LibraClub en el instalador (ADR-025). Sin migracion.
 # v0.22.0 -> v0.22.1 (2026-10-24): LibraCargo y LibraClub en el instalador publicado. Sin migracion.
-offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@v0.22.1"]
-offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@v0.22.1"]
+# v0.22.1 -> v0.23.0 (2026-10-25): ids provisorios de texto, tabla libraedge_mapeo_texto (ADR-026). Sin migracion de los productos.
+offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@v0.23.0"]
+offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@v0.23.0"]
 
 [project.scripts]
 # `migrations/` vive ADENTRO de `libracommerce/` para entrar en el wheel: un
