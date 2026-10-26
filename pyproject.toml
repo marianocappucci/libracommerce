@@ -203,8 +203,9 @@ dev = [
 # v0.22.1 -> v0.23.0 (2026-10-25): ids provisorios de texto, tabla libraedge_mapeo_texto (ADR-026). Sin migracion de los productos.
 # v0.23.0 -> v0.24.1 (2026-10-25): instalador publicado de GestioLibra y MedLibra (ADR-027). Sin migracion.
 # v0.24.1 -> v0.24.3 (2026-10-25): VentaLibra sin la variable del core en el instalador. Sin migracion.
-offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@v0.24.3"]
-offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@v0.24.3"]
+# v0.24.3 -> v0.25.0 (2026-10-25): el nodo cierra solo lo que se resolvio en el central (ADR-028). Sin migracion.
+offline = ["libraedge @ git+https://github.com/marianocappucci/libraedge.git@v0.25.0"]
+offline-server = ["libraedge[server] @ git+https://github.com/marianocappucci/libraedge.git@v0.25.0"]
 
 [project.scripts]
 # `migrations/` vive ADENTRO de `libracommerce/` para entrar en el wheel: un
