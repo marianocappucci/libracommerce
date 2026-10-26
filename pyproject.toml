@@ -177,7 +177,8 @@ dev = [
     # v1.194.0 -> v1.195.0 (2026-10-25): conexion del nodo sin PuertoDeVentas, 202 unico y alta sin la variable del core (ADR-084). Sin migracion.
     # v1.195.0 -> v1.195.1 (2026-10-25): sin los historicos del core de GestioLibra y MedLibra ni la excepcion de VentaLibra (addendum ADR-084). Sin migracion.
     # v1.195.1 -> v1.196.0 (2026-10-26): indices de ajuste (ADR-085, migracion 0030), periodos de contrato y mora (ADR-086).
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.196.0",
+    # v1.196.0 -> v1.196.1 (2026-10-26): periodo_anclado y sumar_meses publicos (addendum ADR-086). Sin migracion.
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.196.1",
     # SOLO PARA TESTS, como libracore: `tests/test_auditoria_formato_libraauth.py` compara
     # las filas de `RepositorioAuditado` con las de `libraauth.auditoria.registrador_dbapi`
     # (ADR-050). En runtime este motor no importa libraauth: el registrador lo pasa el producto.
