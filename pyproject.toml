@@ -184,7 +184,8 @@ dev = [
     # v1.197.1 -> v1.197.2 (2026-10-26): el lector de migraciones falla cerrado ante configure(**...). Sin migracion.
     # v1.197.2 -> v1.197.3 (2026-10-27): HTTPS forzado y HTTP/2 tras el alta con certificado (NPM 2.16). Sin migracion.
     # v1.197.3 -> v1.198.0 (2026-10-27): la moneda del libro de terceros y del recibo (ADR-088). Migracion 0031 aditiva.
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.198.0",
+    # v1.198.0 -> v1.199.0 (2026-10-27): el producto puede impedir la baja de un cliente (impide_desactivar). Sin migracion.
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.199.0",
     # SOLO PARA TESTS, como libracore: `tests/test_auditoria_formato_libraauth.py` compara
     # las filas de `RepositorioAuditado` con las de `libraauth.auditoria.registrador_dbapi`
     # (ADR-050). En runtime este motor no importa libraauth: el registrador lo pasa el producto.
