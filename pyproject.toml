@@ -89,7 +89,12 @@ dev = [
     # tests/test_migraciones_alembic.py, los contratos en test_erp_hooks.py.
     "libracommerce[migrations,erp,web,planillas]",
     # Para el test que construye el wheel y lo abre (test_migrar_modulo.py).
+    # El backend va acá también porque el test construye con `--no-isolation`:
+    # el entorno aislado bajaba setuptools de PyPI en cada corrida y una
+    # descarga cortada lo hacía fallar por hash (CI del 2026-10-19).
     "build>=1.2",
+    "hatchling",
+    "hatch-vcs",
     # TestClient de FastAPI para ejercitar las factories de router por HTTP.
     "httpx>=0.27",
     "pytest-cov>=6",
