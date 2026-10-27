@@ -62,11 +62,17 @@ def test_la_tabla_de_version_es_propia_y_coincide_con_el_env():
 
 def test_las_migraciones_viajan_en_el_wheel(tmp_path):
     """Se construye el wheel y se abre. `build` está en el extra `dev` para que
-    el CI no saltee esto: un skip acá se lee igual que un verde."""
+    el CI no saltee esto: un skip acá se lee igual que un verde.
+
+    `--no-isolation` usa el `hatchling` del entorno (también en `dev`, fijado
+    por el lock) en vez de armar un entorno aislado que baja el backend de
+    PyPI en cada corrida: una descarga cortada fallaba por hash y el test se
+    leía como intermitente (CI del 2026-10-19)."""
     pytest.importorskip("build", reason="falta `build` en el extra dev")
     salida = tmp_path / "dist"
     proceso = subprocess.run(
-        [sys.executable, "-m", "build", "--wheel", "--outdir", str(salida), str(RAIZ)],
+        [sys.executable, "-m", "build", "--wheel", "--no-isolation", "--outdir", str(salida),
+         str(RAIZ)],
         capture_output=True,
         text=True,
     )
