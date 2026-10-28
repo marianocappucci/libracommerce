@@ -194,7 +194,8 @@ dev = [
     # v1.200.0 -> v1.201.0 (2026-10-28): nota de credito con motivo y emision sin HTTP (ADR-089). Sin migracion.
     # v1.201.0 -> v1.202.0 (2026-10-28): libracore.avisos: WhatsApp por Evolution, mail y registro (ADR-090). Migracion 0032 (avisos_envios).
     # v1.202.0 -> v1.202.1 (2026-10-28): avisos: la demo no manda mails y espera entre reintentos (addendum ADR-090). Sin migracion.
-    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.202.1",
+    # v1.202.1 -> v1.203.0 (2026-10-28): librafarma en _UNA_SOLA_BASE (LibraFarma, F0). Sin migracion.
+    "libracore @ git+https://github.com/marianocappucci/libracore.git@v1.203.0",
     # SOLO PARA TESTS, como libracore: `tests/test_auditoria_formato_libraauth.py` compara
     # las filas de `RepositorioAuditado` con las de `libraauth.auditoria.registrador_dbapi`
     # (ADR-050). En runtime este motor no importa libraauth: el registrador lo pasa el producto.
