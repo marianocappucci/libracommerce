@@ -264,7 +264,61 @@ def test_volver_a_aplicar_la_carga_guarda_la_sucursal_sin_mover_stock(stock_punt
     assert _sucursal_guardada(nodo) == SUCURSAL_DEL_NODO
     assert _filas(nodo, "SELECT * FROM stock_movements ORDER BY id") == ledger
     assert _cargar(nodo, _traer(central))["ajustes"] == 0                                    # idempotente
-    assert len(_filas(nodo, "SELECT clave FROM nodo_local")) == 1
+    assert len(_filas(nodo, "SELECT clave FROM nodo_local")) == 2                             # la sucursal y su nombre
+
+
+def _nombre_de_la_sucursal(base):
+    with base.abrir() as conn:
+        return offline_stock.nombre_de_la_sucursal_del_nodo(conn)
+
+
+def test_la_carga_trae_el_nombre_de_la_sucursal_y_el_nodo_lo_guarda(stock_puntas):
+    """Para la barra de estado del pie (decisión del humano del 2026-10-28): en la PC del local, la sucursal de ese nodo."""
+    nodo, central = stock_puntas
+    with central.abrir() as conn:
+        nombre = conn.execute("SELECT name FROM branches WHERE id = ?", (SUCURSAL_DEL_NODO,)).fetchone()[0]
+        assert offline_stock.carga_inicial_del_central(conn, NODO_ID, "2")["sucursal_nombre"] == nombre
+        assert offline_stock.carga_inicial_del_central(conn, NODO_ID, "77")["sucursal_nombre"] is None     # una que no existe
+    assert _nombre_de_la_sucursal(nodo) is None                                                        # sin carga, nada
+    _nodo_vinculado(nodo, central)
+    assert _nombre_de_la_sucursal(nodo) == nombre
+
+
+def test_sin_el_nombre_guardado_lo_busca_en_el_espejo_y_si_no_esta_no_inventa(stock_puntas):
+    """Un nodo cargado antes de v0.74.0 guardó sólo el id: el nombre sale de `branches`, y si tampoco está, `None`."""
+    nodo, central = stock_puntas
+    _nodo_vinculado(nodo, central)
+    with nodo.abrir() as conn:
+        conn.execute("DELETE FROM nodo_local WHERE clave = 'sucursal_nombre'")
+        conn.execute("UPDATE branches SET name = 'Sucursal del espejo' WHERE id = ?", (SUCURSAL_DEL_NODO,))
+        conn.commit()
+    assert _nombre_de_la_sucursal(nodo) == "Sucursal del espejo"
+    with nodo.abrir() as conn:
+        conn.execute("UPDATE nodo_local SET valor = '99' WHERE clave = 'sucursal_id'")
+        conn.commit()
+    assert _nombre_de_la_sucursal(nodo) is None
+
+
+def test_un_central_que_no_manda_el_nombre_borra_el_de_otra_sucursal(stock_puntas):
+    nodo, central = stock_puntas
+    _nodo_vinculado(nodo, central)
+
+    def sin_nombre():
+        carga = _traer(central, "1")()
+        del carga["sucursal_nombre"]
+        return carga
+
+    assert _cargar(nodo, sin_nombre)["hecha"] and _sucursal_guardada(nodo) == 1
+    assert _filas(nodo, "SELECT valor FROM nodo_local WHERE clave = 'sucursal_nombre'") == []
+
+
+def test_la_sucursal_de_la_barra_prefiere_la_del_usuario_y_en_un_nodo_cae_a_la_del_nodo(stock_puntas):
+    nodo, central = stock_puntas
+    _nodo_vinculado(nodo, central)
+    en_el_nodo = offline_stock.sucursal_de_la_barra(nodo.abrir, lambda: True)
+    assert en_el_nodo({"sucursal_nombre": "La del selector"}) == "La del selector"
+    assert en_el_nodo({"username": "cajero"}) == _nombre_de_la_sucursal(nodo)
+    assert offline_stock.sucursal_de_la_barra(nodo.abrir, lambda: False)({"username": "cajero"}) is None    # fuera de un nodo, nada
 
 
 def test_si_el_nodo_cambia_de_sucursal_la_nueva_carga_pisa_la_guardada(stock_puntas):

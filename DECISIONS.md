@@ -2403,3 +2403,23 @@ Todas las corridas sin error dejaron la base idéntica a la esperada (mismas tab
 **Tests.** `tests/test_esquema_en_paralelo.py`: el entrelazado de LibraClub con dos conexiones y `init_core_schema` real (`crear_venta_links` y `crear_cliente_lista_precio`; sin el arreglo falla con el `TimeoutError` del candado de LibraCommerce con libracore anterior y con `deadlock detected` con el v1.192.1), el orden función por función (con el candado del core ocupado, la función espera **sin tener el suyo**: cinco funciones) y la reentrancia. Los 7 que prueban el orden y el entrelazado fallan sin el arreglo.
 
 **Cómo se adopta** (v0.73.1: parche, sin migración, sin cambio de esquema). Subir el pin. Los productos que mitigaron con `una_vez_al_arrancar` pueden dejarlo: es inofensivo.
+
+## ADR-074 — El nombre de la sucursal del nodo viaja con la carga inicial: `nombre_de_la_sucursal_del_nodo` (2026-10-28)
+
+**Problema.** La barra de estado del pie (libracore ADR-075) muestra la sucursal de quien mira, y en la PC del local
+(un nodo) el usuario no la trae: el producto no tenía de dónde sacarla. Decisión del humano (2026-10-28): «donde hay
+selector, la elegida; en la PC del local, la sucursal de ese nodo; en el resto no se muestra».
+
+**Qué ya existía.** El nodo guarda el **id** de su sucursal en `nodo_local` al hacer la carga inicial (v0.72.0,
+`sucursal_guardada_del_nodo`), pero no su nombre, y `branches` no está entre las tablas que espejan los productos.
+
+**Decisión.**
+1. `carga_inicial_del_central` suma `sucursal_nombre` (el `name` de `branches`, o `None`). Aditivo: la `version` sigue en
+   1; un central anterior no lo manda y un nodo anterior no lo lee.
+2. `guardar_sucursal_del_nodo(conn, id, nombre=None)` lo guarda con la clave `sucursal_nombre` de la misma tabla (sin
+   revisión nueva). Sin nombre **borra** el que hubiera: sería el de otra sucursal.
+3. `nombre_de_la_sucursal_del_nodo(conn)`: el guardado; si no hay (un nodo cargado antes), el de `branches` por el id,
+   si el espejo lo tiene; si no, `None`. **Mejor no mostrar nada que una sucursal equivocada.**
+4. `sucursal_de_la_barra(conectar, es_nodo)` arma el `sucursal=` de `build_estado_del_sistema_router`: la del usuario si
+   la trae (el selector), y si no y es un nodo, la de esta función. Una sola vez acá y no copiada en los cuatro productos con
+   nodo y stock (ContaLibra, RestoLibra, VentaLibra, LibraClub). libracore no cambia.
