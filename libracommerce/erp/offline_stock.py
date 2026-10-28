@@ -96,7 +96,9 @@ Al vincular, el nodo trae las existencias de **su** sucursal del central; desde 
   ```
 
   `sucursal_id` (aditivo desde v0.72.0, la `version` sigue en 1) es la sucursal del nodo según `node_identity`: el nodo la guarda (ver «El depósito
-  por defecto de un nodo»). Un central anterior no la manda y un nodo anterior no la lee: no hay nada que romper.
+  por defecto de un nodo»). Un central anterior no la manda y un nodo anterior no la lee: no hay nada que romper. `sucursal_nombre` (aditivo
+  desde v0.74.0) es su nombre en `branches`: el nodo lo guarda al lado para mostrarlo (la barra de estado del pie, libracore ADR-075), y
+  `nombre_de_la_sucursal_del_nodo(conn)` lo devuelve.
 
 - En el nodo, `aplicar_carga_inicial(conn, traer) -> dict` es lo que LibraEdge llama
   (`LIBRAEDGE_CARGA_INICIAL=libracommerce.erp.offline_stock:aplicar_carga_inicial`). `conn` es la conexión del nodo (ya abierta, **sin
@@ -225,6 +227,8 @@ NOTA_CARGA_INICIAL_AJENO = "Carga inicial: depósito de otra sucursal, a cero"
 #: La tabla de la revisión `0009_sucursal_del_nodo` donde el nodo guarda lo suyo (`clave`, `valor`) y la clave de su sucursal.
 TABLA_NODO_LOCAL = "nodo_local"
 CLAVE_SUCURSAL = "sucursal_id"
+#: El nombre de esa sucursal, para mostrarlo (v0.74.0). Una clave más de la misma tabla: no hace falta otra revisión.
+CLAVE_SUCURSAL_NOMBRE = "sucursal_nombre"
 
 #: Los `source_type` de las filas que viajan con una venta y por eso no suben como `stock.movimiento`.
 _ORIGENES_DE_VENTA = ("venta", "sale", "sale_return")
@@ -464,14 +468,36 @@ def _exigir_nodo_local(conn) -> None:
         )
 
 
-def guardar_sucursal_del_nodo(conn, sucursal_id) -> None:
-    """Deja `sucursal_id` como la sucursal del nodo (la pisa si ya había otra). No commitea: es de quien llama. `NodoSinRevision` si falta la `0009`."""
+def guardar_sucursal_del_nodo(conn, sucursal_id, nombre: str | None = None) -> None:
+    """Deja `sucursal_id` como la sucursal del nodo (la pisa si ya había otra), y su `nombre` si viene. Sin nombre se borra el que hubiera: sería
+    el de otra sucursal. No commitea: es de quien llama. `NodoSinRevision` si falta la `0009`."""
     sucursal = _id_de_sucursal(sucursal_id)
     _exigir_nodo_local(conn)
-    conn.execute(
-        f"INSERT INTO {TABLA_NODO_LOCAL} (clave, valor) VALUES (?, ?) ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor",
-        (CLAVE_SUCURSAL, str(sucursal)),
-    )
+    sql = f"INSERT INTO {TABLA_NODO_LOCAL} (clave, valor) VALUES (?, ?) ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor"
+    conn.execute(sql, (CLAVE_SUCURSAL, str(sucursal)))
+    nombre = (nombre or "").strip()
+    if nombre:
+        conn.execute(sql, (CLAVE_SUCURSAL_NOMBRE, nombre))
+    else:
+        conn.execute(f"DELETE FROM {TABLA_NODO_LOCAL} WHERE clave = ?", (CLAVE_SUCURSAL_NOMBRE,))
+
+
+def nombre_de_la_sucursal_del_nodo(conn) -> str | None:
+    """El nombre de la sucursal del nodo, para mostrarlo (la barra de estado del pie: libracore ADR-075, decisión del humano del 2026-10-28
+    «en la PC del local, la sucursal de ese nodo»). El que guardó la carga inicial; si no hay (un nodo cargado antes de v0.74.0), el de
+    `branches` por el id guardado, si el espejo la tiene. `None` sin sucursal guardada o sin la `0009`: mejor no mostrar nada que una sucursal
+    equivocada. Es una lectura."""
+    sucursal = sucursal_guardada_del_nodo(conn)
+    if sucursal is None:
+        return None
+    fila = conn.execute(f"SELECT valor FROM {TABLA_NODO_LOCAL} WHERE clave = ?", (CLAVE_SUCURSAL_NOMBRE,)).fetchone()
+    if fila is not None and str(fila[0]).strip():
+        return str(fila[0]).strip()
+    if _tiene_tabla(conn, "branches"):
+        fila = conn.execute("SELECT name FROM branches WHERE id = ?", (sucursal,)).fetchone()
+        if fila is not None and str(fila[0] or "").strip():
+            return str(fila[0]).strip()
+    return None
 
 
 def deposito_por_defecto_del_nodo(outbox: Outbox) -> Callable[[Any], int | None]:
@@ -749,8 +775,8 @@ def _cantidad_en_texto(cantidad: Decimal) -> str:
 
 def carga_inicial_del_central(conn, node_id: str, branch_id) -> dict:
     """Las existencias de la sucursal `branch_id` del nodo `node_id`, para que el nodo las traiga al vincularse. JSON puro:
-    `{"version", "sucursal_id", "depositos": [{"id", "nombre", "activo"}], "saldos": [{"item_id", "variant_id", "location_id", "lote", "vence", "cantidad"}],
-    "corte": {"movimiento_id", "a"}}`.
+    `{"version", "sucursal_id", "sucursal_nombre", "depositos": [{"id", "nombre", "activo"}], "saldos": [{"item_id", "variant_id", "location_id",
+    "lote", "vence", "cantidad"}], "corte": {"movimiento_id", "a"}}`.
 
     Los saldos son los de `erp.lotes.saldos_por_bucket` sobre todos los depósitos de la sucursal (activos o no: las existencias de un depósito
     dado de baja siguen existiendo), con el lote y el vencimiento normalizados y sin los saldos en cero. `corte` dice hasta qué fila del ledger
@@ -772,7 +798,9 @@ def carga_inicial_del_central(conn, node_id: str, branch_id) -> dict:
                            "cantidad": _cantidad_en_texto(saldo)})
         corte_id = conn.execute(f"SELECT MAX(id) FROM stock_movements WHERE location_id IN ({marcadores})", ids).fetchone()[0]
     logger.info("carga inicial del nodo %s (sucursal %s): %d depósitos, %d saldos", node_id, sucursal, len(depositos), len(saldos))
-    return {"version": VERSION_CARGA_INICIAL, "sucursal_id": sucursal, "depositos": depositos, "saldos": saldos,
+    fila = conn.execute("SELECT name FROM branches WHERE id = ?", (sucursal,)).fetchone() if _tiene_tabla(conn, "branches") else None
+    return {"version": VERSION_CARGA_INICIAL, "sucursal_id": sucursal, "sucursal_nombre": fila[0] if fila else None,
+            "depositos": depositos, "saldos": saldos,
             "corte": {"movimiento_id": corte_id, "a": hora.ahora_utc().isoformat()}}
 
 
@@ -895,7 +923,7 @@ def aplicar_carga_inicial(conn, traer: Callable[[], Mapping[str, Any]]) -> dict:
                 (item, variante, deposito, "adjustment", _cantidad_en_texto(delta), ocurrido, lote, vence, nota, MOTIVO_CARGA_INICIAL),
             )
     if sucursal is not None:
-        guardar_sucursal_del_nodo(conn, sucursal)
+        guardar_sucursal_del_nodo(conn, sucursal, datos.get("sucursal_nombre"))
     logger.info("carga inicial: %d ajustes (%d a cero de depósitos ajenos) sobre %d buckets del central (sucursal del nodo: %s)",
                 len(deltas) + len(ajenos), len(ajenos), len(centrales), sucursal)
     return {"hecha": True, "motivo": None, "ajustes": len(deltas) + len(ajenos), "ajustes_ajenos": len(ajenos), "buckets": len(centrales)}
