@@ -460,6 +460,23 @@ def sucursal_guardada_del_nodo(conn) -> int | None:
         return None
 
 
+def sucursal_de_la_barra(conectar: Callable[[], Any], es_nodo: Callable[[], bool]) -> Callable[[dict], str | None]:
+    """El `sucursal=` de `libracore.estado_del_sistema.build_estado_del_sistema_router` para un producto con nodos (ADR-074): la sucursal
+    que trae el usuario (`sucursal_por_defecto`: la del selector, donde lo hay); si no trae y esta instancia es un nodo, la del nodo
+    (`nombre_de_la_sucursal_del_nodo`); si no, `None`. `conectar()` es la conexión del producto (un context manager) y `es_nodo()` lo de su
+    `CONEXION`: se leen en cada pedido."""
+    from libracore.estado_del_sistema import sucursal_por_defecto
+
+    def sucursal(usuario: dict) -> str | None:
+        propia = sucursal_por_defecto(usuario)
+        if propia or not es_nodo():
+            return propia
+        with conectar() as conn:
+            return nombre_de_la_sucursal_del_nodo(conn)
+
+    return sucursal
+
+
 def _exigir_nodo_local(conn) -> None:
     if not tiene_nodo_local(conn):
         raise NodoSinRevision(

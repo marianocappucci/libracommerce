@@ -2420,5 +2420,6 @@ selector, la elegida; en la PC del local, la sucursal de ese nodo; en el resto n
    revisión nueva). Sin nombre **borra** el que hubiera: sería el de otra sucursal.
 3. `nombre_de_la_sucursal_del_nodo(conn)`: el guardado; si no hay (un nodo cargado antes), el de `branches` por el id,
    si el espejo lo tiene; si no, `None`. **Mejor no mostrar nada que una sucursal equivocada.**
-4. El producto la usa en el `sucursal=` de `build_estado_del_sistema_router`: la del usuario si la trae, y en un nodo
-   la de esta función. libracore no cambia.
+4. `sucursal_de_la_barra(conectar, es_nodo)` arma el `sucursal=` de `build_estado_del_sistema_router`: la del usuario si
+   la trae (el selector), y si no y es un nodo, la de esta función. Una sola vez acá y no copiada en los cuatro productos con
+   nodo y stock (ContaLibra, RestoLibra, VentaLibra, LibraClub). libracore no cambia.

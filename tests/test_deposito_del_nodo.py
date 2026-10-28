@@ -312,6 +312,15 @@ def test_un_central_que_no_manda_el_nombre_borra_el_de_otra_sucursal(stock_punta
     assert _filas(nodo, "SELECT valor FROM nodo_local WHERE clave = 'sucursal_nombre'") == []
 
 
+def test_la_sucursal_de_la_barra_prefiere_la_del_usuario_y_en_un_nodo_cae_a_la_del_nodo(stock_puntas):
+    nodo, central = stock_puntas
+    _nodo_vinculado(nodo, central)
+    en_el_nodo = offline_stock.sucursal_de_la_barra(nodo.abrir, lambda: True)
+    assert en_el_nodo({"sucursal_nombre": "La del selector"}) == "La del selector"
+    assert en_el_nodo({"username": "cajero"}) == _nombre_de_la_sucursal(nodo)
+    assert offline_stock.sucursal_de_la_barra(nodo.abrir, lambda: False)({"username": "cajero"}) is None    # fuera de un nodo, nada
+
+
 def test_si_el_nodo_cambia_de_sucursal_la_nueva_carga_pisa_la_guardada(stock_puntas):
     nodo, central = stock_puntas
     assert _cargar(nodo, _traer(central, "1"))["hecha"] and _sucursal_guardada(nodo) == 1
