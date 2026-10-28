@@ -651,8 +651,8 @@ wheels = [
 
 [[package]]
 name = "libraauth"
-version = "0.55.0"
-source = { git = "https://github.com/marianocappucci/libraauth.git?rev=v0.55.0#251a8e9fb809a1d3f0137ad89fcd01cfe30163ea" }
+version = "0.56.0"
+source = { git = "https://github.com/marianocappucci/libraauth.git?rev=v0.56.0#17641ce774a9cf175ccf92b5737b831cb7d16ce3" }
 dependencies = [
     { name = "altcha" },
     { name = "argon2-cffi" },
@@ -719,7 +719,7 @@ requires-dist = [
     { name = "hatch-vcs", marker = "extra == 'dev'" },
     { name = "hatchling", marker = "extra == 'dev'" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
-    { name = "libraauth", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libraauth.git?rev=v0.55.0" },
+    { name = "libraauth", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libraauth.git?rev=v0.56.0" },
     { name = "libracore", marker = "extra == 'dev'", specifier = ">=1.125,<2" },
     { name = "libracore", marker = "extra == 'dev'", specifier = ">=1.189,<2" },
     { name = "libracore", marker = "extra == 'dev'", git = "https://github.com/marianocappucci/libracore.git?rev=v1.200.0" },
